@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import json
 import math
 import os
 import re
@@ -242,11 +243,29 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Prepare run directories and setup files without executing PHANTOM.",
     )
+    parser.add_argument(
+        "--saltelli-n",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Use SALib Saltelli/Sobol sample design with base size N (ignores --num-samples for layout). "
+            "Approximate PHANTOM runs: N*(D+2), or N*(2*D+2) with --saltelli-calc-second-order (D=varying dims)."
+        ),
+    )
+    parser.add_argument(
+        "--saltelli-calc-second-order",
+        action="store_true",
+        help="Also estimate second-order Sobol indices (requires more runs). For use with Analysis.py.",
+    )
     return parser.parse_args()
 
 
 def validate_args(args: argparse.Namespace) -> None:
-    if args.num_samples < 1:
+    if args.saltelli_n is not None:
+        if args.saltelli_n < 2:
+            raise ValueError("saltelli-n must be >= 2")
+    elif args.num_samples < 1:
         raise ValueError("num-samples must be >= 1")
     if args.batch_slug_max_len < 9:
         raise ValueError("batch-slug-max-len must be >= 9 (room for hash suffix when truncating)")
@@ -416,6 +435,56 @@ def sample_column_order(args: argparse.Namespace) -> List[str]:
     return order
 
 
+def build_salib_problem(args: argparse.Namespace) -> Dict[str, object]:
+    """SALib problem dict; parameter order matches Saltelli rows and RunSample mapping."""
+    names: List[str] = []
+    bounds: List[List[float]] = []
+    if not args.no_vary_mass:
+        names.append("mass_input_kg")
+        bounds.append([float(args.mass_min_kg), float(args.mass_max_kg)])
+    for param, lo, hi, _ in _active_scale_variations(args):
+        names.append(param)
+        bounds.append([float(lo), float(hi)])
+    if args.vary_use_dem:
+        names.append("use_dem")
+        bounds.append([0.0, 1.0])
+    if args.vary_apophis_only:
+        names.append("apophis_only")
+        bounds.append([0.0, 1.0])
+    dim = len(names)
+    if dim == 0:
+        raise ValueError("Saltelli mode needs at least one varying dimension")
+    return {"num_vars": dim, "names": names, "bounds": bounds}
+
+
+def run_sample_from_salib_row(row: Sequence[float], args: argparse.Namespace) -> RunSample:
+    """Build RunSample from one SALib Sobol row (physical bounds)."""
+    s = RunSample()
+    i = 0
+    if not args.no_vary_mass:
+        s.mass_kg = float(row[i])
+        i += 1
+    for param, _, _, _ in _active_scale_variations(args):
+        setattr(s, param, float(row[i]))
+        i += 1
+    if args.vary_use_dem:
+        s.use_dem = float(row[i]) >= 0.5
+        i += 1
+    if args.vary_apophis_only:
+        s.apophis_only = float(row[i]) >= 0.5
+        i += 1
+    if i != len(row):
+        raise RuntimeError(f"internal error: saltelli row consumed {i} values but width is {len(row)}")
+    return s
+
+
+def expected_saltelli_num_evals(num_vars: int, base_n: int, calc_second_order: bool) -> int:
+    """Match SALib.sample.sobol.sample row count."""
+    if calc_second_order:
+        return base_n * (2 * num_vars + 2)
+    return base_n * (num_vars + 2)
+
+
 def _fmt_slug_float(x: float) -> str:
     """Format a float for use in batch directory names (letters, digits, ., -, _)."""
     return _SLUG_SAFE_RE.sub("", f"{x:.10g}")
@@ -426,6 +495,8 @@ def canonical_sweep_descriptor(args: argparse.Namespace) -> str:
     parts = [
         f"num_samples={args.num_samples}",
         f"seed={args.seed}",
+        f"saltelli_n={getattr(args, 'saltelli_n', None)}",
+        f"saltelli_second={getattr(args, 'saltelli_calc_second_order', False)}",
         f"no_vary_mass={args.no_vary_mass}",
     ]
     if not args.no_vary_mass:
@@ -440,7 +511,13 @@ def canonical_sweep_descriptor(args: argparse.Namespace) -> str:
 
 def build_auto_batch_sweep_slug(args: argparse.Namespace, max_len: int) -> str:
     """Sweep suffix from CLI: sample count, seed, each varied dimension and its bounds."""
-    tokens: List[str] = [f"n{args.num_samples}", f"s{args.seed}"]
+    if args.saltelli_n is not None:
+        tok_n = f"salt{args.saltelli_n}"
+        if args.saltelli_calc_second_order:
+            tok_n += "s2"
+    else:
+        tok_n = f"n{args.num_samples}"
+    tokens: List[str] = [tok_n, f"s{args.seed}"]
     if not args.no_vary_mass:
         tokens.append(
             f"m{_fmt_slug_float(args.mass_min_kg)}-{_fmt_slug_float(args.mass_max_kg)}"
@@ -732,12 +809,52 @@ def main() -> int:
     base_dir = Path(args.base_dir).resolve()
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
+    problem: Optional[Dict[str, object]] = None
+    saltelli_meta: Optional[Dict[str, object]] = None
+    X_saltelli: Optional[Any] = None
+
     try:
         validate_args(args)
         batch_basename = build_batch_directory_basename(args, timestamp)
         output_root = Path(args.output_root).resolve() / batch_basename
-        samples = build_run_samples(args.num_samples, args)
+
+        if args.saltelli_n is not None:
+            problem = build_salib_problem(args)
+            try:
+                from SALib.sample import sobol as sobol_sample
+            except ImportError as exc:
+                raise RuntimeError("Saltelli mode requires SALib (pip install -r requirements.txt)") from exc
+            X_saltelli = sobol_sample.sample(
+                problem,
+                args.saltelli_n,
+                calc_second_order=args.saltelli_calc_second_order,
+                seed=args.seed,
+            )
+            samples = [run_sample_from_salib_row(X_saltelli[i], args) for i in range(len(X_saltelli))]
+            ne = expected_saltelli_num_evals(
+                int(problem["num_vars"]), args.saltelli_n, args.saltelli_calc_second_order
+            )
+            if len(samples) != ne:
+                raise RuntimeError(f"internal error: expected {ne} Saltelli rows, got {len(samples)}")
+            saltelli_meta = {
+                "base_n": args.saltelli_n,
+                "calc_second_order": args.saltelli_calc_second_order,
+                "num_evals": ne,
+                "num_vars": problem["num_vars"],
+                "seed": args.seed,
+            }
+        else:
+            samples = build_run_samples(args.num_samples, args)
+
         base_setup, base_input, phantomsetup_bin, phantom_bin = preflight(args, base_dir, output_root)
+
+        if args.saltelli_n is not None and problem is not None and saltelli_meta is not None:
+            (output_root / "saltelli_problem.json").write_text(
+                json.dumps(problem, indent=2), encoding="utf-8"
+            )
+            (output_root / "saltelli_meta.json").write_text(
+                json.dumps(saltelli_meta, indent=2), encoding="utf-8"
+            )
     except Exception as exc:
         print(f"[ERROR] {exc}", file=sys.stderr)
         return 1
@@ -747,7 +864,16 @@ def main() -> int:
     summary_csv = output_root / "sobol_mass_outputs.csv"
     write_samples_csv(samples_csv, samples, col_order)
     print(f"[INFO] Wrote Sobol sample table: {samples_csv}")
-    print(f"[INFO] Varying dimensions ({count_dimensions(args)}): {', '.join(col_order)}")
+    dim_msg = f"Varying dimensions ({count_dimensions(args)}): {', '.join(col_order)}"
+    if args.saltelli_n is not None and saltelli_meta is not None:
+        print(
+            f"[INFO] Saltelli mode: base_n={args.saltelli_n} evals={saltelli_meta['num_evals']} "
+            f"second_order={args.saltelli_calc_second_order}; {dim_msg}"
+        )
+    else:
+        print(f"[INFO] {dim_msg}")
+
+    saltelli_y_rows: List[Dict[str, object]] = []
 
     for idx, sample in enumerate(samples, start=1):
         mass_str = f"{sample.mass_kg:.6e} kg" if sample.mass_kg is not None else "(template mass)"
@@ -769,7 +895,53 @@ def main() -> int:
         append_summary(summary_csv, result, write_header=(idx == 1), param_column_order=col_order)
         print(f"[INFO]   status={result.status} run_dir={result.run_dir}")
 
+        if args.saltelli_n is not None:
+            saltelli_y_rows.append(
+                {
+                    "eval_index": idx - 1,
+                    "run_id": idx,
+                    "closest_approach_km": result.closest_approach_km,
+                    "closest_approach_au": result.closest_approach_au,
+                    "status": result.status,
+                }
+            )
+
     print(f"[INFO] Summary written to: {summary_csv}")
+
+    if args.saltelli_n is not None and X_saltelli is not None and problem is not None:
+        manifest_path = output_root / "saltelli_eval_manifest.csv"
+        names = list(problem["names"])
+        with manifest_path.open("w", newline="", encoding="utf-8") as mf:
+            mw = csv.writer(mf)
+            mw.writerow(["eval_index", "run_id", *names])
+            for j in range(len(samples)):
+                row_vals = [float(X_saltelli[j, k]) for k in range(int(problem["num_vars"]))]
+                mw.writerow([j, j + 1, *row_vals])
+        print(f"[INFO] Wrote Saltelli eval manifest: {manifest_path}")
+
+        y_path = output_root / "saltelli_Y.csv"
+        y_fields = ["eval_index", "run_id", "closest_approach_km", "closest_approach_au", "status"]
+        with y_path.open("w", newline="", encoding="utf-8") as yf:
+            yw = csv.DictWriter(yf, fieldnames=y_fields)
+            yw.writeheader()
+            for row in saltelli_y_rows:
+                yw.writerow(row)
+        print(f"[INFO] Wrote Saltelli model outputs (evaluation order): {y_path}")
+        prob_p = (output_root / "saltelli_problem.json").resolve()
+        meta_p = (output_root / "saltelli_meta.json").resolve()
+        print(
+            "[INFO] Sobol indices: python3 Analysis/Analysis.py --method saltelli \\\n"
+            f"       --sobol-problem-json {prob_p} \\\n"
+            f"       --saltelli-meta-json {meta_p} \\\n"
+            f"       --saltelli-y-csv {y_path.resolve()} \\\n"
+            "       --saltelli-y-column closest_approach_au"
+            + (
+                " \\\n       --saltelli-calc-second-order"
+                if args.saltelli_calc_second_order
+                else ""
+            )
+        )
+
     return 0
 
 
