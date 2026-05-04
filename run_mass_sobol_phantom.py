@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-"""Sequential Sobol parameter sweep runner for PHANTOM solarsystem-style setups (mass + optional scales)."""
+"""Sobol parameter sweep runner for PHANTOM solarsystem-style setups (mass + optional scales).
+
+Runs PHANTOM once per sample; use ``--jobs N`` to run independent cases in parallel processes."""
 
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
+from concurrent.futures import as_completed
 import csv
 import hashlib
 import json
@@ -16,7 +20,7 @@ import sys
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 
 AU_IN_KM = 149_597_870.7
@@ -26,6 +30,9 @@ APOPHIS_SINK_ID_DEFAULT = 11
 # Auto-generated batch folder suffix (after "{prefix}_{timestamp}_"); keep paths portable.
 _BATCH_SLUG_DEFAULT_MAX_LEN = 120
 _SLUG_SAFE_RE = re.compile(r"[^A-Za-z0-9_.\-]+")
+
+# Honours repo layout: phantom/ sibling of sobol/ (override with PHANTOM_DIR).
+_DEFAULT_PHANTOM_DIR = Path(__file__).resolve().parent.parent / "phantom"
 
 # Scale parameters varied via CLI min/max: (RunSample/.setup attribute, argparse lo/hi attrs, batch slug token).
 # Order MUST match Sobol dimension ordering used in build_run_samples and CSV columns.
@@ -111,13 +118,30 @@ class RunSample:
     apophis_only: Optional[bool] = None
 
 
+class RunWorkerPayload(NamedTuple):
+    """Picklable bundle for ProcessPoolExecutor workers (paths as str)."""
+
+    run_id: int
+    sample: RunSample
+    base_setup: str
+    base_input: str
+    output_root: str
+    prefix: str
+    phantomsetup_bin: str
+    phantom_bin: str
+    mass_unit: str
+    dry_run: bool
+    earth_sink_id: int
+    apophis_sink_id: int
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Generate Sobol samples over Apophis mass and optional setup_solarsystem.f90 "
-            "parameters, then run PHANTOM sequentially. Multi-d Sobol uses scipy when installed; "
-            "otherwise independent 1D sequences per dimension are used (weaker joint coverage — "
-            "see pip install -r requirements.txt)."
+            "parameters, then run PHANTOM (one subprocess per sample; use --jobs for parallelism). "
+            "Multi-d Sobol uses scipy when installed; otherwise independent 1D sequences per dimension "
+            "are used (weaker joint coverage — see pip install -r requirements.txt)."
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
@@ -235,13 +259,24 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--phantom-dir",
-        default=os.environ.get("PHANTOM_DIR", "/home/mboyle/phantom"),
+        default=os.environ.get("PHANTOM_DIR", str(_DEFAULT_PHANTOM_DIR)),
         help="PHANTOM installation root containing bin/phantomsetup and bin/phantom.",
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Prepare run directories and setup files without executing PHANTOM.",
+    )
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        default=1,
+        metavar="N",
+        help=(
+            "Number of parallel worker processes for independent PHANTOM runs. "
+            "If PHANTOM is built with OpenMP, set OMP_NUM_THREADS=1 (or ensure jobs×threads "
+            "does not oversubscribe CPU cores)."
+        ),
     )
     parser.add_argument(
         "--saltelli-n",
@@ -262,6 +297,8 @@ def parse_args() -> argparse.Namespace:
 
 
 def validate_args(args: argparse.Namespace) -> None:
+    if args.jobs < 1:
+        raise ValueError("jobs must be >= 1")
     if args.saltelli_n is not None:
         if args.saltelli_n < 2:
             raise ValueError("saltelli-n must be >= 2")
@@ -690,9 +727,8 @@ def summary_secondary_columns(col_order: List[str]) -> List[str]:
     return [c for c in col_order if c != "mass_input_kg"]
 
 
-def append_summary(
-    path: Path, row: RunRecord, write_header: bool, param_column_order: List[str]
-) -> None:
+def write_summary_csv(path: Path, records: List[RunRecord], param_column_order: List[str]) -> None:
+    """Write full sobol_mass_outputs.csv: header plus one row per record (sorted by run_id)."""
     secondary = summary_secondary_columns(param_column_order)
     base_cols = [
         "run_id",
@@ -704,23 +740,24 @@ def append_summary(
         "closest_approach_au",
         "error",
     ]
-    with path.open("a", newline="", encoding="utf-8") as f:
+    ordered = sorted(records, key=lambda r: r.run_id)
+    with path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        if write_header:
-            writer.writerow(base_cols)
-        extra = [row.param_columns.get(c, "") for c in secondary]
-        writer.writerow(
-            [
-                row.run_id,
-                f"{row.mass_input_kg:.12g}" if math.isfinite(row.mass_input_kg) else "",
-                *extra,
-                row.run_dir,
-                row.status,
-                f"{row.closest_approach_km:.12g}" if not math.isnan(row.closest_approach_km) else "",
-                f"{row.closest_approach_au:.12g}" if not math.isnan(row.closest_approach_au) else "",
-                row.error,
-            ]
-        )
+        writer.writerow(base_cols)
+        for row in ordered:
+            extra = [row.param_columns.get(c, "") for c in secondary]
+            writer.writerow(
+                [
+                    row.run_id,
+                    f"{row.mass_input_kg:.12g}" if math.isfinite(row.mass_input_kg) else "",
+                    *extra,
+                    row.run_dir,
+                    row.status,
+                    f"{row.closest_approach_km:.12g}" if not math.isnan(row.closest_approach_km) else "",
+                    f"{row.closest_approach_au:.12g}" if not math.isnan(row.closest_approach_au) else "",
+                    row.error,
+                ]
+            )
 
 
 def skip_closest_approach(sample: RunSample) -> bool:
@@ -804,6 +841,31 @@ def run_one_case(
         )
 
 
+def _execute_run_worker(payload: RunWorkerPayload) -> RunRecord:
+    return run_one_case(
+        payload.run_id,
+        payload.sample,
+        Path(payload.base_setup),
+        Path(payload.base_input),
+        Path(payload.output_root),
+        payload.prefix,
+        Path(payload.phantomsetup_bin),
+        Path(payload.phantom_bin),
+        payload.mass_unit,
+        payload.dry_run,
+        payload.earth_sink_id,
+        payload.apophis_sink_id,
+    )
+
+
+def _print_run_progress(result: RunRecord, samples: List[RunSample], total: int) -> None:
+    idx = result.run_id
+    sample = samples[idx - 1]
+    mass_str = f"{sample.mass_kg:.6e} kg" if sample.mass_kg is not None else "(template mass)"
+    print(f"[INFO] Run {idx}/{total} mass={mass_str}", flush=True)
+    print(f"[INFO]   status={result.status} run_dir={result.run_dir}", flush=True)
+
+
 def main() -> int:
     args = parse_args()
     base_dir = Path(args.base_dir).resolve()
@@ -872,34 +934,55 @@ def main() -> int:
         )
     else:
         print(f"[INFO] {dim_msg}")
+    if args.jobs > 1:
+        print(
+            f"[INFO] Running {len(samples)} cases with up to {args.jobs} worker process(es) "
+            "(set OMP_NUM_THREADS=1 if PHANTOM is OpenMP to limit threads per process)."
+        )
 
-    saltelli_y_rows: List[Dict[str, object]] = []
-
-    for idx, sample in enumerate(samples, start=1):
-        mass_str = f"{sample.mass_kg:.6e} kg" if sample.mass_kg is not None else "(template mass)"
-        print(f"[INFO] Run {idx}/{len(samples)} mass={mass_str}")
-        result = run_one_case(
+    payloads = [
+        RunWorkerPayload(
             run_id=idx,
             sample=sample,
-            base_setup=base_setup,
-            base_input=base_input,
-            output_root=output_root,
+            base_setup=str(base_setup),
+            base_input=str(base_input),
+            output_root=str(output_root),
             prefix=args.prefix,
-            phantomsetup_bin=phantomsetup_bin,
-            phantom_bin=phantom_bin,
+            phantomsetup_bin=str(phantomsetup_bin),
+            phantom_bin=str(phantom_bin),
             mass_unit=args.mass_unit,
             dry_run=args.dry_run,
             earth_sink_id=args.sink_earth_id,
             apophis_sink_id=args.sink_apophis_id,
         )
-        append_summary(summary_csv, result, write_header=(idx == 1), param_column_order=col_order)
-        print(f"[INFO]   status={result.status} run_dir={result.run_dir}")
+        for idx, sample in enumerate(samples, start=1)
+    ]
+    total_runs = len(samples)
+    results: List[RunRecord] = []
+    if args.jobs == 1:
+        for p in payloads:
+            result = _execute_run_worker(p)
+            results.append(result)
+            _print_run_progress(result, samples, total_runs)
+    else:
+        with concurrent.futures.ProcessPoolExecutor(max_workers=args.jobs) as executor:
+            futures = [executor.submit(_execute_run_worker, p) for p in payloads]
+            for fut in as_completed(futures):
+                result = fut.result()
+                results.append(result)
+                _print_run_progress(result, samples, total_runs)
 
-        if args.saltelli_n is not None:
+    write_summary_csv(summary_csv, results, col_order)
+
+    sorted_results = sorted(results, key=lambda r: r.run_id)
+
+    saltelli_y_rows: List[Dict[str, object]] = []
+    if args.saltelli_n is not None:
+        for result in sorted_results:
             saltelli_y_rows.append(
                 {
-                    "eval_index": idx - 1,
-                    "run_id": idx,
+                    "eval_index": result.run_id - 1,
+                    "run_id": result.run_id,
                     "closest_approach_km": result.closest_approach_km,
                     "closest_approach_au": result.closest_approach_au,
                     "status": result.status,
