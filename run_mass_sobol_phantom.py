@@ -55,6 +55,11 @@ def _active_scale_variations(args: argparse.Namespace) -> List[Tuple[str, float,
     return out
 
 
+def _mass_bounds_active(args: argparse.Namespace) -> bool:
+    """True when mass is a Sobol dimension: both kg bounds set (same contract as optional scale min/max)."""
+    return args.mass_min_kg is not None and args.mass_max_kg is not None
+
+
 # ---------------------------------------------------------------------------
 # SciPy multi-dimensional Sobol (preferred) vs independent 1D fallback
 # ---------------------------------------------------------------------------
@@ -133,9 +138,10 @@ class RunWorkerPayload(NamedTuple):
     dry_run: bool
     earth_sink_id: int
     apophis_sink_id: int
+    ephemeris_cache_dir: Optional[str]
 
 
-def parse_args() -> argparse.Namespace:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Generate Sobol samples over Apophis mass and optional setup_solarsystem.f90 "
@@ -152,27 +158,32 @@ def parse_args() -> argparse.Namespace:
         help="Directory containing <prefix>.in and <prefix>.setup.",
     )
     parser.add_argument(
+        "--ephemeris-cache-dir",
+        default=None,
+        metavar="DIR",
+        help=(
+            "If set, copy every *.txt from this directory into each run folder before phantomsetup. "
+            "PHANTOM then skips JPL Horizons download when <object>.txt already exists (see "
+            "phantom/src/utils/utils_ephemeris.f90). Files must match the epoch in your .setup."
+        ),
+    )
+    parser.add_argument(
         "--num-samples",
         type=int,
         default=8,
         help="Number of Sobol samples (runs) to generate.",
     )
     parser.add_argument(
-        "--no-vary-mass",
-        action="store_true",
-        help="Do not sample or overwrite m_apophis_in; template .setup mass line is kept.",
-    )
-    parser.add_argument(
         "--mass-min-kg",
         type=float,
-        default=1.0e10,
-        help="Lower bound for Apophis mass in kg (when mass is varied).",
+        default=None,
+        help="Lower bound for Apophis mass in kg; omit with --mass-max-kg to leave mass unvaried.",
     )
     parser.add_argument(
         "--mass-max-kg",
         type=float,
-        default=1.0e11,
-        help="Upper bound for Apophis mass in kg (when mass is varied).",
+        default=None,
+        help="Upper bound for Apophis mass in kg; omit with --mass-min-kg to leave mass unvaried.",
     )
     parser.add_argument(
         "--mass-unit",
@@ -293,7 +304,28 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Also estimate second-order Sobol indices (requires more runs). For use with Analysis.py.",
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--interactive",
+        "-i",
+        action="store_true",
+        help="Prompt for each parameter (then run); CLI flags set defaults shown at each prompt.",
+    )
+    return parser
+
+
+def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
+    return build_parser().parse_args(argv)
+
+
+def _strip_interactive_flags(argv: Sequence[str]) -> Tuple[List[str], bool]:
+    out: List[str] = []
+    interactive = False
+    for tok in argv:
+        if tok in ("--interactive", "-i"):
+            interactive = True
+            continue
+        out.append(tok)
+    return out, interactive
 
 
 def validate_args(args: argparse.Namespace) -> None:
@@ -306,9 +338,12 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("num-samples must be >= 1")
     if args.batch_slug_max_len < 9:
         raise ValueError("batch-slug-max-len must be >= 9 (room for hash suffix when truncating)")
-    if not args.no_vary_mass:
-        if args.mass_min_kg <= 0 or args.mass_max_kg <= 0 or args.mass_max_kg <= args.mass_min_kg:
-            raise ValueError("mass bounds must satisfy 0 < mass-min-kg < mass-max-kg (or use --no-vary-mass)")
+    m_lo, m_hi = args.mass_min_kg, args.mass_max_kg
+    if (m_lo is None) ^ (m_hi is None):
+        raise ValueError("mass bounds: set both --mass-min-kg and --mass-max-kg, or neither")
+    if _mass_bounds_active(args):
+        if m_lo <= 0 or m_hi <= 0 or m_hi <= m_lo:
+            raise ValueError("mass bounds must satisfy 0 < mass-min-kg < mass-max-kg")
     for param, lo_attr, hi_attr, _ in _SCALE_VARIATION_SPEC:
         lo = getattr(args, lo_attr)
         hi = getattr(args, hi_attr)
@@ -320,14 +355,14 @@ def validate_args(args: argparse.Namespace) -> None:
     dim = count_dimensions(args)
     if dim == 0:
         raise ValueError(
-            "No varying dimensions: enable mass (--no-vary-mass off) and/or pass scale */ "
+            "No varying dimensions: set both --mass-min-kg and --mass-max-kg and/or pass scale */ "
             "vary-use-dem / vary-apophis-only."
         )
 
 
 def count_dimensions(args: argparse.Namespace) -> int:
     n = 0
-    if not args.no_vary_mass:
+    if _mass_bounds_active(args):
         n += 1
     n += len(_active_scale_variations(args))
     if args.vary_use_dem:
@@ -440,7 +475,7 @@ def build_run_samples(num_samples: int, args: argparse.Namespace) -> List[RunSam
     for row in unit_rows:
         di = 0
         s = RunSample()
-        if not args.no_vary_mass:
+        if _mass_bounds_active(args):
             s.mass_kg = args.mass_min_kg + row[di] * (args.mass_max_kg - args.mass_min_kg)
             di += 1
         for param, lo, hi, _ in _active_scale_variations(args):
@@ -461,7 +496,7 @@ def build_run_samples(num_samples: int, args: argparse.Namespace) -> List[RunSam
 def sample_column_order(args: argparse.Namespace) -> List[str]:
     """Stable CSV column order for varied parameters."""
     order: List[str] = []
-    if not args.no_vary_mass:
+    if _mass_bounds_active(args):
         order.append("mass_input_kg")
     for param, _, _, _ in _active_scale_variations(args):
         order.append(param)
@@ -476,7 +511,7 @@ def build_salib_problem(args: argparse.Namespace) -> Dict[str, object]:
     """SALib problem dict; parameter order matches Saltelli rows and RunSample mapping."""
     names: List[str] = []
     bounds: List[List[float]] = []
-    if not args.no_vary_mass:
+    if _mass_bounds_active(args):
         names.append("mass_input_kg")
         bounds.append([float(args.mass_min_kg), float(args.mass_max_kg)])
     for param, lo, hi, _ in _active_scale_variations(args):
@@ -498,7 +533,7 @@ def run_sample_from_salib_row(row: Sequence[float], args: argparse.Namespace) ->
     """Build RunSample from one SALib Sobol row (physical bounds)."""
     s = RunSample()
     i = 0
-    if not args.no_vary_mass:
+    if _mass_bounds_active(args):
         s.mass_kg = float(row[i])
         i += 1
     for param, _, _, _ in _active_scale_variations(args):
@@ -534,9 +569,9 @@ def canonical_sweep_descriptor(args: argparse.Namespace) -> str:
         f"seed={args.seed}",
         f"saltelli_n={getattr(args, 'saltelli_n', None)}",
         f"saltelli_second={getattr(args, 'saltelli_calc_second_order', False)}",
-        f"no_vary_mass={args.no_vary_mass}",
+        f"mass_active={_mass_bounds_active(args)}",
     ]
-    if not args.no_vary_mass:
+    if _mass_bounds_active(args):
         parts.append(f"mass_min_kg={args.mass_min_kg}")
         parts.append(f"mass_max_kg={args.mass_max_kg}")
     for param, lo, hi, _ in _active_scale_variations(args):
@@ -555,7 +590,7 @@ def build_auto_batch_sweep_slug(args: argparse.Namespace, max_len: int) -> str:
     else:
         tok_n = f"n{args.num_samples}"
     tokens: List[str] = [tok_n, f"s{args.seed}"]
-    if not args.no_vary_mass:
+    if _mass_bounds_active(args):
         tokens.append(
             f"m{_fmt_slug_float(args.mass_min_kg)}-{_fmt_slug_float(args.mass_max_kg)}"
         )
@@ -608,6 +643,16 @@ def run_command(cmd: Sequence[str], cwd: Path, log_path: Path) -> None:
         proc = subprocess.run(cmd, cwd=str(cwd), stdout=log_file, stderr=subprocess.STDOUT)
     if proc.returncode != 0:
         raise RuntimeError(f"Command failed ({proc.returncode}): {' '.join(cmd)}")
+
+
+def copy_ephemeris_txt_cache(cache_dir: Path, run_dir: Path) -> int:
+    """Copy *.txt ephemeris snippets from cache_dir into run_dir (non-recursive). Returns file count."""
+    n = 0
+    for src in sorted(cache_dir.glob("*.txt")):
+        if src.is_file():
+            shutil.copy2(src, run_dir / src.name)
+            n += 1
+    return n
 
 
 def parse_sink_rows(path: Path) -> Tuple[List[float], List[Tuple[float, float, float]]]:
@@ -778,6 +823,7 @@ def run_one_case(
     dry_run: bool,
     earth_sink_id: int,
     apophis_sink_id: int,
+    ephemeris_cache_dir: Optional[Path] = None,
 ) -> RunRecord:
     run_dir = output_root / f"run_{run_id:04d}"
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -786,6 +832,9 @@ def run_one_case(
     shutil.copy2(base_setup, run_setup)
     shutil.copy2(base_input, run_input)
     param_columns = apply_run_sample_to_setup(run_setup, sample, mass_unit)
+
+    if ephemeris_cache_dir is not None:
+        copy_ephemeris_txt_cache(ephemeris_cache_dir, run_dir)
 
     mass_for_record = float(sample.mass_kg) if sample.mass_kg is not None else float("nan")
 
@@ -855,6 +904,7 @@ def _execute_run_worker(payload: RunWorkerPayload) -> RunRecord:
         payload.dry_run,
         payload.earth_sink_id,
         payload.apophis_sink_id,
+        Path(payload.ephemeris_cache_dir) if payload.ephemeris_cache_dir else None,
     )
 
 
@@ -867,16 +917,41 @@ def _print_run_progress(result: RunRecord, samples: List[RunSample], total: int)
 
 
 def main() -> int:
-    args = parse_args()
+    argv_cli, interactive = _strip_interactive_flags(sys.argv[1:])
+    if interactive:
+        from interactive_run_mass_sobol import run_interactive_wizard
+
+        seed = parse_args(argv_cli)
+        wizard_argv = run_interactive_wizard(build_parser(), seed)
+        args = parse_args(wizard_argv)
+    else:
+        args = parse_args(argv_cli if argv_cli else None)
     base_dir = Path(args.base_dir).resolve()
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     problem: Optional[Dict[str, object]] = None
     saltelli_meta: Optional[Dict[str, object]] = None
     X_saltelli: Optional[Any] = None
+    ephemeris_cache: Optional[Path] = None
 
     try:
         validate_args(args)
+        if args.ephemeris_cache_dir:
+            ephemeris_cache = Path(args.ephemeris_cache_dir).expanduser().resolve()
+            if not ephemeris_cache.is_dir():
+                raise FileNotFoundError(f"Ephemeris cache path is not a directory: {ephemeris_cache}")
+            txt_n = sum(1 for p in ephemeris_cache.glob("*.txt") if p.is_file())
+            if txt_n == 0:
+                print(
+                    f"[WARN] No *.txt files in --ephemeris-cache-dir {ephemeris_cache}; "
+                    "PHANTOM will attempt live Horizons downloads.",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    f"[INFO] Ephemeris cache: {txt_n} *.txt file(s) from {ephemeris_cache}",
+                    flush=True,
+                )
         batch_basename = build_batch_directory_basename(args, timestamp)
         output_root = Path(args.output_root).resolve() / batch_basename
 
@@ -954,6 +1029,7 @@ def main() -> int:
             dry_run=args.dry_run,
             earth_sink_id=args.sink_earth_id,
             apophis_sink_id=args.sink_apophis_id,
+            ephemeris_cache_dir=str(ephemeris_cache) if ephemeris_cache is not None else None,
         )
         for idx, sample in enumerate(samples, start=1)
     ]
