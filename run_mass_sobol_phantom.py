@@ -680,6 +680,41 @@ def parse_sink_rows(path: Path) -> Tuple[List[float], List[Tuple[float, float, f
     return rows_t, rows_xyz
 
 
+def _sink_times_close(t_a: float, t_b: float) -> bool:
+    """Whether two sink row times refer to the same output step (robust float compare)."""
+    return math.isclose(t_a, t_b, rel_tol=1e-9, abs_tol=1e-12)
+
+
+def _pair_sink_rows_by_time(
+    t_earth: Sequence[float],
+    xyz_earth: Sequence[Tuple[float, float, float]],
+    t_apophis: Sequence[float],
+    xyz_apophis: Sequence[Tuple[float, float, float]],
+) -> List[Tuple[Tuple[float, float, float], Tuple[float, float, float]]]:
+    """Pair Earth and Apophis positions at matching simulation times (sorted merge).
+
+    Rows are matched only when ``t`` agrees within ``_sink_times_close``; index order
+    is not assumed, so mis-ordered or unequal-length files still pair correctly when
+    they share the same time stamps.
+    """
+    earth = sorted(zip(t_earth, xyz_earth), key=lambda r: r[0])
+    apo = sorted(zip(t_apophis, xyz_apophis), key=lambda r: r[0])
+    i, j = 0, 0
+    out: List[Tuple[Tuple[float, float, float], Tuple[float, float, float]]] = []
+    while i < len(earth) and j < len(apo):
+        te, ve = earth[i]
+        ta, va = apo[j]
+        if _sink_times_close(te, ta):
+            out.append((ve, va))
+            i += 1
+            j += 1
+        elif te < ta:
+            i += 1
+        else:
+            j += 1
+    return out
+
+
 def _sink_ev_dump_sort_key(path: Path) -> Tuple[int, str]:
     """Sort sink `.ev` dumps by trailing `N<number>` before extension (latest dump last)."""
     m = re.search(r"N(\d+)\.ev$", path.name, re.IGNORECASE)
@@ -709,15 +744,18 @@ def extract_closest_approach(
     t_earth, xyz_earth = parse_sink_rows(earth_candidates[-1])
     t_apophis, xyz_apophis = parse_sink_rows(apophis_candidates[-1])
 
-    n = min(len(t_earth), len(t_apophis))
-    if n == 0:
-        raise RuntimeError("Sink files have no overlapping rows.")
+    pairs = _pair_sink_rows_by_time(t_earth, xyz_earth, t_apophis, xyz_apophis)
+    if not pairs:
+        raise RuntimeError(
+            "No Earth/Apophis sink rows with matching time (after sorting and time alignment). "
+            "Check sink `.ev` dumps share the same simulation clock."
+        )
 
     closest_km = float("inf")
-    for idx in range(n):
-        dx = xyz_apophis[idx][0] - xyz_earth[idx][0]
-        dy = xyz_apophis[idx][1] - xyz_earth[idx][1]
-        dz = xyz_apophis[idx][2] - xyz_earth[idx][2]
+    for ve, va in pairs:
+        dx = va[0] - ve[0]
+        dy = va[1] - ve[1]
+        dz = va[2] - ve[2]
         d = math.sqrt(dx * dx + dy * dy + dz * dz)
         if d < closest_km:
             closest_km = d
@@ -921,8 +959,8 @@ def main() -> int:
     if interactive:
         from interactive_run_mass_sobol import run_interactive_wizard
 
-        seed = parse_args(argv_cli)
-        wizard_argv = run_interactive_wizard(build_parser(), seed)
+        initial_args = parse_args(argv_cli)
+        wizard_argv = run_interactive_wizard(build_parser(), initial_args)
         args = parse_args(wizard_argv)
     else:
         args = parse_args(argv_cli if argv_cli else None)

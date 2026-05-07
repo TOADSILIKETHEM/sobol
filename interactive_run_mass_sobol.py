@@ -370,9 +370,9 @@ def _skip_action(action: argparse.Action) -> bool:
     return False
 
 
-def run_interactive_wizard(parser: argparse.ArgumentParser, seed: argparse.Namespace) -> List[str]:
+def run_interactive_wizard(parser: argparse.ArgumentParser, initial_args: argparse.Namespace) -> List[str]:
     """Prompt for each registered option (except help/interactive); return argv tokens."""
-    state = argparse.Namespace(**vars(seed))
+    state = argparse.Namespace(**vars(initial_args))
     out: List[str] = []
     last_section: Optional[str] = None
     mass_gate_done = False
