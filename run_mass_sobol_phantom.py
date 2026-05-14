@@ -31,8 +31,8 @@ APOPHIS_SINK_ID_DEFAULT = 11
 _BATCH_SLUG_DEFAULT_MAX_LEN = 120
 _SLUG_SAFE_RE = re.compile(r"[^A-Za-z0-9_.\-]+")
 
-# Honours repo layout: phantom/ sibling of sobol/ (override with PHANTOM_DIR).
-_DEFAULT_PHANTOM_DIR = Path(__file__).resolve().parent.parent / "phantom"
+# Default PHANTOM install root: this sobol/ directory (override with PHANTOM_DIR or --phantom-dir).
+_DEFAULT_PHANTOM_DIR = Path(__file__).resolve().parent
 
 # Scale parameters varied via CLI min/max: (RunSample/.setup attribute, argparse lo/hi attrs, batch slug token).
 # Order MUST match Sobol dimension ordering used in build_run_samples and CSV columns.
@@ -58,6 +58,23 @@ def _active_scale_variations(args: argparse.Namespace) -> List[Tuple[str, float,
 def _mass_bounds_active(args: argparse.Namespace) -> bool:
     """True when mass is a Sobol dimension: both kg bounds set (same contract as optional scale min/max)."""
     return args.mass_min_kg is not None and args.mass_max_kg is not None
+
+
+def _np_apophis_bounds_active(args: argparse.Namespace) -> bool:
+    """True when np_apophis is a Sobol dimension: both integer bounds set."""
+    return getattr(args, "np_apophis_min", None) is not None and getattr(args, "np_apophis_max", None) is not None
+
+
+def _use_dem_fixed_str(args: argparse.Namespace) -> Optional[str]:
+    """'true' / 'false' from --use-dem-fixed, or None when unset (leave template use_dem)."""
+    v = getattr(args, "use_dem_fixed", None)
+    if v is None:
+        return None
+    return str(v)
+
+
+def _use_dem_fixed_active(args: argparse.Namespace) -> bool:
+    return _use_dem_fixed_str(args) is not None
 
 
 # ---------------------------------------------------------------------------
@@ -119,6 +136,7 @@ class RunSample:
     scale_pos: Optional[float] = None
     scale_r_apophis: Optional[float] = None
     scale_rho: Optional[float] = None
+    np_apophis: Optional[int] = None
     use_dem: Optional[bool] = None
     apophis_only: Optional[bool] = None
 
@@ -151,6 +169,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
+    # Paths
     parser.add_argument("--prefix", default="sobol", help="PHANTOM file prefix.")
     parser.add_argument(
         "--base-dir",
@@ -168,11 +187,47 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--output-root",
+        default="sobol_mass_runs",
+        help="Directory for run folders and summary outputs.",
+    )
+    parser.add_argument(
+        "--phantom-dir",
+        default=os.environ.get("PHANTOM_DIR", str(_DEFAULT_PHANTOM_DIR)),
+        help=(
+            "PHANTOM installation root containing bin/phantomsetup and bin/phantom "
+            "(default: the sobol directory containing this script)."
+        ),
+    )
+    # Sampling
+    parser.add_argument(
         "--num-samples",
         type=int,
         default=8,
         help="Number of Sobol samples (runs) to generate.",
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Scramble seed for Sobol sequence.",
+    )
+    parser.add_argument(
+        "--saltelli-n",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Use SALib Saltelli/Sobol sample design with base size N (ignores --num-samples for layout). "
+            "Approximate PHANTOM runs: N*(D+2), or N*(2*D+2) with --saltelli-calc-second-order (D=varying dims)."
+        ),
+    )
+    parser.add_argument(
+        "--saltelli-calc-second-order",
+        action="store_true",
+        help="Also estimate second-order Sobol indices (requires more runs). For use with Analysis.py.",
+    )
+    # Mass
     parser.add_argument(
         "--mass-min-kg",
         type=float,
@@ -194,13 +249,7 @@ def build_parser() -> argparse.ArgumentParser:
             "'kg' and 'g' both convert that mass to grams for *g in the setup file."
         ),
     )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=42,
-        help="Scramble seed for Sobol sequence.",
-    )
-    # Real scalings (optional Sobol dimensions when both min and max are set)
+    # Scale bounds (optional Sobol dimensions when both min and max are set)
     for key, helpt in (
         ("scale-vel", "scale_vel (Apophis velocity scale)"),
         ("scale-pos", "scale_pos (Apophis initial position scale)"),
@@ -220,9 +269,36 @@ def build_parser() -> argparse.ArgumentParser:
             help=f"Upper bound for {helpt}; omit with min to leave unvaried.",
         )
     parser.add_argument(
+        "--np-apophis-min",
+        type=int,
+        default=None,
+        help="Lower bound for np_apophis (DEM particle count); omit with max to leave unvaried.",
+    )
+    parser.add_argument(
+        "--np-apophis-max",
+        type=int,
+        default=None,
+        help="Upper bound for np_apophis (DEM particle count); omit with min to leave unvaried.",
+    )
+    # Setup toggles
+    parser.add_argument(
         "--vary-use-dem",
         action="store_true",
-        help="Sample use_dem (logical) with one Sobol dimension (u>=0.5 -> T).",
+        help=(
+            "Sample use_dem (logical) with one Sobol dimension (u>=0.5 -> T). "
+            "Not compatible with --use-dem-fixed. With -i, you are asked whether to vary first, "
+            "then for a fixed value only if not varying."
+        ),
+    )
+    parser.add_argument(
+        "--use-dem-fixed",
+        choices=("true", "false"),
+        default=None,
+        metavar="{true,false}",
+        help=(
+            "When set (and --vary-use-dem is not), force use_dem to T or F on every run. "
+            "Omit to leave use_dem as in the base <prefix>.setup. Incompatible with --vary-use-dem."
+        ),
     )
     parser.add_argument(
         "--vary-apophis-only",
@@ -232,6 +308,7 @@ def build_parser() -> argparse.ArgumentParser:
             "the setup and closest-approach extraction is skipped (NaN). See also --sink-*-id."
         ),
     )
+    # Sinks / post-processing
     parser.add_argument(
         "--sink-earth-id",
         type=int,
@@ -244,11 +321,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=APOPHIS_SINK_ID_DEFAULT,
         help="Sink index for Apophis in .ev filenames (default matches full solar system).",
     )
-    parser.add_argument(
-        "--output-root",
-        default="sobol_mass_runs",
-        help="Directory for run folders and summary outputs.",
-    )
+    # Batch naming
     parser.add_argument(
         "--batch-label",
         default=None,
@@ -268,11 +341,7 @@ def build_parser() -> argparse.ArgumentParser:
             "sanitization); longer values are truncated with a short hash appended."
         ),
     )
-    parser.add_argument(
-        "--phantom-dir",
-        default=os.environ.get("PHANTOM_DIR", str(_DEFAULT_PHANTOM_DIR)),
-        help="PHANTOM installation root containing bin/phantomsetup and bin/phantom.",
-    )
+    # Execution
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -288,21 +357,6 @@ def build_parser() -> argparse.ArgumentParser:
             "If PHANTOM is built with OpenMP, set OMP_NUM_THREADS=1 (or ensure jobs×threads "
             "does not oversubscribe CPU cores)."
         ),
-    )
-    parser.add_argument(
-        "--saltelli-n",
-        type=int,
-        default=None,
-        metavar="N",
-        help=(
-            "Use SALib Saltelli/Sobol sample design with base size N (ignores --num-samples for layout). "
-            "Approximate PHANTOM runs: N*(D+2), or N*(2*D+2) with --saltelli-calc-second-order (D=varying dims)."
-        ),
-    )
-    parser.add_argument(
-        "--saltelli-calc-second-order",
-        action="store_true",
-        help="Also estimate second-order Sobol indices (requires more runs). For use with Analysis.py.",
     )
     parser.add_argument(
         "--interactive",
@@ -351,12 +405,23 @@ def validate_args(args: argparse.Namespace) -> None:
             raise ValueError(f"{param}: set both min and max, or neither")
         if lo is not None and hi is not None and hi <= lo:
             raise ValueError(f"{param}: require min < max")
+    np_lo = getattr(args, "np_apophis_min", None)
+    np_hi = getattr(args, "np_apophis_max", None)
+    if (np_lo is None) ^ (np_hi is None):
+        raise ValueError("np_apophis bounds: set both --np-apophis-min and --np-apophis-max, or neither")
+    if np_lo is not None and np_hi is not None:
+        if np_lo < 2:
+            raise ValueError("np_apophis_min must be >= 2 for DEM mode")
+        if np_hi <= np_lo:
+            raise ValueError("np_apophis_max must be > np_apophis_min")
+    if args.vary_use_dem and _use_dem_fixed_active(args):
+        raise ValueError("cannot combine --vary-use-dem with --use-dem-fixed")
 
     dim = count_dimensions(args)
     if dim == 0:
         raise ValueError(
             "No varying dimensions: set both --mass-min-kg and --mass-max-kg and/or pass scale */ "
-            "vary-use-dem / vary-apophis-only."
+            "vary-use-dem / vary-apophis-only / np-apophis-min+max."
         )
 
 
@@ -365,6 +430,8 @@ def count_dimensions(args: argparse.Namespace) -> int:
     if _mass_bounds_active(args):
         n += 1
     n += len(_active_scale_variations(args))
+    if _np_apophis_bounds_active(args):
+        n += 1
     if args.vary_use_dem:
         n += 1
     if args.vary_apophis_only:
@@ -452,6 +519,12 @@ def apply_run_sample_to_setup(setup_path: Path, sample: RunSample, mass_unit: st
             validate_assignment(text, param, tok)
             columns[param] = f"{v:.12g}"
 
+    if sample.np_apophis is not None:
+        tok = str(sample.np_apophis)
+        text = replace_setup_assignment(text, "np_apophis", tok)
+        validate_assignment(text, "np_apophis", tok)
+        columns["np_apophis"] = tok
+
     if sample.use_dem is not None:
         tok = format_logical_token(sample.use_dem)
         text = replace_setup_assignment(text, "use_dem", tok)
@@ -481,9 +554,15 @@ def build_run_samples(num_samples: int, args: argparse.Namespace) -> List[RunSam
         for param, lo, hi, _ in _active_scale_variations(args):
             setattr(s, param, lo + row[di] * (hi - lo))
             di += 1
+        if _np_apophis_bounds_active(args):
+            lo, hi = args.np_apophis_min, args.np_apophis_max
+            s.np_apophis = min(lo + int(row[di] * (hi - lo + 1)), hi)
+            di += 1
         if args.vary_use_dem:
             s.use_dem = row[di] >= 0.5
             di += 1
+        elif _use_dem_fixed_active(args):
+            s.use_dem = _use_dem_fixed_str(args) == "true"
         if args.vary_apophis_only:
             s.apophis_only = row[di] >= 0.5
             di += 1
@@ -500,7 +579,9 @@ def sample_column_order(args: argparse.Namespace) -> List[str]:
         order.append("mass_input_kg")
     for param, _, _, _ in _active_scale_variations(args):
         order.append(param)
-    if args.vary_use_dem:
+    if _np_apophis_bounds_active(args):
+        order.append("np_apophis")
+    if args.vary_use_dem or _use_dem_fixed_active(args):
         order.append("use_dem")
     if args.vary_apophis_only:
         order.append("apophis_only")
@@ -517,6 +598,9 @@ def build_salib_problem(args: argparse.Namespace) -> Dict[str, object]:
     for param, lo, hi, _ in _active_scale_variations(args):
         names.append(param)
         bounds.append([float(lo), float(hi)])
+    if _np_apophis_bounds_active(args):
+        names.append("np_apophis")
+        bounds.append([float(args.np_apophis_min), float(args.np_apophis_max)])
     if args.vary_use_dem:
         names.append("use_dem")
         bounds.append([0.0, 1.0])
@@ -539,9 +623,15 @@ def run_sample_from_salib_row(row: Sequence[float], args: argparse.Namespace) ->
     for param, _, _, _ in _active_scale_variations(args):
         setattr(s, param, float(row[i]))
         i += 1
+    if _np_apophis_bounds_active(args):
+        lo, hi = args.np_apophis_min, args.np_apophis_max
+        s.np_apophis = max(lo, min(hi, round(float(row[i]))))
+        i += 1
     if args.vary_use_dem:
         s.use_dem = float(row[i]) >= 0.5
         i += 1
+    elif _use_dem_fixed_active(args):
+        s.use_dem = _use_dem_fixed_str(args) == "true"
     if args.vary_apophis_only:
         s.apophis_only = float(row[i]) >= 0.5
         i += 1
@@ -576,7 +666,10 @@ def canonical_sweep_descriptor(args: argparse.Namespace) -> str:
         parts.append(f"mass_max_kg={args.mass_max_kg}")
     for param, lo, hi, _ in _active_scale_variations(args):
         parts.append(f"{param}={lo}:{hi}")
+    if _np_apophis_bounds_active(args):
+        parts.append(f"np_apophis={args.np_apophis_min}:{args.np_apophis_max}")
     parts.append(f"vary_use_dem={args.vary_use_dem}")
+    parts.append(f"use_dem_fixed={_use_dem_fixed_str(args)}")
     parts.append(f"vary_apophis_only={args.vary_apophis_only}")
     return "|".join(parts)
 
@@ -596,8 +689,12 @@ def build_auto_batch_sweep_slug(args: argparse.Namespace, max_len: int) -> str:
         )
     for _, lo, hi, slug_tok in _active_scale_variations(args):
         tokens.append(f"{slug_tok}{_fmt_slug_float(lo)}-{_fmt_slug_float(hi)}")
+    if _np_apophis_bounds_active(args):
+        tokens.append(f"np{args.np_apophis_min}-{args.np_apophis_max}")
     if args.vary_use_dem:
         tokens.append("dem")
+    elif _use_dem_fixed_active(args):
+        tokens.append("demT" if _use_dem_fixed_str(args) == "true" else "demF")
     if args.vary_apophis_only:
         tokens.append("ao")
     slug = "_".join(tokens)
@@ -773,8 +870,10 @@ def preflight(args: argparse.Namespace, base_dir: Path, output_root: Path) -> Tu
     if not base_input.is_file():
         raise FileNotFoundError(f"Missing input file: {base_input}")
 
-    phantomsetup_bin = Path(args.phantom_dir) / "bin" / "phantomsetup"
-    phantom_bin = Path(args.phantom_dir) / "bin" / "phantom"
+    # Resolve so relative --phantom-dir (e.g. ".") stays valid when subprocess cwd is each run_dir.
+    phantom_root = Path(args.phantom_dir).expanduser().resolve()
+    phantomsetup_bin = phantom_root / "bin" / "phantomsetup"
+    phantom_bin = phantom_root / "bin" / "phantom"
     if not args.dry_run:
         if not phantomsetup_bin.is_file():
             raise FileNotFoundError(f"Missing PHANTOM binary: {phantomsetup_bin}")
@@ -799,6 +898,8 @@ def write_samples_csv(path: Path, samples: List[RunSample], column_order: List[s
                     row.append("T" if s.use_dem else "F" if s.use_dem is not None else "")
                 elif col == "apophis_only":
                     row.append("T" if s.apophis_only else "F" if s.apophis_only is not None else "")
+                elif col == "np_apophis":
+                    row.append(str(s.np_apophis) if s.np_apophis is not None else "")
                 else:
                     v = getattr(s, col, None)
                     row.append(f"{float(v):.12g}" if v is not None else "")

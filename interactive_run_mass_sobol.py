@@ -19,6 +19,7 @@ SCALE_BOUND_PAIRS: Tuple[Tuple[str, str, str], ...] = (
     ("scale_pos", "scale_pos_min", "scale_pos_max"),
     ("scale_r_apophis", "scale_r_apophis_min", "scale_r_apophis_max"),
     ("scale_rho", "scale_rho_min", "scale_rho_max"),
+    ("np_apophis", "np_apophis_min", "np_apophis_max"),
 )
 SCALE_BOUND_DESTS: FrozenSet[str] = frozenset(
     dest for _, lo, hi in SCALE_BOUND_PAIRS for dest in (lo, hi)
@@ -33,6 +34,7 @@ SCALE_PARAM_LABELS: Dict[str, str] = {
     "scale_pos": "scale_pos (Apophis initial position scale)",
     "scale_r_apophis": "scale_r_apophis (Apophis radius scale)",
     "scale_rho": "scale_rho (bulk density scale when mass is density-derived)",
+    "np_apophis": "np_apophis (Apophis DEM particle count)",
 }
 
 # dest -> section title (unknown dests fall under "Other")
@@ -57,7 +59,10 @@ DEST_TO_SECTION: Dict[str, str] = {
     "scale_r_apophis_max": "Scale bounds (optional dimensions)",
     "scale_rho_min": "Scale bounds (optional dimensions)",
     "scale_rho_max": "Scale bounds (optional dimensions)",
+    "np_apophis_min": "Scale bounds (optional dimensions)",
+    "np_apophis_max": "Scale bounds (optional dimensions)",
     "vary_use_dem": "Setup toggles",
+    "use_dem_fixed": "Setup toggles",
     "vary_apophis_only": "Setup toggles",
     "sink_earth_id": "Sinks / post-processing",
     "sink_apophis_id": "Sinks / post-processing",
@@ -67,8 +72,11 @@ DEST_TO_SECTION: Dict[str, str] = {
     "jobs": "Execution",
 }
 
-# dest -> handler(action, state, flag) -> None (mutates state and out_argv)
+# dest -> handler(action, state, flag, out) -> None (mutates state and out_argv)
 WIZARD_CUSTOM_HANDLERS: Dict[str, Callable[[argparse.Action, argparse.Namespace, str, List[str]], None]] = {}
+
+# Set only via --vary-use-dem wizard block or CLI; no separate interactive prompts.
+WIZARD_SKIP_DESTS: FrozenSet[str] = frozenset({"use_dem_fixed"})
 
 # dest -> (brief what-it-does, valid answers / input rules). Used for every prompt; extend when
 # adding new CLI flags. Unknown dests use _fallback_explain(action).
@@ -137,9 +145,17 @@ INTERACTIVE_BRIEF: Dict[str, tuple[str, str]] = {
         "Upper bound for scale_rho; set both min and max or neither.",
         "Float, or Enter to keep current.",
     ),
+    "np_apophis_min": (
+        "Lower bound for np_apophis (DEM particle count per Apophis body); must be >= 2.",
+        "Integer >= 2; or Enter to keep current.",
+    ),
+    "np_apophis_max": (
+        "Upper bound for np_apophis; must be > min. Each run draws an integer uniformly from [min, max].",
+        "Integer > np_apophis_min; or Enter to keep current.",
+    ),
     "vary_use_dem": (
-        "If yes, adds a Sobol dimension that toggles use_dem in the setup (T/F across runs).",
-        "y, n, yes, no, t, f, 1, 0; or Enter to keep the current value.",
+        "Interactive: two-step use_dem (fixed preset, then vary). CLI: use --vary-use-dem and/or --use-dem-fixed.",
+        "See prompts when using -i.",
     ),
     "vary_apophis_only": (
         "If yes, adds a dimension toggling apophis_only (Earth absent when true; CA metrics may be NaN).",
@@ -346,6 +362,74 @@ def _append_kv(out: List[str], flag: str, value: object) -> None:
     out.append(str(value))
 
 
+def _prompt_use_dem_fixed_preset() -> Optional[str]:
+    """Return None (leave base .setup), 'true', or 'false' for --use-dem-fixed when not varying."""
+    what = (
+        "If you do not vary use_dem next: force it True (y), False (n), or leave the base "
+        "<prefix>.setup value unchanged (Enter)."
+    )
+    valid = "y / n / Enter (leave template)."
+    while True:
+        raw = _read_line(
+            f"{what}\n  Option: --use-dem-fixed (preset when not varying)\n  Valid answers: {valid}\n  [y/n/Enter]: "
+        ).strip().lower()
+        if not raw:
+            return None
+        if raw in ("y", "yes", "t", "true", "1"):
+            return "true"
+        if raw in ("n", "no", "f", "false", "0"):
+            return "false"
+        print("  Please enter y, n, or Enter for template.", file=sys.stderr)
+
+
+def _collect_use_dem_interactive(
+    _action: argparse.Action, state: argparse.Namespace, flag: str, out: List[str]
+) -> None:
+    vary_current = bool(getattr(state, "vary_use_dem", False))
+    what = "Vary use_dem across Sobol samples (adds one Sobol dimension; u>=0.5 -> T)?"
+    yn = "Y/n" if vary_current else "y/N"
+    valid = "y, n, yes, no, t, f, 1, 0; or Enter for the suggested default."
+    while True:
+        raw = _read_line(
+            f"{what}\n  Option: {flag}\n  Valid answers: {valid}\n{flag} [{yn}]: "
+        ).strip().lower()
+        if not raw:
+            vary = vary_current
+            break
+        if raw in ("y", "yes", "t", "true", "1"):
+            vary = True
+            break
+        if raw in ("n", "no", "f", "false", "0"):
+            vary = False
+            break
+        print("  Please enter y or n (empty = suggested default).", file=sys.stderr)
+
+    setattr(state, "vary_use_dem", vary)
+
+    if vary:
+        setattr(state, "use_dem_fixed", None)
+        _append_flag(out, "--vary-use-dem")
+    else:
+        fixed_preset = _prompt_use_dem_fixed_preset()
+        setattr(state, "use_dem_fixed", fixed_preset)
+        if fixed_preset is not None:
+            _append_kv(out, "--use-dem-fixed", fixed_preset)
+
+
+WIZARD_CUSTOM_HANDLERS["vary_use_dem"] = _collect_use_dem_interactive
+
+
+def _collect_saltelli_second_order_interactive(
+    action: argparse.Action, state: argparse.Namespace, _flag: str, out: List[str]
+) -> None:
+    if getattr(state, "saltelli_n", None) is None:
+        return
+    _collect_store_true(action, state, out)
+
+
+WIZARD_CUSTOM_HANDLERS["saltelli_calc_second_order"] = _collect_saltelli_second_order_interactive
+
+
 def _collect_store_true(action: argparse.Action, state: argparse.Namespace, out: List[str]) -> None:
     current = bool(getattr(state, action.dest))
     final = _prompt_bool(action, current)
@@ -384,14 +468,17 @@ def run_interactive_wizard(parser: argparse.ArgumentParser, initial_args: argpar
         if _skip_action(action):
             continue
 
-        if action.dest in WIZARD_CUSTOM_HANDLERS:
-            WIZARD_CUSTOM_HANDLERS[action.dest](action, state, _primary_flag(action), out)
+        if action.dest in WIZARD_SKIP_DESTS:
             continue
 
         sec = _section_for_dest(action.dest)
         if sec != last_section:
             print(f"\n=== {sec} ===", flush=True)
             last_section = sec
+
+        if action.dest in WIZARD_CUSTOM_HANDLERS:
+            WIZARD_CUSTOM_HANDLERS[action.dest](action, state, _primary_flag(action), out)
+            continue
 
         if action.dest == "mass_min_kg" and not mass_gate_done:
             if not _prompt_mass_vary_selection(state):
@@ -438,5 +525,6 @@ __all__ = [
     "SCALE_BOUND_DESTS",
     "SCALE_BOUND_PAIRS",
     "WIZARD_CUSTOM_HANDLERS",
+    "WIZARD_SKIP_DESTS",
     "run_interactive_wizard",
 ]

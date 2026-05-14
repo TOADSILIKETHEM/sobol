@@ -1,0 +1,8 @@
+numpy>=1.21
+# TUI for interactive parameter editing (tui_run.py).
+textual>=0.70
+# Optional: enables proper multi-dimensional Sobol sequences.
+# Without scipy, the runner uses independent 1D quasi-random sequences per dimension (weaker joint coverage).
+scipy>=1.9.0
+# Saltelli Sobol sampling + variance-based Sobol analysis (runner --saltelli-n, Analysis.py --method saltelli).
+SALib>=1.4.7
