@@ -36,11 +36,10 @@ import run_mass_sobol_phantom as _runner
 
 # (CSS-id-stem, attr-name, checkbox label, is_integer)
 _SCALE_DIMS = [
-    ("scale-vel",       "scale_vel",       "scale_vel  — Apophis velocity scale",      False),
-    ("scale-pos",       "scale_pos",       "scale_pos  — Apophis position scale",      False),
-    ("scale-r-apophis", "scale_r_apophis", "scale_r_apophis  — Apophis radius scale",  False),
-    ("scale-rho",       "scale_rho",       "scale_rho  — bulk density scale",          False),
-    ("np-apophis",      "np_apophis",      "np_apophis  — DEM particle count (int)",   True),
+    ("scale-vel",       "scale_vel",       "scale_vel  — Apophis velocity scale",     False),
+    ("scale-pos",       "scale_pos",       "scale_pos  — Apophis position scale",     False),
+    ("scale-r-apophis", "scale_r_apophis", "scale_r_apophis  — Apophis radius scale", False),
+    ("scale-rho",       "scale_rho",       "scale_rho  — bulk density scale",         False),
 ]
 
 _MASS_GATE_IDS = ("mass-min-kg", "mass-max-kg", "mass-unit")
@@ -262,7 +261,7 @@ class SobolTUIApp(App[Optional[List[str]]]):
                        Input(str(getattr(d, "batch_slug_max_len",
                                          _runner._BATCH_SLUG_DEFAULT_MAX_LEN)),
                              id="slug-max-len"),
-                       "int ≥ 9")
+                       "int ≥ 17")
 
             # ── Execution ──────────────────────────────────────────────────
             yield Static("Execution", classes="sec")

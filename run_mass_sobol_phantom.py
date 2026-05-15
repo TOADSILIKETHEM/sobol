@@ -226,6 +226,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Sample use_dem (logical) with one Sobol dimension (u>=0.5 -> T).",
     )
     parser.add_argument(
+        "--use-dem-fixed",
+        choices=("true", "false"),
+        default=None,
+        metavar="{true,false}",
+        help=(
+            "Force use_dem to a fixed value in every run. "
+            "Mutually exclusive with --vary-use-dem; omit to leave the template value unchanged."
+        ),
+    )
+    parser.add_argument(
         "--vary-apophis-only",
         action="store_true",
         help=(
@@ -352,6 +362,9 @@ def validate_args(args: argparse.Namespace) -> None:
             raise ValueError(f"{param}: set both min and max, or neither")
         if lo is not None and hi is not None and hi <= lo:
             raise ValueError(f"{param}: require min < max")
+
+    if args.vary_use_dem and args.use_dem_fixed is not None:
+        raise ValueError("--vary-use-dem and --use-dem-fixed are mutually exclusive")
 
     dim = count_dimensions(args)
     if dim == 0:
@@ -485,6 +498,8 @@ def build_run_samples(num_samples: int, args: argparse.Namespace) -> List[RunSam
         if args.vary_use_dem:
             s.use_dem = row[di] >= 0.5
             di += 1
+        elif args.use_dem_fixed is not None:
+            s.use_dem = args.use_dem_fixed == "true"
         if args.vary_apophis_only:
             s.apophis_only = row[di] >= 0.5
             di += 1
@@ -543,6 +558,8 @@ def run_sample_from_salib_row(row: Sequence[float], args: argparse.Namespace) ->
     if args.vary_use_dem:
         s.use_dem = float(row[i]) >= 0.5
         i += 1
+    elif args.use_dem_fixed is not None:
+        s.use_dem = args.use_dem_fixed == "true"
     if args.vary_apophis_only:
         s.apophis_only = float(row[i]) >= 0.5
         i += 1
