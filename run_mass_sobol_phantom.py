@@ -24,6 +24,7 @@ from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 
 AU_IN_KM = 149_597_870.7
+MSUN_KG = 1.98847e30
 EARTH_SINK_ID_DEFAULT = 4
 APOPHIS_SINK_ID_DEFAULT = 11
 
@@ -336,8 +337,8 @@ def validate_args(args: argparse.Namespace) -> None:
             raise ValueError("saltelli-n must be >= 2")
     elif args.num_samples < 1:
         raise ValueError("num-samples must be >= 1")
-    if args.batch_slug_max_len < 9:
-        raise ValueError("batch-slug-max-len must be >= 9 (room for hash suffix when truncating)")
+    if args.batch_slug_max_len < 17:
+        raise ValueError("batch-slug-max-len must be >= 17 (timestamp prefix is 15 chars + separators)")
     m_lo, m_hi = args.mass_min_kg, args.mass_max_kg
     if (m_lo is None) ^ (m_hi is None):
         raise ValueError("mass bounds: set both --mass-min-kg and --mass-max-kg, or neither")
@@ -394,7 +395,7 @@ def format_mass_token(mass_kg: float, mass_unit: str) -> str:
     if mass_unit in ("kg", "g"):
         return f"{(mass_kg * 1.0e3):.10g}*g"
     if mass_unit == "msun":
-        return f"{(mass_kg / 1.98847e30):.10g}*msun"
+        return f"{(mass_kg / MSUN_KG):.10g}*msun"
     raise ValueError(f"Unsupported mass unit: {mass_unit}")
 
 
@@ -626,7 +627,7 @@ def build_batch_directory_basename(args: argparse.Namespace, timestamp: str) -> 
     Batch folder basename: <prefix>_<timestamp>_<sweep_suffix>.
     Per-run folders remain run_XXXX inside this directory.
     """
-    max_len = max(17, int(args.batch_slug_max_len))
+    max_len = int(args.batch_slug_max_len)
     if args.batch_label is not None:
         slug = sanitize_batch_label(args.batch_label)
         if len(slug) > max_len:
@@ -796,9 +797,9 @@ def write_samples_csv(path: Path, samples: List[RunSample], column_order: List[s
                 if col == "mass_input_kg":
                     row.append(f"{s.mass_kg:.12g}" if s.mass_kg is not None else "")
                 elif col == "use_dem":
-                    row.append("T" if s.use_dem else "F" if s.use_dem is not None else "")
+                    row.append("T" if s.use_dem is True else "F" if s.use_dem is False else "")
                 elif col == "apophis_only":
-                    row.append("T" if s.apophis_only else "F" if s.apophis_only is not None else "")
+                    row.append("T" if s.apophis_only is True else "F" if s.apophis_only is False else "")
                 else:
                     v = getattr(s, col, None)
                     row.append(f"{float(v):.12g}" if v is not None else "")
@@ -948,6 +949,8 @@ def _execute_run_worker(payload: RunWorkerPayload) -> RunRecord:
 
 def _print_run_progress(result: RunRecord, samples: List[RunSample], total: int) -> None:
     idx = result.run_id
+    if not (1 <= idx <= len(samples)):
+        raise IndexError(f"run_id {idx} out of range for samples list of length {len(samples)}")
     sample = samples[idx - 1]
     mass_str = f"{sample.mass_kg:.6e} kg" if sample.mass_kg is not None else "(template mass)"
     print(f"[INFO] Run {idx}/{total} mass={mass_str}", flush=True)
@@ -1106,13 +1109,19 @@ def main() -> int:
     print(f"[INFO] Summary written to: {summary_csv}")
 
     if args.saltelli_n is not None and X_saltelli is not None and problem is not None:
+        num_vars = int(problem["num_vars"])
+        if X_saltelli.shape[1] != num_vars:
+            raise ValueError(
+                f"Saltelli design has {X_saltelli.shape[1]} columns but problem specifies "
+                f"num_vars={num_vars}; design matrix and problem dict are inconsistent."
+            )
         manifest_path = output_root / "saltelli_eval_manifest.csv"
         names = list(problem["names"])
         with manifest_path.open("w", newline="", encoding="utf-8") as mf:
             mw = csv.writer(mf)
             mw.writerow(["eval_index", "run_id", *names])
             for j in range(len(samples)):
-                row_vals = [float(X_saltelli[j, k]) for k in range(int(problem["num_vars"]))]
+                row_vals = [float(X_saltelli[j, k]) for k in range(num_vars)]
                 mw.writerow([j, j + 1, *row_vals])
         print(f"[INFO] Wrote Saltelli eval manifest: {manifest_path}")
 

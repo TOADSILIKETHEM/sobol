@@ -163,7 +163,7 @@ INTERACTIVE_BRIEF: Dict[str, tuple[str, str]] = {
     ),
     "batch_slug_max_len": (
         "Maximum length of the batch suffix (auto slug or sanitized label) before truncation + hash.",
-        "Integer >= 9 (enforced after the wizard).",
+        "Integer >= 17 (enforced by the runner at startup).",
     ),
     "phantom_dir": (
         "PHANTOM installation root; must contain bin/phantomsetup and bin/phantom (unless dry-run).",
@@ -397,6 +397,7 @@ def run_interactive_wizard(parser: argparse.ArgumentParser, initial_args: argpar
             if not _prompt_mass_vary_selection(state):
                 setattr(state, "mass_min_kg", None)
                 setattr(state, "mass_max_kg", None)
+                setattr(state, "mass_unit", None)
                 skipped_mass_dests.update(MASS_GATE_DESTS)
             mass_gate_done = True
 
@@ -427,6 +428,22 @@ def run_interactive_wizard(parser: argparse.ArgumentParser, initial_args: argpar
             )
 
         _collect_store(action, state, out)
+
+    # Cross-field validation: min must be strictly less than max for every active pair.
+    errors: List[str] = []
+    m_lo = getattr(state, "mass_min_kg", None)
+    m_hi = getattr(state, "mass_max_kg", None)
+    if m_lo is not None and m_hi is not None and m_lo >= m_hi:
+        errors.append(f"mass: min ({m_lo}) must be < max ({m_hi})")
+    for _param, lo_attr, hi_attr in SCALE_BOUND_PAIRS:
+        lo = getattr(state, lo_attr, None)
+        hi = getattr(state, hi_attr, None)
+        if lo is not None and hi is not None and lo >= hi:
+            errors.append(f"{lo_attr}/{hi_attr}: min ({lo}) must be < max ({hi})")
+    if errors:
+        for msg in errors:
+            print(f"[ERROR] {msg}", file=sys.stderr)
+        raise SystemExit(1)
 
     return out
 

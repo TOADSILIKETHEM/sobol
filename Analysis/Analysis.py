@@ -348,31 +348,27 @@ def rows_to_arrays(
 
     use_ok = ok_only and "status" in fieldnames
 
-    kept: List[Dict[str, str]] = []
+    kept: List[Tuple[Dict[str, str], float]] = []
     for r in rows:
         if use_ok and r.get("status", "").strip().lower() != "ok":
             continue
         yv = _parse_numeric_cell(r.get(response, ""))
         if yv is None or not math.isfinite(yv):
             continue
-        kept.append(r)
+        kept.append((r, yv))
 
     if not kept:
         raise ValueError("No usable rows after filtering (check status and finite response).")
 
     if log_response:
         logs: List[float] = []
-        for r in kept:
-            yv = _parse_numeric_cell(r.get(response, ""))
-            if yv is None or yv <= 0 or not math.isfinite(yv):
+        for _r, yv in kept:
+            if yv <= 0:
                 raise ValueError("--log-response requires strictly positive finite response values.")
             logs.append(math.log10(yv))
         y_arr = np.array(logs, dtype=float)
     else:
-        y_arr = np.array(
-            [float(_parse_numeric_cell(r.get(response, "")) or 0.0) for r in kept],
-            dtype=float,
-        )
+        y_arr = np.array([yv for _r, yv in kept], dtype=float)
 
     input_names: List[str] = []
     col_arrays: Dict[str, np.ndarray] = {}
@@ -382,13 +378,13 @@ def rows_to_arrays(
             continue
         vals: List[float] = []
         ok = True
-        for r in kept:
+        for r, _yv in kept:
             v = _parse_numeric_cell(r.get(name, ""))
             if v is None or not math.isfinite(v):
                 ok = False
                 break
             vals.append(v)
-        if not ok or len(vals) != len(kept):
+        if not ok:
             continue
         x = np.array(vals, dtype=float)
         if np.ptp(x) <= 0.0:
@@ -459,6 +455,8 @@ def bootstrap_eta_sq(
     n_boot: int,
     seed: int,
 ) -> Tuple[float, float]:
+    if len(x) != len(y):
+        raise ValueError(f"bootstrap_eta_sq: x and y must have the same length ({len(x)} vs {len(y)})")
     rng = np.random.default_rng(seed)
     stat = correlation_ratio_quantile(x, y, n_bins)
     if n_boot <= 0:
