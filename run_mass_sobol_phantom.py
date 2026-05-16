@@ -32,8 +32,21 @@ APOPHIS_SINK_ID_DEFAULT = 11
 _BATCH_SLUG_DEFAULT_MAX_LEN = 120
 _SLUG_SAFE_RE = re.compile(r"[^A-Za-z0-9_.\-]+")
 
-# Honours repo layout: phantom/ sibling of sobol/ (override with PHANTOM_DIR).
-_DEFAULT_PHANTOM_DIR = Path(__file__).resolve().parent.parent / "phantom"
+# Default install root: this directory. Override with PHANTOM_DIR.
+_DEFAULT_PHANTOM_DIR = Path(__file__).resolve().parent
+
+
+def resolve_phantom_executable(phantom_dir: Path, name: str, *, must_exist: bool) -> Path:
+    """Prefer ``phantom_dir/bin/<name>``, then ``phantom_dir/<name>`` (flat install)."""
+    bin_path = phantom_dir / "bin" / name
+    root_path = phantom_dir / name
+    for p in (bin_path, root_path):
+        if p.is_file():
+            return p
+    if not must_exist:
+        return bin_path
+    raise FileNotFoundError(f"Missing PHANTOM binary {name!r}: tried {bin_path}, {root_path}")
+
 
 # Scale parameters varied via CLI min/max: (RunSample/.setup attribute, argparse lo/hi attrs, batch slug token).
 # Order MUST match Sobol dimension ordering used in build_run_samples and CSV columns.
@@ -121,6 +134,7 @@ class RunSample:
     scale_r_apophis: Optional[float] = None
     scale_rho: Optional[float] = None
     use_dem: Optional[bool] = None
+    use_obj_crop: Optional[bool] = None
     apophis_only: Optional[bool] = None
 
 
@@ -140,6 +154,7 @@ class RunWorkerPayload(NamedTuple):
     earth_sink_id: int
     apophis_sink_id: int
     ephemeris_cache_dir: Optional[str]
+    obj_crop_file: Optional[str]
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -236,6 +251,34 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--vary-use-obj-crop",
+        action="store_true",
+        help=(
+            "Sample OBJ cropping with one Sobol dimension (u>=0.5 -> T, writes --obj-crop-file "
+            "to obj_file in setup; else blanks obj_file to disable cropping)."
+        ),
+    )
+    parser.add_argument(
+        "--use-obj-crop-fixed",
+        choices=("true", "false"),
+        default=None,
+        metavar="{true,false}",
+        help=(
+            "Force OBJ cropping to a fixed value in every run: 'true' writes --obj-crop-file to "
+            "obj_file; 'false' blanks obj_file to disable cropping. "
+            "Mutually exclusive with --vary-use-obj-crop; omit to leave the template obj_file unchanged."
+        ),
+    )
+    parser.add_argument(
+        "--obj-crop-file",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Path to the OBJ file written into obj_file when OBJ cropping is enabled "
+            "(--vary-use-obj-crop or --use-obj-crop-fixed true). Required when cropping may be enabled."
+        ),
+    )
+    parser.add_argument(
         "--vary-apophis-only",
         action="store_true",
         help=(
@@ -282,7 +325,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--phantom-dir",
         default=os.environ.get("PHANTOM_DIR", str(_DEFAULT_PHANTOM_DIR)),
-        help="PHANTOM installation root containing bin/phantomsetup and bin/phantom.",
+        help=(
+            "PHANTOM install root: resolves each binary as <root>/bin/<name> first, "
+            "then <root>/<name> (upstream layout vs flat copy)."
+        ),
     )
     parser.add_argument(
         "--dry-run",
@@ -366,6 +412,11 @@ def validate_args(args: argparse.Namespace) -> None:
     if args.vary_use_dem and args.use_dem_fixed is not None:
         raise ValueError("--vary-use-dem and --use-dem-fixed are mutually exclusive")
 
+    if args.vary_use_obj_crop and args.use_obj_crop_fixed is not None:
+        raise ValueError("--vary-use-obj-crop and --use-obj-crop-fixed are mutually exclusive")
+    if (args.vary_use_obj_crop or args.use_obj_crop_fixed == "true") and not args.obj_crop_file:
+        raise ValueError("--obj-crop-file must be set when OBJ cropping may be enabled")
+
     dim = count_dimensions(args)
     if dim == 0:
         raise ValueError(
@@ -380,6 +431,8 @@ def count_dimensions(args: argparse.Namespace) -> int:
         n += 1
     n += len(_active_scale_variations(args))
     if args.vary_use_dem:
+        n += 1
+    if args.vary_use_obj_crop:
         n += 1
     if args.vary_apophis_only:
         n += 1
@@ -449,7 +502,9 @@ def validate_assignment(setup_text: str, key: str, expected: str) -> None:
         raise RuntimeError(f"{key} mismatch after setup update (expected {expected!r}, got {assigned!r})")
 
 
-def apply_run_sample_to_setup(setup_path: Path, sample: RunSample, mass_unit: str) -> Dict[str, str]:
+def apply_run_sample_to_setup(
+    setup_path: Path, sample: RunSample, mass_unit: str, obj_crop_file: Optional[str] = None
+) -> Dict[str, str]:
     """Patch setup file; returns map of column_name -> value string for CSV."""
     text = setup_path.read_text(encoding="utf-8")
     columns: Dict[str, str] = {}
@@ -471,6 +526,12 @@ def apply_run_sample_to_setup(setup_path: Path, sample: RunSample, mass_unit: st
         text = replace_setup_assignment(text, "use_dem", tok)
         validate_assignment(text, "use_dem", tok)
         columns["use_dem"] = "T" if sample.use_dem else "F"
+
+    if sample.use_obj_crop is not None:
+        path_tok = (obj_crop_file or "") if sample.use_obj_crop else ""
+        text = replace_setup_assignment(text, "obj_file", path_tok)
+        validate_assignment(text, "obj_file", path_tok)
+        columns["use_obj_crop"] = "T" if sample.use_obj_crop else "F"
 
     if sample.apophis_only is not None:
         tok = format_logical_token(sample.apophis_only)
@@ -500,6 +561,11 @@ def build_run_samples(num_samples: int, args: argparse.Namespace) -> List[RunSam
             di += 1
         elif args.use_dem_fixed is not None:
             s.use_dem = args.use_dem_fixed == "true"
+        if args.vary_use_obj_crop:
+            s.use_obj_crop = row[di] >= 0.5
+            di += 1
+        elif args.use_obj_crop_fixed is not None:
+            s.use_obj_crop = args.use_obj_crop_fixed == "true"
         if args.vary_apophis_only:
             s.apophis_only = row[di] >= 0.5
             di += 1
@@ -518,6 +584,8 @@ def sample_column_order(args: argparse.Namespace) -> List[str]:
         order.append(param)
     if args.vary_use_dem:
         order.append("use_dem")
+    if args.vary_use_obj_crop:
+        order.append("use_obj_crop")
     if args.vary_apophis_only:
         order.append("apophis_only")
     return order
@@ -535,6 +603,9 @@ def build_salib_problem(args: argparse.Namespace) -> Dict[str, object]:
         bounds.append([float(lo), float(hi)])
     if args.vary_use_dem:
         names.append("use_dem")
+        bounds.append([0.0, 1.0])
+    if args.vary_use_obj_crop:
+        names.append("use_obj_crop")
         bounds.append([0.0, 1.0])
     if args.vary_apophis_only:
         names.append("apophis_only")
@@ -560,6 +631,11 @@ def run_sample_from_salib_row(row: Sequence[float], args: argparse.Namespace) ->
         i += 1
     elif args.use_dem_fixed is not None:
         s.use_dem = args.use_dem_fixed == "true"
+    if args.vary_use_obj_crop:
+        s.use_obj_crop = float(row[i]) >= 0.5
+        i += 1
+    elif args.use_obj_crop_fixed is not None:
+        s.use_obj_crop = args.use_obj_crop_fixed == "true"
     if args.vary_apophis_only:
         s.apophis_only = float(row[i]) >= 0.5
         i += 1
@@ -595,6 +671,7 @@ def canonical_sweep_descriptor(args: argparse.Namespace) -> str:
     for param, lo, hi, _ in _active_scale_variations(args):
         parts.append(f"{param}={lo}:{hi}")
     parts.append(f"vary_use_dem={args.vary_use_dem}")
+    parts.append(f"vary_use_obj_crop={args.vary_use_obj_crop}")
     parts.append(f"vary_apophis_only={args.vary_apophis_only}")
     return "|".join(parts)
 
@@ -616,6 +693,8 @@ def build_auto_batch_sweep_slug(args: argparse.Namespace, max_len: int) -> str:
         tokens.append(f"{slug_tok}{_fmt_slug_float(lo)}-{_fmt_slug_float(hi)}")
     if args.vary_use_dem:
         tokens.append("dem")
+    if args.vary_use_obj_crop:
+        tokens.append("objcrop")
     if args.vary_apophis_only:
         tokens.append("ao")
     slug = "_".join(tokens)
@@ -791,13 +870,10 @@ def preflight(args: argparse.Namespace, base_dir: Path, output_root: Path) -> Tu
     if not base_input.is_file():
         raise FileNotFoundError(f"Missing input file: {base_input}")
 
-    phantomsetup_bin = Path(args.phantom_dir) / "bin" / "phantomsetup"
-    phantom_bin = Path(args.phantom_dir) / "bin" / "phantom"
-    if not args.dry_run:
-        if not phantomsetup_bin.is_file():
-            raise FileNotFoundError(f"Missing PHANTOM binary: {phantomsetup_bin}")
-        if not phantom_bin.is_file():
-            raise FileNotFoundError(f"Missing PHANTOM binary: {phantom_bin}")
+    phantom_root = Path(args.phantom_dir)
+    must_exist = not args.dry_run
+    phantomsetup_bin = resolve_phantom_executable(phantom_root, "phantomsetup", must_exist=must_exist)
+    phantom_bin = resolve_phantom_executable(phantom_root, "phantom", must_exist=must_exist)
 
     output_root.mkdir(parents=True, exist_ok=True)
     return base_setup, base_input, phantomsetup_bin, phantom_bin
@@ -815,6 +891,8 @@ def write_samples_csv(path: Path, samples: List[RunSample], column_order: List[s
                     row.append(f"{s.mass_kg:.12g}" if s.mass_kg is not None else "")
                 elif col == "use_dem":
                     row.append("T" if s.use_dem is True else "F" if s.use_dem is False else "")
+                elif col == "use_obj_crop":
+                    row.append("T" if s.use_obj_crop is True else "F" if s.use_obj_crop is False else "")
                 elif col == "apophis_only":
                     row.append("T" if s.apophis_only is True else "F" if s.apophis_only is False else "")
                 else:
@@ -880,6 +958,7 @@ def run_one_case(
     earth_sink_id: int,
     apophis_sink_id: int,
     ephemeris_cache_dir: Optional[Path] = None,
+    obj_crop_file: Optional[str] = None,
 ) -> RunRecord:
     run_dir = output_root / f"run_{run_id:04d}"
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -887,7 +966,7 @@ def run_one_case(
     run_input = run_dir / f"{prefix}.in"
     shutil.copy2(base_setup, run_setup)
     shutil.copy2(base_input, run_input)
-    param_columns = apply_run_sample_to_setup(run_setup, sample, mass_unit)
+    param_columns = apply_run_sample_to_setup(run_setup, sample, mass_unit, obj_crop_file)
 
     if ephemeris_cache_dir is not None:
         copy_ephemeris_txt_cache(ephemeris_cache_dir, run_dir)
@@ -961,6 +1040,7 @@ def _execute_run_worker(payload: RunWorkerPayload) -> RunRecord:
         payload.earth_sink_id,
         payload.apophis_sink_id,
         Path(payload.ephemeris_cache_dir) if payload.ephemeris_cache_dir else None,
+        payload.obj_crop_file,
     )
 
 
@@ -1088,6 +1168,7 @@ def main() -> int:
             earth_sink_id=args.sink_earth_id,
             apophis_sink_id=args.sink_apophis_id,
             ephemeris_cache_dir=str(ephemeris_cache) if ephemeris_cache is not None else None,
+            obj_crop_file=args.obj_crop_file if args.obj_crop_file else None,
         )
         for idx, sample in enumerate(samples, start=1)
     ]

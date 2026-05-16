@@ -235,6 +235,25 @@ class SobolTUIApp(App[Optional[List[str]]]):
                               value=dem_fixed_val,
                               id="use-dem-fixed", disabled=vary_dem),
                        "if not varying")
+            vary_obj = bool(getattr(d, "vary_use_obj_crop", False))
+            obj_fixed_raw = getattr(d, "use_obj_crop_fixed", None)
+            obj_fixed_val = obj_fixed_raw if obj_fixed_raw in ("true", "false") else ""
+            obj_path_active = vary_obj or obj_fixed_val == "true"
+            yield _Row("vary_use_obj_crop",
+                       Checkbox("vary OBJ cropping as a Sobol dimension  (u≥0.5 → crop)",
+                                value=vary_obj, id="vary-use-obj-crop"))
+            yield _Row("  use_obj_crop_fixed",
+                       Select([("(from template)", ""),
+                               ("True", "true"),
+                               ("False", "false")],
+                              value=obj_fixed_val,
+                              id="use-obj-crop-fixed", disabled=vary_obj),
+                       "if not varying")
+            yield _Row("  obj_crop_file",
+                       Input(str(getattr(d, "obj_crop_file", "") or ""), id="obj-crop-file",
+                             disabled=not obj_path_active,
+                             placeholder="path/to/apophis.obj  (required when cropping on)"),
+                       "OBJ path")
             yield _Row("vary_apophis_only",
                        Checkbox("vary apophis_only (Earth absent when True; CA → NaN)",
                                 value=bool(getattr(d, "vary_apophis_only", False)),
@@ -296,12 +315,23 @@ class SobolTUIApp(App[Optional[List[str]]]):
         elif cb_id == "vary-use-dem":
             self.query_one("#use-dem-fixed").disabled = active
 
+        elif cb_id == "vary-use-obj-crop":
+            self.query_one("#use-obj-crop-fixed").disabled = active
+            # path field is needed whenever cropping may be on
+            self.query_one("#obj-crop-file").disabled = not active
+
         else:
             for css, _, _, _ in _SCALE_DIMS:
                 if cb_id == f"vary-{css}":
                     self.query_one(f"#{css}-min").disabled = not active
                     self.query_one(f"#{css}-max").disabled = not active
                     break
+
+    @on(Select.Changed)
+    def _select_gate(self, event: Select.Changed) -> None:
+        if event.select.id == "use-obj-crop-fixed":
+            val = "" if event.value is Select.BLANK else str(event.value)
+            self.query_one("#obj-crop-file").disabled = (val != "true")
 
     # ── button / action handlers ───────────────────────────────────────────────
 
@@ -433,6 +463,15 @@ class SobolTUIApp(App[Optional[List[str]]]):
             df = self._sel("use-dem-fixed")
             if df:
                 argv.extend(["--use-dem-fixed", df])
+        if self._cb("vary-use-obj-crop"):
+            argv.append("--vary-use-obj-crop")
+            si("obj-crop-file", "--obj-crop-file")
+        else:
+            ocf = self._sel("use-obj-crop-fixed")
+            if ocf:
+                argv.extend(["--use-obj-crop-fixed", ocf])
+                if ocf == "true":
+                    si("obj-crop-file", "--obj-crop-file")
         if self._cb("vary-apophis-only"):
             argv.append("--vary-apophis-only")
 

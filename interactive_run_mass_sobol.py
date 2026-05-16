@@ -58,6 +58,9 @@ DEST_TO_SECTION: Dict[str, str] = {
     "scale_rho_min": "Scale bounds (optional dimensions)",
     "scale_rho_max": "Scale bounds (optional dimensions)",
     "vary_use_dem": "Setup toggles",
+    "vary_use_obj_crop": "Setup toggles",
+    "use_obj_crop_fixed": "Setup toggles",
+    "obj_crop_file": "Paths",
     "vary_apophis_only": "Setup toggles",
     "sink_earth_id": "Sinks / post-processing",
     "sink_apophis_id": "Sinks / post-processing",
@@ -141,6 +144,20 @@ INTERACTIVE_BRIEF: Dict[str, tuple[str, str]] = {
         "If yes, adds a Sobol dimension that toggles use_dem in the setup (T/F across runs).",
         "y, n, yes, no, t, f, 1, 0; or Enter to keep the current value.",
     ),
+    "vary_use_obj_crop": (
+        "If yes, adds a Sobol dimension that toggles OBJ cropping (writes --obj-crop-file path or blanks obj_file).",
+        "y, n, yes, no, t, f, 1, 0; or Enter to keep the current value.",
+    ),
+    "use_obj_crop_fixed": (
+        "Force OBJ cropping on or off for every run: 'true' writes --obj-crop-file to obj_file; 'false' blanks it. "
+        "Omit to leave the template obj_file unchanged.",
+        "true, false; or Enter to keep the current value (None = leave template unchanged).",
+    ),
+    "obj_crop_file": (
+        "Path to the OBJ file written into obj_file when OBJ cropping is enabled. "
+        "Required when --vary-use-obj-crop or --use-obj-crop-fixed true.",
+        "File path string; or Enter for none / current value.",
+    ),
     "vary_apophis_only": (
         "If yes, adds a dimension toggling apophis_only (Earth absent when true; CA metrics may be NaN).",
         "y, n, yes, no, t, f, 1, 0; or Enter to keep the current value.",
@@ -166,7 +183,7 @@ INTERACTIVE_BRIEF: Dict[str, tuple[str, str]] = {
         "Integer >= 17 (enforced by the runner at startup).",
     ),
     "phantom_dir": (
-        "PHANTOM installation root; must contain bin/phantomsetup and bin/phantom (unless dry-run).",
+        "PHANTOM install root; each binary is <root>/bin/<name> or <root>/<name> (unless dry-run).",
         "Directory path; or Enter to keep the current value.",
     ),
     "dry_run": (
