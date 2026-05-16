@@ -1,2 +1,22 @@
+# Python
 __pycache__/
 *.py[cod]
+
+# PHANTOM binaries and build artefacts
+phantom
+phantomsetup
+bin/
+tq
+*.o
+*.mod
+phantom_version
+
+# Simulation run outputs — large, reproducible, never commit
+sobol_mass_runs/
+*.dump
+*.ev
+*.tmp
+*.dmp
+
+# PHANTOM scratch / queue files
+sobol_00000.tmp
