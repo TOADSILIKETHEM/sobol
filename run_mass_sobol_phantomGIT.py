@@ -27,30 +27,12 @@ AU_IN_KM = 149_597_870.7
 EARTH_SINK_ID_DEFAULT = 4
 APOPHIS_SINK_ID_DEFAULT = 11
 
-# MAXPTMASS is a compile-time array bound on the number of sink particles (config.F90).
-# The default upstream value is 1000. The close-packed lattice placement routine overshoots
-# the requested np_apophis by ~2-3% (observed: np_apophis=1000 -> 1012 actual sinks), so
-# any run with np_apophis >= ~975 will exceed MAXPTMASS=1000 and phantomsetup will abort:
-#   "ERROR: nptmass=1012 exceeds ptmass array dimensions of 1000"
-# Fix: compile with MAXPTMASS=2000 (set in the Makefile 'ifndef MAXPTMASS' block).
-_MAXPTMASS_DEFAULT = 1000
-_LATTICE_OVERSHOOT_FRACTION = 0.025
-_MAXPTMASS_WARN_THRESHOLD = int(_MAXPTMASS_DEFAULT * (1.0 - _LATTICE_OVERSHOOT_FRACTION))  # 975
-
-# Matches the PHANTOM error line emitted when nptmass exceeds the compiled array bound.
-_MAXPTMASS_ERR_RE = re.compile(
-    r"nptmass\s*=\s*(\d+)\s+exceeds\s+ptmass\s+array\s+dimensions\s+of\s+(\d+)",
-    re.IGNORECASE,
-)
-
 # Auto-generated batch folder suffix (after "{prefix}_{timestamp}_"); keep paths portable.
 _BATCH_SLUG_DEFAULT_MAX_LEN = 120
 _SLUG_SAFE_RE = re.compile(r"[^A-Za-z0-9_.\-]+")
 
 # Default install root: this directory. Override with PHANTOM_DIR.
 _DEFAULT_PHANTOM_DIR = Path(__file__).resolve().parent
-
-_NP_APOPHIS_RE = re.compile(r"^(\s*np_apophis\s*=\s*)\d+", re.MULTILINE | re.IGNORECASE)
 
 
 def resolve_phantom_executable(phantom_dir: Path, name: str, *, must_exist: bool) -> Path:
@@ -63,45 +45,6 @@ def resolve_phantom_executable(phantom_dir: Path, name: str, *, must_exist: bool
     if not must_exist:
         return bin_path
     raise FileNotFoundError(f"Missing PHANTOM binary {name!r}: tried {bin_path}, {root_path}")
-
-
-def _diagnose_maxptmass_error(log_path: Path) -> Optional[str]:
-    """Scan a phantomsetup log for the MAXPTMASS overflow error and return an actionable message.
-
-    Without this, a failed run records only "Command failed (1)" with no indication that
-    the binary needs to be recompiled with a larger MAXPTMASS.
-    """
-    try:
-        text = log_path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return None
-    m = _MAXPTMASS_ERR_RE.search(text)
-    if not m:
-        return None
-    actual = int(m.group(1))
-    compiled = int(m.group(2))
-    needed = int(actual * 1.15) + 1
-    return (
-        f"phantomsetup: nptmass={actual} exceeds compiled MAXPTMASS={compiled}. "
-        f"Rebuild phantom and phantomsetup with MAXPTMASS>={needed}: "
-        f"add 'MAXPTMASS={needed}' to the Makefile 'ifndef MAXPTMASS' block, "
-        "then run 'make setup && make'."
-    )
-
-
-def _np_apophis_maxptmass_warning(sample: "RunSample") -> Optional[str]:
-    """Warn before running when np_apophis is close enough to MAXPTMASS that lattice overshoot
-    will push the actual sink count over the compiled limit, causing phantomsetup to abort.
-    """
-    if sample.np_apophis is None or sample.np_apophis < _MAXPTMASS_WARN_THRESHOLD:
-        return None
-    return (
-        f"np_apophis={sample.np_apophis} is at or above the safe limit ({_MAXPTMASS_WARN_THRESHOLD}) "
-        f"for default MAXPTMASS={_MAXPTMASS_DEFAULT}. The close-packed lattice overshoots "
-        "np_apophis by ~2-3%, which will cause phantomsetup to abort. "
-        "Ensure PHANTOM is compiled with MAXPTMASS>np_apophis "
-        "(e.g. set MAXPTMASS=2000 in the Makefile 'ifndef MAXPTMASS' block, then run 'make setup && make')."
-    )
 
 
 # Scale parameters varied via CLI min/max: (RunSample/.setup attribute, argparse lo/hi attrs, batch slug token).
@@ -190,9 +133,7 @@ class RunSample:
     scale_r_apophis: Optional[float] = None
     scale_rho: Optional[float] = None
     use_dem: Optional[bool] = None
-    use_shape_crop: Optional[bool] = None
     apophis_only: Optional[bool] = None
-    np_apophis: Optional[int] = None
 
 
 class RunWorkerPayload(NamedTuple):
@@ -206,12 +147,11 @@ class RunWorkerPayload(NamedTuple):
     prefix: str
     phantomsetup_bin: str
     phantom_bin: str
-    ref_mass_kg: Optional[float]
+    mass_unit: str
     dry_run: bool
     earth_sink_id: int
     apophis_sink_id: int
     ephemeris_cache_dir: Optional[str]
-    shape_file: Optional[str]
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -259,15 +199,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Upper bound for Apophis mass in kg; omit with --mass-min-kg to leave mass unvaried.",
     )
     parser.add_argument(
-        "--apophis-ref-mass-kg",
-        type=float,
-        default=None,
-        metavar="KG",
+        "--mass-unit",
+        choices=("kg", "g", "msun"),
+        default="kg",
         help=(
-            "Baseline Apophis mass in kg at scale_rho=1 (i.e. using the template density). "
-            "Required when --mass-min-kg and --mass-max-kg are set. "
-            "The sampled mass is converted to scale_rho = mass_kg / ref_mass_kg and patched "
-            "into the setup file."
+            "Unit token written to m_apophis_in. Sample mass is always drawn in kg; "
+            "'kg' and 'g' both convert that mass to grams for *g in the setup file."
         ),
     )
     parser.add_argument(
@@ -299,68 +236,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--vary-use-dem",
         action="store_true",
         help="Sample use_dem (logical) with one Sobol dimension (u>=0.5 -> T).",
-    )
-    parser.add_argument(
-        "--use-dem-fixed",
-        choices=("true", "false"),
-        default=None,
-        metavar="{true,false}",
-        help=(
-            "Force use_dem to a fixed value in every run. "
-            "Mutually exclusive with --vary-use-dem; omit to leave the template value unchanged."
-        ),
-    )
-    parser.add_argument(
-        "--np-apophis",
-        type=int,
-        default=None,
-        metavar="N",
-        help=(
-            "Fix np_apophis to a single value in every run's setup (0=none, 1=sink, N>1=gas/DEM). "
-            "Mutually exclusive with --np-apophis-list. Omit to leave the template value unchanged."
-        ),
-    )
-    parser.add_argument(
-        "--np-apophis-list",
-        nargs="+",
-        type=int,
-        default=None,
-        metavar="N",
-        help=(
-            "Run one simulation per np_apophis value within a single batch "
-            "(e.g. --np-apophis-list 250 500 1000 → run_0001=250, run_0002=500, run_0003=1000). "
-            "Mutually exclusive with --np-apophis and --num-samples (run count = len of list). "
-            "Other parameters stay at template or fixed values (--use-dem-fixed etc. still apply)."
-        ),
-    )
-    parser.add_argument(
-        "--vary-use-shape-crop",
-        action="store_true",
-        help=(
-            "Sample shape cropping with one Sobol dimension (u>=0.5 -> T, writes --shape-file "
-            "to apophis_shape_file in setup; else blanks apophis_shape_file to disable cropping)."
-        ),
-    )
-    parser.add_argument(
-        "--use-shape-crop-fixed",
-        choices=("true", "false"),
-        default=None,
-        metavar="{true,false}",
-        help=(
-            "Force shape cropping to a fixed value in every run: 'true' writes --shape-file to "
-            "apophis_shape_file; 'false' blanks apophis_shape_file to disable cropping. "
-            "Mutually exclusive with --vary-use-shape-crop; omit to leave the template apophis_shape_file unchanged."
-        ),
-    )
-    parser.add_argument(
-        "--shape-file",
-        default=None,
-        metavar="PATH",
-        help=(
-            "Path to the shape config file (or .obj) written into apophis_shape_file when shape "
-            "cropping is enabled (--vary-use-shape-crop or --use-shape-crop-fixed true). "
-            "Required when cropping may be enabled."
-        ),
     )
     parser.add_argument(
         "--vary-apophis-only",
@@ -472,35 +347,19 @@ def _strip_interactive_flags(argv: Sequence[str]) -> Tuple[List[str], bool]:
 def validate_args(args: argparse.Namespace) -> None:
     if args.jobs < 1:
         raise ValueError("jobs must be >= 1")
-
-    np_list = getattr(args, "np_apophis_list", None)
-
-    # np_apophis_list drives run count directly; num_samples / saltelli_n are irrelevant in that mode.
-    if np_list is None:
-        if args.saltelli_n is not None:
-            if args.saltelli_n < 2:
-                raise ValueError("saltelli-n must be >= 2")
-        elif args.num_samples < 1:
-            raise ValueError("num-samples must be >= 1")
-
-    if args.batch_slug_max_len < 17:
-        raise ValueError("batch-slug-max-len must be >= 17 (timestamp prefix is 15 chars + separators)")
+    if args.saltelli_n is not None:
+        if args.saltelli_n < 2:
+            raise ValueError("saltelli-n must be >= 2")
+    elif args.num_samples < 1:
+        raise ValueError("num-samples must be >= 1")
+    if args.batch_slug_max_len < 9:
+        raise ValueError("batch-slug-max-len must be >= 9 (room for hash suffix when truncating)")
     m_lo, m_hi = args.mass_min_kg, args.mass_max_kg
     if (m_lo is None) ^ (m_hi is None):
         raise ValueError("mass bounds: set both --mass-min-kg and --mass-max-kg, or neither")
     if _mass_bounds_active(args):
         if m_lo <= 0 or m_hi <= 0 or m_hi <= m_lo:
             raise ValueError("mass bounds must satisfy 0 < mass-min-kg < mass-max-kg")
-        if args.apophis_ref_mass_kg is None:
-            raise ValueError("--apophis-ref-mass-kg is required when --mass-min-kg and --mass-max-kg are set")
-        if args.apophis_ref_mass_kg <= 0:
-            raise ValueError("--apophis-ref-mass-kg must be > 0")
-        active_scale = _active_scale_variations(args)
-        if any(p == "scale_rho" for p, *_ in active_scale):
-            raise ValueError(
-                "--mass-min-kg/max-kg and --scale-rho-min/max cannot both be active: "
-                "both patch scale_rho in the setup file"
-            )
     for param, lo_attr, hi_attr, _ in _SCALE_VARIATION_SPEC:
         lo = getattr(args, lo_attr)
         hi = getattr(args, hi_attr)
@@ -509,42 +368,11 @@ def validate_args(args: argparse.Namespace) -> None:
         if lo is not None and hi is not None and hi <= lo:
             raise ValueError(f"{param}: require min < max")
 
-    if args.vary_use_dem and args.use_dem_fixed is not None:
-        raise ValueError("--vary-use-dem and --use-dem-fixed are mutually exclusive")
-
-    if args.np_apophis is not None and args.np_apophis < 0:
-        raise ValueError("--np-apophis must be >= 0")
-
-    # --np-apophis-list and --np-apophis are mutually exclusive.
-    if np_list is not None and args.np_apophis is not None:
-        raise ValueError("--np-apophis-list and --np-apophis are mutually exclusive")
-    if np_list is not None:
-        if len(np_list) < 1:
-            raise ValueError("--np-apophis-list requires at least one value")
-        if any(n < 0 for n in np_list):
-            raise ValueError("all --np-apophis-list values must be >= 0")
-        # Warn early for values that risk MAXPTMASS overflow after lattice overshoot.
-        high = [n for n in np_list if n >= _MAXPTMASS_WARN_THRESHOLD]
-        if high:
-            print(
-                f"[WARN] --np-apophis-list values {high} >= {_MAXPTMASS_WARN_THRESHOLD}: "
-                f"lattice overshoot (~2-3%) may exceed default MAXPTMASS={_MAXPTMASS_DEFAULT}. "
-                "Ensure PHANTOM is compiled with MAXPTMASS>max(np_apophis_list) "
-                "(e.g. MAXPTMASS=2000 in the Makefile).",
-                file=sys.stderr,
-            )
-
-    if args.vary_use_shape_crop and args.use_shape_crop_fixed is not None:
-        raise ValueError("--vary-use-shape-crop and --use-shape-crop-fixed are mutually exclusive")
-    if (args.vary_use_shape_crop or args.use_shape_crop_fixed == "true") and not args.shape_file:
-        raise ValueError("--shape-file must be set when shape cropping may be enabled")
-
-    # np_apophis_list itself constitutes variation; allow dim=0 in that mode.
     dim = count_dimensions(args)
-    if dim == 0 and not np_list:
+    if dim == 0:
         raise ValueError(
             "No varying dimensions: set both --mass-min-kg and --mass-max-kg and/or pass scale */ "
-            "vary-use-dem / vary-apophis-only / --np-apophis-list."
+            "vary-use-dem / vary-apophis-only."
         )
 
 
@@ -554,8 +382,6 @@ def count_dimensions(args: argparse.Namespace) -> int:
         n += 1
     n += len(_active_scale_variations(args))
     if args.vary_use_dem:
-        n += 1
-    if args.vary_use_shape_crop:
         n += 1
     if args.vary_apophis_only:
         n += 1
@@ -578,6 +404,14 @@ def sobol_1d_samples(n: int, seed: int) -> List[float]:
         out.append((x & 0xFFFFFFFF) / 2**32)
     return out
 
+
+def format_mass_token(mass_kg: float, mass_unit: str) -> str:
+    # Internal masses are always kg from Sobol sampling; *g line uses grams.
+    if mass_unit in ("kg", "g"):
+        return f"{(mass_kg * 1.0e3):.10g}*g"
+    if mass_unit == "msun":
+        return f"{(mass_kg / 1.98847e30):.10g}*msun"
+    raise ValueError(f"Unsupported mass unit: {mass_unit}")
 
 
 def format_logical_token(val: bool) -> str:
@@ -617,20 +451,15 @@ def validate_assignment(setup_text: str, key: str, expected: str) -> None:
         raise RuntimeError(f"{key} mismatch after setup update (expected {expected!r}, got {assigned!r})")
 
 
-def apply_run_sample_to_setup(
-    setup_path: Path, sample: RunSample, ref_mass_kg: Optional[float] = None, shape_file: Optional[str] = None
-) -> Dict[str, str]:
+def apply_run_sample_to_setup(setup_path: Path, sample: RunSample, mass_unit: str) -> Dict[str, str]:
     """Patch setup file; returns map of column_name -> value string for CSV."""
     text = setup_path.read_text(encoding="utf-8")
     columns: Dict[str, str] = {}
 
     if sample.mass_kg is not None:
-        if ref_mass_kg is None:
-            raise RuntimeError("ref_mass_kg required to convert mass sample to scale_rho")
-        scale_rho_val = sample.mass_kg / ref_mass_kg
-        tok = format_real_token(scale_rho_val)
-        text = replace_setup_assignment(text, "scale_rho", tok)
-        validate_assignment(text, "scale_rho", tok)
+        tok = format_mass_token(sample.mass_kg, mass_unit)
+        text = replace_setup_assignment(text, "m_apophis_in", tok)
+        validate_assignment(text, "m_apophis_in", tok)
     for param, _, _, _ in _SCALE_VARIATION_SPEC:
         v = getattr(sample, param)
         if v is not None:
@@ -645,43 +474,14 @@ def apply_run_sample_to_setup(
         validate_assignment(text, "use_dem", tok)
         columns["use_dem"] = "T" if sample.use_dem else "F"
 
-    if sample.use_shape_crop is not None:
-        path_tok = (shape_file or "") if sample.use_shape_crop else ""
-        text = replace_setup_assignment(text, "apophis_shape_file", path_tok)
-        validate_assignment(text, "apophis_shape_file", path_tok)
-        columns["use_shape_crop"] = "T" if sample.use_shape_crop else "F"
-
     if sample.apophis_only is not None:
         tok = format_logical_token(sample.apophis_only)
         text = replace_setup_assignment(text, "apophis_only", tok)
         validate_assignment(text, "apophis_only", tok)
         columns["apophis_only"] = "T" if sample.apophis_only else "F"
 
-    if sample.np_apophis is not None:
-        if not _NP_APOPHIS_RE.search(text):
-            raise RuntimeError("np_apophis assignment not found in .setup file")
-        text = _NP_APOPHIS_RE.sub(lambda m: m.group(1) + str(sample.np_apophis), text, count=1)
-        columns["np_apophis"] = str(sample.np_apophis)
-
     setup_path.write_text(text, encoding="utf-8")
     return columns
-
-
-def build_np_list_samples(args: argparse.Namespace) -> List[RunSample]:
-    """One RunSample per value in --np-apophis-list; all other params at template or fixed values.
-
-    This lets a single batch produce run_0001=np1, run_0002=np2, ... without the Sobol dimension
-    requirement, replacing the previous approach of spawning one subprocess per count.
-    """
-    out: List[RunSample] = []
-    for n in args.np_apophis_list:
-        s = RunSample(np_apophis=n)
-        if args.use_dem_fixed is not None:
-            s.use_dem = args.use_dem_fixed == "true"
-        if args.use_shape_crop_fixed is not None:
-            s.use_shape_crop = args.use_shape_crop_fixed == "true"
-        out.append(s)
-    return out
 
 
 def build_run_samples(num_samples: int, args: argparse.Namespace) -> List[RunSample]:
@@ -700,18 +500,9 @@ def build_run_samples(num_samples: int, args: argparse.Namespace) -> List[RunSam
         if args.vary_use_dem:
             s.use_dem = row[di] >= 0.5
             di += 1
-        elif args.use_dem_fixed is not None:
-            s.use_dem = args.use_dem_fixed == "true"
-        if args.vary_use_shape_crop:
-            s.use_shape_crop = row[di] >= 0.5
-            di += 1
-        elif args.use_shape_crop_fixed is not None:
-            s.use_shape_crop = args.use_shape_crop_fixed == "true"
         if args.vary_apophis_only:
             s.apophis_only = row[di] >= 0.5
             di += 1
-        if args.np_apophis is not None:
-            s.np_apophis = args.np_apophis
         if di != dim:
             raise RuntimeError("internal error: dimension index mismatch")
         out.append(s)
@@ -727,13 +518,8 @@ def sample_column_order(args: argparse.Namespace) -> List[str]:
         order.append(param)
     if args.vary_use_dem:
         order.append("use_dem")
-    if args.vary_use_shape_crop:
-        order.append("use_shape_crop")
     if args.vary_apophis_only:
         order.append("apophis_only")
-    # np_apophis_list mode: particle count is the varying quantity, record it as a column.
-    if getattr(args, "np_apophis_list", None):
-        order.append("np_apophis")
     return order
 
 
@@ -749,9 +535,6 @@ def build_salib_problem(args: argparse.Namespace) -> Dict[str, object]:
         bounds.append([float(lo), float(hi)])
     if args.vary_use_dem:
         names.append("use_dem")
-        bounds.append([0.0, 1.0])
-    if args.vary_use_shape_crop:
-        names.append("use_shape_crop")
         bounds.append([0.0, 1.0])
     if args.vary_apophis_only:
         names.append("apophis_only")
@@ -775,18 +558,9 @@ def run_sample_from_salib_row(row: Sequence[float], args: argparse.Namespace) ->
     if args.vary_use_dem:
         s.use_dem = float(row[i]) >= 0.5
         i += 1
-    elif args.use_dem_fixed is not None:
-        s.use_dem = args.use_dem_fixed == "true"
-    if args.vary_use_shape_crop:
-        s.use_shape_crop = float(row[i]) >= 0.5
-        i += 1
-    elif args.use_shape_crop_fixed is not None:
-        s.use_shape_crop = args.use_shape_crop_fixed == "true"
     if args.vary_apophis_only:
         s.apophis_only = float(row[i]) >= 0.5
         i += 1
-    if args.np_apophis is not None:
-        s.np_apophis = args.np_apophis
     if i != len(row):
         raise RuntimeError(f"internal error: saltelli row consumed {i} values but width is {len(row)}")
     return s
@@ -819,34 +593,19 @@ def canonical_sweep_descriptor(args: argparse.Namespace) -> str:
     for param, lo, hi, _ in _active_scale_variations(args):
         parts.append(f"{param}={lo}:{hi}")
     parts.append(f"vary_use_dem={args.vary_use_dem}")
-    parts.append(f"vary_use_shape_crop={args.vary_use_shape_crop}")
     parts.append(f"vary_apophis_only={args.vary_apophis_only}")
-    # np_apophis_list must be included so sweeps that differ only in particle counts
-    # produce distinct hashes when the slug is truncated.
-    np_list = getattr(args, "np_apophis_list", None)
-    parts.append(f"np_apophis_list={np_list}")
     return "|".join(parts)
 
 
 def build_auto_batch_sweep_slug(args: argparse.Namespace, max_len: int) -> str:
     """Sweep suffix from CLI: sample count, seed, each varied dimension and its bounds."""
-    np_list = getattr(args, "np_apophis_list", None)
-    if np_list is not None:
-        # np_apophis_list mode: runs are deterministic (fixed list), so seed is meaningless.
-        # Encode the particle counts directly so the folder name is self-describing.
-        # Short lists (<=5 values): "np250_500_1000"; longer lists: "np3vals_250-1000".
-        if len(np_list) <= 5:
-            tok_np = "np" + "_".join(str(n) for n in np_list)
-        else:
-            tok_np = f"np{len(np_list)}vals_{min(np_list)}-{max(np_list)}"
-        tokens: List[str] = [tok_np]
-    elif args.saltelli_n is not None:
+    if args.saltelli_n is not None:
         tok_n = f"salt{args.saltelli_n}"
         if args.saltelli_calc_second_order:
             tok_n += "s2"
-        tokens = [tok_n, f"s{args.seed}"]
     else:
-        tokens = [f"n{args.num_samples}", f"s{args.seed}"]
+        tok_n = f"n{args.num_samples}"
+    tokens: List[str] = [tok_n, f"s{args.seed}"]
     if _mass_bounds_active(args):
         tokens.append(
             f"m{_fmt_slug_float(args.mass_min_kg)}-{_fmt_slug_float(args.mass_max_kg)}"
@@ -855,8 +614,6 @@ def build_auto_batch_sweep_slug(args: argparse.Namespace, max_len: int) -> str:
         tokens.append(f"{slug_tok}{_fmt_slug_float(lo)}-{_fmt_slug_float(hi)}")
     if args.vary_use_dem:
         tokens.append("dem")
-    if args.vary_use_shape_crop:
-        tokens.append("shapecrop")
     if args.vary_apophis_only:
         tokens.append("ao")
     slug = "_".join(tokens)
@@ -885,7 +642,7 @@ def build_batch_directory_basename(args: argparse.Namespace, timestamp: str) -> 
     Batch folder basename: <prefix>_<timestamp>_<sweep_suffix>.
     Per-run folders remain run_XXXX inside this directory.
     """
-    max_len = int(args.batch_slug_max_len)
+    max_len = max(17, int(args.batch_slug_max_len))
     if args.batch_label is not None:
         slug = sanitize_batch_label(args.batch_label)
         if len(slug) > max_len:
@@ -1052,11 +809,9 @@ def write_samples_csv(path: Path, samples: List[RunSample], column_order: List[s
                 if col == "mass_input_kg":
                     row.append(f"{s.mass_kg:.12g}" if s.mass_kg is not None else "")
                 elif col == "use_dem":
-                    row.append("T" if s.use_dem is True else "F" if s.use_dem is False else "")
-                elif col == "use_shape_crop":
-                    row.append("T" if s.use_shape_crop is True else "F" if s.use_shape_crop is False else "")
+                    row.append("T" if s.use_dem else "F" if s.use_dem is not None else "")
                 elif col == "apophis_only":
-                    row.append("T" if s.apophis_only is True else "F" if s.apophis_only is False else "")
+                    row.append("T" if s.apophis_only else "F" if s.apophis_only is not None else "")
                 else:
                     v = getattr(s, col, None)
                     row.append(f"{float(v):.12g}" if v is not None else "")
@@ -1115,12 +870,11 @@ def run_one_case(
     prefix: str,
     phantomsetup_bin: Path,
     phantom_bin: Path,
-    ref_mass_kg: Optional[float],
+    mass_unit: str,
     dry_run: bool,
     earth_sink_id: int,
     apophis_sink_id: int,
     ephemeris_cache_dir: Optional[Path] = None,
-    shape_file: Optional[str] = None,
 ) -> RunRecord:
     run_dir = output_root / f"run_{run_id:04d}"
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -1128,7 +882,7 @@ def run_one_case(
     run_input = run_dir / f"{prefix}.in"
     shutil.copy2(base_setup, run_setup)
     shutil.copy2(base_input, run_input)
-    param_columns = apply_run_sample_to_setup(run_setup, sample, ref_mass_kg, shape_file)
+    param_columns = apply_run_sample_to_setup(run_setup, sample, mass_unit)
 
     if ephemeris_cache_dir is not None:
         copy_ephemeris_txt_cache(ephemeris_cache_dir, run_dir)
@@ -1147,22 +901,8 @@ def run_one_case(
             param_columns=param_columns,
         )
 
-    # Warn before starting if np_apophis is high enough that lattice overshoot will likely push
-    # the actual sink count above the compiled MAXPTMASS limit (default 1000).
-    maxptmass_warn = _np_apophis_maxptmass_warning(sample)
-    if maxptmass_warn:
-        print(f"[WARN] Run {run_id}: {maxptmass_warn}", file=sys.stderr, flush=True)
-
     try:
-        # phantomsetup is caught separately so we can inspect setup.log for the specific
-        # MAXPTMASS overflow message before falling back to a generic "command failed" error.
-        try:
-            run_command([str(phantomsetup_bin), prefix], cwd=run_dir, log_path=run_dir / "setup.log")
-        except RuntimeError:
-            diag = _diagnose_maxptmass_error(run_dir / "setup.log")
-            raise RuntimeError(
-                diag or f"phantomsetup failed (returncode != 0); see {run_dir / 'setup.log'}"
-            ) from None
+        run_command([str(phantomsetup_bin), prefix], cwd=run_dir, log_path=run_dir / "setup.log")
         run_command([str(phantom_bin), f"{prefix}.in"], cwd=run_dir, log_path=run_dir / "phantom.log")
         if skip_closest_approach(sample):
             return RunRecord(
@@ -1211,23 +951,19 @@ def _execute_run_worker(payload: RunWorkerPayload) -> RunRecord:
         payload.prefix,
         Path(payload.phantomsetup_bin),
         Path(payload.phantom_bin),
-        payload.ref_mass_kg,
+        payload.mass_unit,
         payload.dry_run,
         payload.earth_sink_id,
         payload.apophis_sink_id,
         Path(payload.ephemeris_cache_dir) if payload.ephemeris_cache_dir else None,
-        payload.shape_file,
     )
 
 
 def _print_run_progress(result: RunRecord, samples: List[RunSample], total: int) -> None:
     idx = result.run_id
-    if not (1 <= idx <= len(samples)):
-        raise IndexError(f"run_id {idx} out of range for samples list of length {len(samples)}")
     sample = samples[idx - 1]
     mass_str = f"{sample.mass_kg:.6e} kg" if sample.mass_kg is not None else "(template mass)"
-    np_str = f" np_apophis={sample.np_apophis}" if sample.np_apophis is not None else ""
-    print(f"[INFO] Run {idx}/{total} mass={mass_str}{np_str}", flush=True)
+    print(f"[INFO] Run {idx}/{total} mass={mass_str}", flush=True)
     print(f"[INFO]   status={result.status} run_dir={result.run_dir}", flush=True)
 
 
@@ -1270,10 +1006,7 @@ def main() -> int:
         batch_basename = build_batch_directory_basename(args, timestamp)
         output_root = Path(args.output_root).resolve() / batch_basename
 
-        if getattr(args, "np_apophis_list", None) is not None:
-            # One run per particle count; Sobol sampling is not used in this mode.
-            samples = build_np_list_samples(args)
-        elif args.saltelli_n is not None:
+        if args.saltelli_n is not None:
             problem = build_salib_problem(args)
             try:
                 from SALib.sample import sobol as sobol_sample
@@ -1343,12 +1076,11 @@ def main() -> int:
             prefix=args.prefix,
             phantomsetup_bin=str(phantomsetup_bin),
             phantom_bin=str(phantom_bin),
-            ref_mass_kg=args.apophis_ref_mass_kg if _mass_bounds_active(args) else None,
+            mass_unit=args.mass_unit,
             dry_run=args.dry_run,
             earth_sink_id=args.sink_earth_id,
             apophis_sink_id=args.sink_apophis_id,
             ephemeris_cache_dir=str(ephemeris_cache) if ephemeris_cache is not None else None,
-            shape_file=args.shape_file if args.shape_file else None,
         )
         for idx, sample in enumerate(samples, start=1)
     ]
@@ -1387,19 +1119,13 @@ def main() -> int:
     print(f"[INFO] Summary written to: {summary_csv}")
 
     if args.saltelli_n is not None and X_saltelli is not None and problem is not None:
-        num_vars = int(problem["num_vars"])
-        if X_saltelli.shape[1] != num_vars:
-            raise ValueError(
-                f"Saltelli design has {X_saltelli.shape[1]} columns but problem specifies "
-                f"num_vars={num_vars}; design matrix and problem dict are inconsistent."
-            )
         manifest_path = output_root / "saltelli_eval_manifest.csv"
         names = list(problem["names"])
         with manifest_path.open("w", newline="", encoding="utf-8") as mf:
             mw = csv.writer(mf)
             mw.writerow(["eval_index", "run_id", *names])
             for j in range(len(samples)):
-                row_vals = [float(X_saltelli[j, k]) for k in range(num_vars)]
+                row_vals = [float(X_saltelli[j, k]) for k in range(int(problem["num_vars"]))]
                 mw.writerow([j, j + 1, *row_vals])
         print(f"[INFO] Wrote Saltelli eval manifest: {manifest_path}")
 

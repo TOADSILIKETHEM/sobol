@@ -25,7 +25,7 @@ SCALE_BOUND_DESTS: FrozenSet[str] = frozenset(
 )
 
 # Mass min/max/unit are skipped when user declines the mass gate (mirrors optional scale pattern).
-MASS_GATE_DESTS: FrozenSet[str] = frozenset({"mass_min_kg", "mass_max_kg", "mass_unit"})
+MASS_GATE_DESTS: FrozenSet[str] = frozenset({"mass_min_kg", "mass_max_kg", "apophis_ref_mass_kg"})
 
 # Human-readable labels for the scale gate (match setup_solarsystem / argparse help).
 SCALE_PARAM_LABELS: Dict[str, str] = {
@@ -48,7 +48,7 @@ DEST_TO_SECTION: Dict[str, str] = {
     "saltelli_calc_second_order": "Sampling",
     "mass_min_kg": "Mass",
     "mass_max_kg": "Mass",
-    "mass_unit": "Mass",
+    "apophis_ref_mass_kg": "Mass",
     "scale_vel_min": "Scale bounds (optional dimensions)",
     "scale_vel_max": "Scale bounds (optional dimensions)",
     "scale_pos_min": "Scale bounds (optional dimensions)",
@@ -58,10 +58,12 @@ DEST_TO_SECTION: Dict[str, str] = {
     "scale_rho_min": "Scale bounds (optional dimensions)",
     "scale_rho_max": "Scale bounds (optional dimensions)",
     "vary_use_dem": "Setup toggles",
-    "vary_use_obj_crop": "Setup toggles",
-    "use_obj_crop_fixed": "Setup toggles",
-    "obj_crop_file": "Paths",
+    "np_apophis": "Setup toggles",
+    "vary_use_shape_crop": "Setup toggles",
+    "use_shape_crop_fixed": "Setup toggles",
+    "shape_file": "Paths",
     "vary_apophis_only": "Setup toggles",
+    "np_apophis_list": "Setup toggles",
     "sink_earth_id": "Sinks / post-processing",
     "sink_apophis_id": "Sinks / post-processing",
     "batch_label": "Batch naming",
@@ -70,8 +72,40 @@ DEST_TO_SECTION: Dict[str, str] = {
     "jobs": "Execution",
 }
 
+def _handle_np_apophis_list(
+    action: argparse.Action, state: argparse.Namespace, flag: str, out: List[str]
+) -> None:
+    """Custom wizard handler for --np-apophis-list (nargs='+').
+
+    The default _collect_store raises on nargs != None; this handler prompts for a
+    space-separated list and emits individual integer tokens so argparse parses them correctly.
+    """
+    current = getattr(state, action.dest, None)
+    cur_s = " ".join(str(n) for n in current) if current else ""
+    what, valid = _explain_for(action)
+    while True:
+        raw = _read_line(f"{what}\n  Option: {flag}\n  Valid answers: {valid}\n[{cur_s}]: ").strip()
+        if not raw:
+            if current:
+                out.extend([flag] + [str(n) for n in current])
+            return
+        try:
+            vals = [int(x) for x in raw.split()]
+        except ValueError:
+            print("  Invalid: enter space-separated integers (e.g. 250 500 1000).", file=sys.stderr)
+            continue
+        if any(v < 0 for v in vals):
+            print("  All values must be >= 0.", file=sys.stderr)
+            continue
+        setattr(state, action.dest, vals)
+        out.extend([flag] + [str(v) for v in vals])
+        return
+
+
 # dest -> handler(action, state, flag) -> None (mutates state and out_argv)
-WIZARD_CUSTOM_HANDLERS: Dict[str, Callable[[argparse.Action, argparse.Namespace, str, List[str]], None]] = {}
+WIZARD_CUSTOM_HANDLERS: Dict[str, Callable[[argparse.Action, argparse.Namespace, str, List[str]], None]] = {
+    "np_apophis_list": _handle_np_apophis_list,
+}
 
 # dest -> (brief what-it-does, valid answers / input rules). Used for every prompt; extend when
 # adding new CLI flags. Unknown dests use _fallback_explain(action).
@@ -100,9 +134,10 @@ INTERACTIVE_BRIEF: Dict[str, tuple[str, str]] = {
         "Upper bound on Apophis mass in kg when mass is varied.",
         "Positive float; must be greater than mass min.",
     ),
-    "mass_unit": (
-        "Unit written to m_apophis_in when mass is varied; sampling is always in kg internally.",
-        "Exactly one of: kg, g, msun. (Only used when mass min/max are set.)",
+    "apophis_ref_mass_kg": (
+        "Baseline Apophis mass in kg at scale_rho=1 (template density). "
+        "Sampled masses are converted to scale_rho = mass / ref_mass and patched into setup.",
+        "Positive float in kg (e.g. 2.7e10). Required when varying mass.",
     ),
     "seed": (
         "Random seed for scrambled Sobol draws and for Saltelli when used.",
@@ -144,18 +179,33 @@ INTERACTIVE_BRIEF: Dict[str, tuple[str, str]] = {
         "If yes, adds a Sobol dimension that toggles use_dem in the setup (T/F across runs).",
         "y, n, yes, no, t, f, 1, 0; or Enter to keep the current value.",
     ),
-    "vary_use_obj_crop": (
-        "If yes, adds a Sobol dimension that toggles OBJ cropping (writes --obj-crop-file path or blanks obj_file).",
+    "np_apophis_list": (
+        "Space-separated list of np_apophis values: one run per value within a single batch "
+        "(e.g. '250 500 1000' → run_0001=250, run_0002=500, run_0003=1000). "
+        "Mutually exclusive with --np-apophis. Leave blank to use np_apophis instead. "
+        "WARNING: values >= 975 risk MAXPTMASS overflow — compile with MAXPTMASS=2000.",
+        "Space-separated integers (e.g. 250 500 1000), or Enter to skip / use --np-apophis.",
+    ),
+    "np_apophis": (
+        "Fix np_apophis to a single value in every run's setup (0=none, 1=sink, N>1=gas/DEM). "
+        "Leave blank to keep the template value unchanged. "
+        "WARNING: the close-packed lattice overshoots np_apophis by ~2-3%, so values >= 975 "
+        "will exceed the default compiled MAXPTMASS=1000 and cause phantomsetup to abort. "
+        "Ensure PHANTOM is compiled with MAXPTMASS>np_apophis (e.g. MAXPTMASS=2000 in the Makefile).",
+        "Non-negative integer, or Enter to leave unchanged. Values >= 975 require MAXPTMASS recompile.",
+    ),
+    "vary_use_shape_crop": (
+        "If yes, adds a Sobol dimension that toggles shape cropping (writes --shape-file path or blanks apophis_shape_file).",
         "y, n, yes, no, t, f, 1, 0; or Enter to keep the current value.",
     ),
-    "use_obj_crop_fixed": (
-        "Force OBJ cropping on or off for every run: 'true' writes --obj-crop-file to obj_file; 'false' blanks it. "
-        "Omit to leave the template obj_file unchanged.",
+    "use_shape_crop_fixed": (
+        "Force shape cropping on or off for every run: 'true' writes --shape-file to apophis_shape_file; 'false' blanks it. "
+        "Omit to leave the template apophis_shape_file unchanged.",
         "true, false; or Enter to keep the current value (None = leave template unchanged).",
     ),
-    "obj_crop_file": (
-        "Path to the OBJ file written into obj_file when OBJ cropping is enabled. "
-        "Required when --vary-use-obj-crop or --use-obj-crop-fixed true.",
+    "shape_file": (
+        "Path to the shape config file (or .obj) written into apophis_shape_file when shape cropping is enabled. "
+        "Required when --vary-use-shape-crop or --use-shape-crop-fixed true.",
         "File path string; or Enter for none / current value.",
     ),
     "vary_apophis_only": (
@@ -225,7 +275,7 @@ def _prompt_mass_vary_selection(state: argparse.Namespace) -> bool:
     yn = "Y/n" if default_yes else "y/N"
     what = (
         "Include Apophis mass as a varied Sobol dimension (you will set min/max and unit next)? "
-        "If no, the template m_apophis_in line is left unchanged."
+        "If no, mass remains at the template density (scale_rho=1)."
     )
     valid = "y, n, yes, no, t, f, 1, 0; or Enter for the suggested default."
     while True:
@@ -414,7 +464,7 @@ def run_interactive_wizard(parser: argparse.ArgumentParser, initial_args: argpar
             if not _prompt_mass_vary_selection(state):
                 setattr(state, "mass_min_kg", None)
                 setattr(state, "mass_max_kg", None)
-                setattr(state, "mass_unit", None)
+                setattr(state, "apophis_ref_mass_kg", None)
                 skipped_mass_dests.update(MASS_GATE_DESTS)
             mass_gate_done = True
 

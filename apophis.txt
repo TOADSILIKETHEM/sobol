@@ -1,0 +1,165 @@
+API VERSION: 1.2
+API SOURCE: NASA/JPL Horizons API
+
+*******************************************************************************
+JPL/HORIZONS              99942 Apophis (2004 MN4)         2026-Mar-01 22:45:27
+Rec #:   99942 (+COV) Soln.date: 2024-Jun-25_10:48:08   # obs: 7370 (2004-2022)
+ 
+IAU76/J2000 helio. ecliptic osc. elements (au, days, deg., period=Julian yrs):
+ 
+  EPOCH=  2459215.5 ! 2021-Jan-01.00 (TDB)         Residual RMS= .080135
+   EC= .1915216893501022   QR= .7458270478466523   TP= 2459101.0394224627
+   OM= 204.0389272089208   W=  126.6520518368553   IN= 3.336751320066756
+   A= .9225071817289903    MA= 127.3225632013606   ADIST= 1.099187315611328
+   PER= .88606             N= 1.112370442          ANGMOM= .016216289
+   DAN= 1.00339            DDN= .79749             L= 330.7375495
+   B= 2.6764541            MOID= .0003822          TP= 2020-Sep-08.5394224627
+ 
+Asteroid physical parameters (km, seconds, rotational period in hours):
+   GM= n.a.                RAD= .170               ROTPER= 30.56
+   H= 19.09                G= .240                 B-V= n.a.
+                           ALBEDO= .350            STYP= Sq
+
+Non-default Earth gravity model (EOBL_LIM= au):
+   EOBL_LIM= 1.000                                 EOBL_MOD = 2x0 (J2 only)
+Asteroid non-gravitational force model (AMRAT= m^2/kg;A1,A2,A3=au/d^2;R0=au):
+   AMRAT=  0.
+   A1= 4.999999873689E-13  A2= -2.901766720242E-14 A3= 0.
+ Non-standard or simulated/proxy model:
+   ALN=  1.            NK=  0.       NM=  2.       NN=  5.093    R0=  1.
+
+ASTEROID comments: 
+1: soln ref.= JPL#220, PHA  OCC=0       radar(20 delay,30 Dop.)
+2: source=ORB
+*******************************************************************************
+
+
+*******************************************************************************
+Ephemeris / API_USER Sun Mar  1 22:45:27 2026 Pasadena, USA      / Horizons
+*******************************************************************************
+Target body name: 99942 Apophis (2004 MN4)        {source: JPL#220}
+Center body name: Sun (10)                        {source: DE441}
+Center-site name: BODY CENTER
+*******************************************************************************
+Start time      : A.D. 2029-Apr-10 00:00:00.0000 TDB
+Stop  time      : A.D. 2029-Apr-11 00:00:00.0000 TDB
+Step-size       : 1440 minutes
+*******************************************************************************
+Center geodetic : 0.0, 0.0, 0.0                   {E-lon(deg),Lat(deg),Alt(km)}
+Center cylindric: 0.0, 0.0, 0.0                   {E-lon(deg),Dxy(km),Dz(km)}
+Center radii    : 695700.0, 695700.0, 695700.0 km {Equator_a, b, pole_c}
+Keplerian GM    : 1.3271244004127939E+11 km^3/s^2
+Small perturbers: Yes                             {source: SB441-N16}
+Output units    : KM-S, deg, Julian Day Number (Tp)
+Calendar mode   : Mixed Julian/Gregorian
+Output type     : GEOMETRIC osculating elements
+Output format   : 10
+Reference frame : Ecliptic of J2000.0
+*******************************************************************************
+Initial IAU76/J2000 heliocentric ecliptic osculating elements (au, days, deg.):
+  EPOCH=  2459215.5 ! 2021-Jan-01.00 (TDB)         Residual RMS= .080135       
+   EC= .1915216893501022   QR= .7458270478466523   TP= 2459101.0394224627      
+   OM= 204.0389272089208   W=  126.6520518368553   IN= 3.336751320066756       
+  Equivalent ICRF heliocentric cartesian coordinates (au, au/d):
+   X=-4.098530841632175E-01  Y= 9.070198866066711E-01  Z= 3.267919471115156E-01
+  VX=-1.507552412168823E-02 VY=-3.713559927658847E-03 VZ=-1.761867987218290E-03
+Asteroid physical parameters (km, seconds, rotational period in hours):        
+   GM= n.a.                RAD= .170               ROTPER= 30.56               
+   H= 19.09                G= .240                 B-V= n.a.                   
+Non-default Earth gravity model (EOBL_LIM= au):                                
+   EOBL_LIM= 1.000                                 EOBL_MOD = 2x0 (J2 only)    
+Asteroid non-gravitational force model (AMRAT= m^2/kg;A1,A2,A3=au/d^2;R0=au):  
+   AMRAT=  0.                                                                  
+   A1= 4.999999873689E-13  A2= -2.901766720242E-14 A3= 0.                      
+ Non-standard or simulated/proxy model:                                        
+   ALN=  1.            NK=  0.       NM=  2.       NN=  5.093    R0=  1.       
+*******************************************************************************
+JDTDB
+   EC    QR   IN
+   OM    W    Tp
+   N     MA   TA
+   A     AD   PR
+*******************************************************************************
+$$SOE
+2462236.500000000 = A.D. 2029-Apr-10 00:00:00.0000 TDB 
+ EC= 1.922975631562459E-01 QR= 1.113956515944736E+08 IN= 3.360113696484132E+00
+ OM= 2.038149690104709E+02 W = 1.267406650094593E+02 Tp=  2462336.955614009872
+ N = 1.288704016058078E-05 MA= 2.481486740267171E+02 TA= 2.296998065655672E+02
+ A = 1.379166961904592E+08 AD= 1.644377407864448E+08 PR= 2.793504136824045E+07
+2462237.500000000 = A.D. 2029-Apr-11 00:00:00.0000 TDB 
+ EC= 1.926774062837266E-01 QR= 1.113319474999157E+08 IN= 3.366993336660308E+00
+ OM= 2.038086993826348E+02 W = 1.267388379562579E+02 Tp=  2462336.895486863330
+ N = 1.288900524754612E-05 MA= 2.493121865675870E+02 TA= 2.306135761658283E+02
+ A = 1.379026777727496E+08 AD= 1.644734080455835E+08 PR= 2.793078232849185E+07
+$$EOE
+*******************************************************************************
+ 
+TIME
+
+  Barycentric Dynamical Time ("TDB" or T_eph) output was requested. This
+continuous coordinate time is equivalent to the relativistic proper time
+of a clock at rest in a reference frame co-moving with the solar system
+barycenter but outside the system's gravity well. It is the independent
+variable in the solar system relativistic equations of motion.
+
+  TDB runs at a uniform rate of one SI second per second and is independent
+of irregularities in Earth's rotation.
+ 
+CALENDAR SYSTEM
+
+  Mixed calendar mode was active such that calendar dates after AD 1582-Oct-15
+(if any) are in the modern Gregorian system. Dates prior to 1582-Oct-5 (if any)
+are in the Julian calendar system, which is automatically extended for dates
+prior to its adoption on 45-Jan-1 BC.  The Julian calendar is useful for
+matching historical dates. The Gregorian calendar more accurately corresponds
+to the Earth's orbital motion and seasons. A "Gregorian-only" calendar mode is
+available if such physical events are the primary interest.
+
+REFERENCE FRAME AND COORDINATES
+
+  Ecliptic at the standard reference epoch
+
+    Reference epoch: J2000.0
+    X-Y plane: adopted Earth orbital plane at the reference epoch
+               Note: IAU76 obliquity of 84381.448 arcseconds wrt ICRF X-Y plane
+    X-axis   : ICRF
+    Z-axis   : perpendicular to the X-Y plane in the directional (+ or -) sense
+               of Earth's north pole at the reference epoch.
+
+  Symbol meaning:
+
+    JDTDB    Julian Day Number, Barycentric Dynamical Time
+      EC     Eccentricity, e
+      QR     Periapsis distance, q (km)
+      IN     Inclination w.r.t X-Y plane, i (degrees)
+      OM     Longitude of Ascending Node, OMEGA, (degrees)
+      W      Argument of Perifocus, w (degrees)
+      Tp     Time of periapsis (Julian Day Number)
+      N      Mean motion, n (degrees/sec)
+      MA     Mean anomaly, M (degrees)
+      TA     True anomaly, nu (degrees)
+      A      Semi-major axis, a (km)
+      AD     Apoapsis distance (km)
+      PR     Sidereal orbit period (sec)
+
+ABERRATIONS AND CORRECTIONS
+
+ Geometric osculating elements have NO corrections or aberrations applied.
+
+Computations by ...
+
+    Solar System Dynamics Group, Horizons On-Line Ephemeris System
+    4800 Oak Grove Drive, Jet Propulsion Laboratory
+    Pasadena, CA  91109   USA
+
+    General site: https://ssd.jpl.nasa.gov/
+    Mailing list: https://ssd.jpl.nasa.gov/email_list.html
+    System news : https://ssd.jpl.nasa.gov/horizons/news.html
+    User Guide  : https://ssd.jpl.nasa.gov/horizons/manual.html
+    Connect     : browser        https://ssd.jpl.nasa.gov/horizons/app.html#/x
+                  API            https://ssd-api.jpl.nasa.gov/doc/horizons.html
+                  command-line   telnet ssd.jpl.nasa.gov 6775
+                  e-mail/batch   https://ssd.jpl.nasa.gov/ftp/ssd/horizons_batch.txt
+                  scripts        https://ssd.jpl.nasa.gov/ftp/ssd/SCRIPTS
+    Author      : Jon.D.Giorgini@jpl.nasa.gov
+*******************************************************************************

@@ -1,0 +1,14 @@
+# input file for solar system setup routines
+             tmax_in =      4 days    ! end time of simulation (e.g. 3 days)
+            dtmax_in =      0.5 hr    ! time between dumps (e.g. 1 hr)
+        m_apophis_in =                ! mass of apophis (blank uses density-based default, e.g. 6e10 kg)
+           asteroids =           F    ! add distant minor bodies as km-sized dust particles
+          np_apophis =           1    ! number of particles used to represent apophis (0=none; 1=sink; n=gas)
+            obj_file =                ! OBJ mesh file for Apophis shape (blank = sphere)
+               epoch =  2029-04-10    ! epoch to query ephemeris, YYYY-MMM-DD HH:MM:SS.fff, blank = today
+             use_dem =           F    ! use the discrete element method for sink-sink interactions
+        apophis_only =           F    ! only add apophis
+           scale_vel =       1.000    ! scaling factor for apophis velocity
+           scale_pos =       1.000    ! scaling factor for apophis initial position
+     scale_r_apophis =       1.000    ! scaling factor for apophis radius
+           scale_rho =       1.000    ! scaling factor for apophis bulk density

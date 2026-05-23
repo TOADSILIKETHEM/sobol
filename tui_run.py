@@ -42,7 +42,7 @@ _SCALE_DIMS = [
     ("scale-rho",       "scale_rho",       "scale_rho  — bulk density scale",         False),
 ]
 
-_MASS_GATE_IDS = ("mass-min-kg", "mass-max-kg", "mass-unit")
+_MASS_GATE_IDS = ("mass-min-kg", "mass-max-kg", "apophis-ref-mass-kg")
 
 
 # ── helper: one labelled row ─────────────────────────────────────────────────
@@ -132,6 +132,7 @@ class SobolTUIApp(App[Optional[List[str]]]):
 
     .err { color: $error; }
     .ok  { color: $success; }
+    .note { color: $warning; text-style: italic; padding: 0 0 0 27; }
 
     Button { margin: 0 1; }
     """
@@ -197,10 +198,11 @@ class SobolTUIApp(App[Optional[List[str]]]):
                        Input(str(d.mass_max_kg or ""), id="mass-max-kg",
                              disabled=not mass_on, placeholder="e.g. 1e11"),
                        "kg")
-            yield _Row("mass_unit",
-                       Select([("kg", "kg"), ("g", "g"), ("msun", "msun")],
-                              value=(d.mass_unit or "kg"),
-                              id="mass-unit", disabled=not mass_on))
+            yield _Row("apophis_ref_mass_kg",
+                       Input(str(getattr(d, "apophis_ref_mass_kg", "") or ""), id="apophis-ref-mass-kg",
+                             disabled=not mass_on,
+                             placeholder="e.g. 2.7e10  (mass at scale_rho=1)"),
+                       "kg")
 
             # ── Scale bounds ───────────────────────────────────────────────
             yield Static("Scale bounds  (optional Sobol dimensions)", classes="sec")
@@ -235,25 +237,46 @@ class SobolTUIApp(App[Optional[List[str]]]):
                               value=dem_fixed_val,
                               id="use-dem-fixed", disabled=vary_dem),
                        "if not varying")
-            vary_obj = bool(getattr(d, "vary_use_obj_crop", False))
-            obj_fixed_raw = getattr(d, "use_obj_crop_fixed", None)
-            obj_fixed_val = obj_fixed_raw if obj_fixed_raw in ("true", "false") else ""
-            obj_path_active = vary_obj or obj_fixed_val == "true"
-            yield _Row("vary_use_obj_crop",
-                       Checkbox("vary OBJ cropping as a Sobol dimension  (u≥0.5 → crop)",
-                                value=vary_obj, id="vary-use-obj-crop"))
-            yield _Row("  use_obj_crop_fixed",
+            np_ap_val = str(getattr(d, "np_apophis", "") or "")
+            np_list_raw = getattr(d, "np_apophis_list", None)
+            np_list_val = " ".join(str(n) for n in np_list_raw) if np_list_raw else ""
+            # np_apophis and np_apophis_list are mutually exclusive; disable whichever is empty.
+            np_list_active = bool(np_list_val)
+            yield _Row("  np_apophis",
+                       Input(np_ap_val, id="np-apophis",
+                             disabled=np_list_active,
+                             placeholder="(from template)  0=none  1=sink  N=gas/DEM"),
+                       "int ≥ 0")
+            yield _Row("  np_apophis_list",
+                       Input(np_list_val, id="np-apophis-list",
+                             disabled=not np_list_active,
+                             placeholder="e.g. 250 500 1000  — one run per value in this batch"),
+                       "space-sep ints")
+            yield Static(
+                f"⚠ np_apophis ≥ {_runner._MAXPTMASS_WARN_THRESHOLD}: lattice overshoot (~2-3%) "
+                f"will exceed default MAXPTMASS={_runner._MAXPTMASS_DEFAULT}. "
+                "Rebuild with MAXPTMASS=2000 in the Makefile ('make setup && make').",
+                classes="note",
+            )
+            vary_shape = bool(getattr(d, "vary_use_shape_crop", False))
+            shape_fixed_raw = getattr(d, "use_shape_crop_fixed", None)
+            shape_fixed_val = shape_fixed_raw if shape_fixed_raw in ("true", "false") else ""
+            shape_path_active = vary_shape or shape_fixed_val == "true"
+            yield _Row("vary_use_shape_crop",
+                       Checkbox("vary shape cropping as a Sobol dimension  (u≥0.5 → crop)",
+                                value=vary_shape, id="vary-use-shape-crop"))
+            yield _Row("  use_shape_crop_fixed",
                        Select([("(from template)", ""),
                                ("True", "true"),
                                ("False", "false")],
-                              value=obj_fixed_val,
-                              id="use-obj-crop-fixed", disabled=vary_obj),
+                              value=shape_fixed_val,
+                              id="use-shape-crop-fixed", disabled=vary_shape),
                        "if not varying")
-            yield _Row("  obj_crop_file",
-                       Input(str(getattr(d, "obj_crop_file", "") or ""), id="obj-crop-file",
-                             disabled=not obj_path_active,
-                             placeholder="path/to/apophis.obj  (required when cropping on)"),
-                       "OBJ path")
+            yield _Row("  shape_file",
+                       Input(str(getattr(d, "shape_file", "") or ""), id="shape-file",
+                             disabled=not shape_path_active,
+                             placeholder="path/to/apophis.shape or apophis.obj  (required when cropping on)"),
+                       "shape/OBJ path")
             yield _Row("vary_apophis_only",
                        Checkbox("vary apophis_only (Earth absent when True; CA → NaN)",
                                 value=bool(getattr(d, "vary_apophis_only", False)),
@@ -315,10 +338,11 @@ class SobolTUIApp(App[Optional[List[str]]]):
         elif cb_id == "vary-use-dem":
             self.query_one("#use-dem-fixed").disabled = active
 
-        elif cb_id == "vary-use-obj-crop":
-            self.query_one("#use-obj-crop-fixed").disabled = active
+
+        elif cb_id == "vary-use-shape-crop":
+            self.query_one("#use-shape-crop-fixed").disabled = active
             # path field is needed whenever cropping may be on
-            self.query_one("#obj-crop-file").disabled = not active
+            self.query_one("#shape-file").disabled = not active
 
         else:
             for css, _, _, _ in _SCALE_DIMS:
@@ -329,9 +353,18 @@ class SobolTUIApp(App[Optional[List[str]]]):
 
     @on(Select.Changed)
     def _select_gate(self, event: Select.Changed) -> None:
-        if event.select.id == "use-obj-crop-fixed":
+        if event.select.id == "use-shape-crop-fixed":
             val = "" if event.value is Select.BLANK else str(event.value)
-            self.query_one("#obj-crop-file").disabled = (val != "true")
+            self.query_one("#shape-file").disabled = (val != "true")
+
+    # np_apophis and np_apophis_list are mutually exclusive: filling one disables the other.
+    @on(Input.Changed, "#np-apophis")
+    def _np_apophis_changed(self, event: Input.Changed) -> None:
+        self.query_one("#np-apophis-list").disabled = bool(event.value.strip())
+
+    @on(Input.Changed, "#np-apophis-list")
+    def _np_apophis_list_changed(self, event: Input.Changed) -> None:
+        self.query_one("#np-apophis").disabled = bool(event.value.strip())
 
     # ── button / action handlers ───────────────────────────────────────────────
 
@@ -441,9 +474,7 @@ class SobolTUIApp(App[Optional[List[str]]]):
         if self._cb("vary-mass"):
             fi("mass-min-kg", "--mass-min-kg")
             fi("mass-max-kg", "--mass-max-kg")
-            mu = self._sel("mass-unit")
-            if mu:
-                argv.extend(["--mass-unit", mu])
+            fi("apophis-ref-mass-kg", "--apophis-ref-mass-kg")
 
         # Scale bounds
         for css, attr, _, is_int in _SCALE_DIMS:
@@ -463,15 +494,25 @@ class SobolTUIApp(App[Optional[List[str]]]):
             df = self._sel("use-dem-fixed")
             if df:
                 argv.extend(["--use-dem-fixed", df])
-        if self._cb("vary-use-obj-crop"):
-            argv.append("--vary-use-obj-crop")
-            si("obj-crop-file", "--obj-crop-file")
+        # np_apophis and np_apophis_list are mutually exclusive.
+        np_list_raw = self._iv("np-apophis-list")
+        if np_list_raw:
+            try:
+                np_list_vals = [int(x) for x in np_list_raw.split()]
+            except ValueError:
+                raise ValueError(f"np_apophis_list must be space-separated integers (got '{np_list_raw}')")
+            argv.extend(["--np-apophis-list"] + [str(v) for v in np_list_vals])
         else:
-            ocf = self._sel("use-obj-crop-fixed")
+            ii("np-apophis", "--np-apophis")
+        if self._cb("vary-use-shape-crop"):
+            argv.append("--vary-use-shape-crop")
+            si("shape-file", "--shape-file")
+        else:
+            ocf = self._sel("use-shape-crop-fixed")
             if ocf:
-                argv.extend(["--use-obj-crop-fixed", ocf])
+                argv.extend(["--use-shape-crop-fixed", ocf])
                 if ocf == "true":
-                    si("obj-crop-file", "--obj-crop-file")
+                    si("shape-file", "--shape-file")
         if self._cb("vary-apophis-only"):
             argv.append("--vary-apophis-only")
 
