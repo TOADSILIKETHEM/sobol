@@ -35,11 +35,17 @@ import run_mass_sobol_phantom as _runner
 # ── constants ────────────────────────────────────────────────────────────────
 
 # (CSS-id-stem, attr-name, checkbox label, is_integer)
+# attr-name is the argparse dest STEM: min/max are read as attr+"_min"/attr+"_max".
+# Spin entries use "spin_period" etc. (argparse dest stem), not the full setup key.
 _SCALE_DIMS = [
-    ("scale-vel",       "scale_vel",       "scale_vel  — Apophis velocity scale",     False),
-    ("scale-pos",       "scale_pos",       "scale_pos  — Apophis position scale",     False),
-    ("scale-r-apophis", "scale_r_apophis", "scale_r_apophis  — Apophis radius scale", False),
-    ("scale-rho",       "scale_rho",       "scale_rho  — bulk density scale",         False),
+    ("scale-vel",       "scale_vel",        "scale_vel  — Apophis velocity scale",             False),
+    ("scale-pos",       "scale_pos",        "scale_pos  — Apophis position scale",             False),
+    ("scale-r-apophis", "scale_r_apophis",  "scale_r_apophis  — Apophis radius scale",         False),
+    ("scale-rho",       "scale_rho",        "scale_rho  — bulk density scale",                 False),
+    # Spin: applied after DEM placement (use_dem=T, np_apophis>1); no-op for single-sink runs.
+    ("spin-period",     "spin_period",      "spin_period (hr)  — spin period (0 = no spin)",   False),
+    ("spin-obliquity",  "spin_obliquity",   "spin_obliquity (deg)  — spin axis from north",    False),
+    ("spin-azimuth",    "spin_azimuth",     "spin_azimuth (deg)  — spin axis azimuth",         False),
 ]
 
 _MASS_GATE_IDS = ("mass-min-kg", "mass-max-kg", "apophis-ref-mass-kg")

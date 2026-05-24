@@ -106,11 +106,17 @@ def _np_apophis_maxptmass_warning(sample: "RunSample") -> Optional[str]:
 
 # Scale parameters varied via CLI min/max: (RunSample/.setup attribute, argparse lo/hi attrs, batch slug token).
 # Order MUST match Sobol dimension ordering used in build_run_samples and CSV columns.
+# Spin parameters use the full setup-file key as the RunSample attribute so apply_run_sample_to_setup
+# can patch them with a single generic loop (same mechanism as scale_vel etc.).
 _SCALE_VARIATION_SPEC: Tuple[Tuple[str, str, str, str], ...] = (
     ("scale_vel", "scale_vel_min", "scale_vel_max", "sv"),
     ("scale_pos", "scale_pos_min", "scale_pos_max", "sp"),
     ("scale_r_apophis", "scale_r_apophis_min", "scale_r_apophis_max", "sra"),
     ("scale_rho", "scale_rho_min", "scale_rho_max", "srho"),
+    # Spin parameters — only affect DEM runs (use_dem=T, np_apophis>1); no-op otherwise.
+    ("apophis_spin_period",    "spin_period_min",    "spin_period_max",    "sspd"),
+    ("apophis_spin_obliquity", "spin_obliquity_min", "spin_obliquity_max", "sobl"),
+    ("apophis_spin_azimuth",   "spin_azimuth_min",   "spin_azimuth_max",   "saz"),
 )
 
 
@@ -193,6 +199,10 @@ class RunSample:
     use_shape_crop: Optional[bool] = None
     apophis_only: Optional[bool] = None
     np_apophis: Optional[int] = None
+    # Spin: patched into the setup file; Fortran applies them only when use_dem=T, np_apophis>1.
+    apophis_spin_period:    Optional[float] = None  # hours
+    apophis_spin_obliquity: Optional[float] = None  # degrees from ecliptic north
+    apophis_spin_azimuth:   Optional[float] = None  # degrees in ecliptic plane
 
 
 class RunWorkerPayload(NamedTuple):
@@ -276,12 +286,17 @@ def build_parser() -> argparse.ArgumentParser:
         default=42,
         help="Scramble seed for Sobol sequence.",
     )
-    # Real scalings (optional Sobol dimensions when both min and max are set)
+    # Real scalings and spin parameters — optional Sobol dimensions when both min and max are set.
+    # Spin only takes effect in DEM runs (use_dem=T, np_apophis>1); setting bounds without DEM
+    # is allowed but a warning is issued at runtime.
     for key, helpt in (
         ("scale-vel", "scale_vel (Apophis velocity scale)"),
         ("scale-pos", "scale_pos (Apophis initial position scale)"),
         ("scale-r-apophis", "scale_r_apophis (Apophis radius scale)"),
         ("scale-rho", "scale_rho (bulk density scale when mass is density-derived)"),
+        ("spin-period",    "apophis_spin_period in hours (0 = no spin; DEM runs only)"),
+        ("spin-obliquity", "apophis_spin_obliquity in degrees from ecliptic north (DEM runs only)"),
+        ("spin-azimuth",   "apophis_spin_azimuth in degrees in ecliptic plane (DEM runs only)"),
     ):
         parser.add_argument(
             f"--{key}-min",
@@ -538,6 +553,18 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--vary-use-shape-crop and --use-shape-crop-fixed are mutually exclusive")
     if (args.vary_use_shape_crop or args.use_shape_crop_fixed == "true") and not args.shape_file:
         raise ValueError("--shape-file must be set when shape cropping may be enabled")
+
+    # Warn if spin bounds are active but DEM is not enabled; spin only affects DEM particles.
+    _spin_lo_dests = frozenset({"spin_period_min", "spin_obliquity_min", "spin_azimuth_min"})
+    if any(getattr(args, d, None) is not None for d in _spin_lo_dests):
+        dem_on = args.vary_use_dem or getattr(args, "use_dem_fixed", None) == "true"
+        if not dem_on:
+            print(
+                "[WARN] Spin bounds are set but DEM is not enabled "
+                "(--vary-use-dem or --use-dem-fixed true). "
+                "Spin velocity kicks only apply when use_dem=T and np_apophis>1 in the setup file.",
+                file=sys.stderr,
+            )
 
     # np_apophis_list itself constitutes variation; allow dim=0 in that mode.
     dim = count_dimensions(args)

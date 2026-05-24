@@ -19,6 +19,10 @@ SCALE_BOUND_PAIRS: Tuple[Tuple[str, str, str], ...] = (
     ("scale_pos", "scale_pos_min", "scale_pos_max"),
     ("scale_r_apophis", "scale_r_apophis_min", "scale_r_apophis_max"),
     ("scale_rho", "scale_rho_min", "scale_rho_max"),
+    # Spin parameters — only applied by PHANTOM when use_dem=T and np_apophis>1.
+    ("apophis_spin_period",    "spin_period_min",    "spin_period_max"),
+    ("apophis_spin_obliquity", "spin_obliquity_min", "spin_obliquity_max"),
+    ("apophis_spin_azimuth",   "spin_azimuth_min",   "spin_azimuth_max"),
 )
 SCALE_BOUND_DESTS: FrozenSet[str] = frozenset(
     dest for _, lo, hi in SCALE_BOUND_PAIRS for dest in (lo, hi)
@@ -33,6 +37,9 @@ SCALE_PARAM_LABELS: Dict[str, str] = {
     "scale_pos": "scale_pos (Apophis initial position scale)",
     "scale_r_apophis": "scale_r_apophis (Apophis radius scale)",
     "scale_rho": "scale_rho (bulk density scale when mass is density-derived)",
+    "apophis_spin_period":    "apophis_spin_period (spin period in hours; 0 = no spin; DEM runs only)",
+    "apophis_spin_obliquity": "apophis_spin_obliquity (spin axis obliquity from ecliptic north, degrees)",
+    "apophis_spin_azimuth":   "apophis_spin_azimuth (spin axis azimuth in ecliptic plane, degrees)",
 }
 
 # dest -> section title (unknown dests fall under "Other")
@@ -57,6 +64,12 @@ DEST_TO_SECTION: Dict[str, str] = {
     "scale_r_apophis_max": "Scale bounds (optional dimensions)",
     "scale_rho_min": "Scale bounds (optional dimensions)",
     "scale_rho_max": "Scale bounds (optional dimensions)",
+    "spin_period_min":    "Spin (optional dimension)",
+    "spin_period_max":    "Spin (optional dimension)",
+    "spin_obliquity_min": "Spin (optional dimension)",
+    "spin_obliquity_max": "Spin (optional dimension)",
+    "spin_azimuth_min":   "Spin (optional dimension)",
+    "spin_azimuth_max":   "Spin (optional dimension)",
     "vary_use_dem": "Setup toggles",
     "np_apophis": "Setup toggles",
     "vary_use_shape_crop": "Setup toggles",
@@ -174,6 +187,31 @@ INTERACTIVE_BRIEF: Dict[str, tuple[str, str]] = {
     "scale_rho_max": (
         "Upper bound for scale_rho; set both min and max or neither.",
         "Float, or Enter to keep current.",
+    ),
+    "spin_period_min": (
+        "Lower bound for apophis_spin_period (hours). Spin is only applied by PHANTOM when "
+        "use_dem=T and np_apophis>1; this is a no-op for single-sink or gas runs.",
+        "Positive float (hours), or Enter to leave spin period unvaried.",
+    ),
+    "spin_period_max": (
+        "Upper bound for apophis_spin_period (hours). Must be greater than min.",
+        "Positive float (hours), or Enter to leave spin period unvaried.",
+    ),
+    "spin_obliquity_min": (
+        "Lower bound for spin axis obliquity from ecliptic north (degrees). 0 = spin axis pointing north.",
+        "Float in degrees, or Enter to leave obliquity unvaried.",
+    ),
+    "spin_obliquity_max": (
+        "Upper bound for spin axis obliquity (degrees). Must be greater than min.",
+        "Float in degrees, or Enter to leave obliquity unvaried.",
+    ),
+    "spin_azimuth_min": (
+        "Lower bound for spin axis azimuth in the ecliptic plane (degrees).",
+        "Float in degrees, or Enter to leave azimuth unvaried.",
+    ),
+    "spin_azimuth_max": (
+        "Upper bound for spin axis azimuth (degrees). Must be greater than min.",
+        "Float in degrees, or Enter to leave azimuth unvaried.",
     ),
     "vary_use_dem": (
         "If yes, adds a Sobol dimension that toggles use_dem in the setup (T/F across runs).",
