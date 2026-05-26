@@ -353,7 +353,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Sample shape cropping with one Sobol dimension (u>=0.5 -> T, writes --shape-file "
-            "to apophis_shape_file in setup; else blanks apophis_shape_file to disable cropping)."
+            "to obj_file in setup; else blanks obj_file to disable cropping)."
         ),
     )
     parser.add_argument(
@@ -363,8 +363,8 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="{true,false}",
         help=(
             "Force shape cropping to a fixed value in every run: 'true' writes --shape-file to "
-            "apophis_shape_file; 'false' blanks apophis_shape_file to disable cropping. "
-            "Mutually exclusive with --vary-use-shape-crop; omit to leave the template apophis_shape_file unchanged."
+            "obj_file; 'false' blanks obj_file to disable cropping. "
+            "Mutually exclusive with --vary-use-shape-crop; omit to leave the template obj_file unchanged."
         ),
     )
     parser.add_argument(
@@ -372,7 +372,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="PATH",
         help=(
-            "Path to the shape config file (or .obj) written into apophis_shape_file when shape "
+            "Path to the shape config file (or .obj) written into obj_file when shape "
             "cropping is enabled (--vary-use-shape-crop or --use-shape-crop-fixed true). "
             "Required when cropping may be enabled."
         ),
@@ -674,8 +674,8 @@ def apply_run_sample_to_setup(
 
     if sample.use_shape_crop is not None:
         path_tok = (shape_file or "") if sample.use_shape_crop else ""
-        text = replace_setup_assignment(text, "apophis_shape_file", path_tok)
-        validate_assignment(text, "apophis_shape_file", path_tok)
+        text = replace_setup_assignment(text, "obj_file", path_tok)
+        validate_assignment(text, "obj_file", path_tok)
         columns["use_shape_crop"] = "T" if sample.use_shape_crop else "F"
 
     if sample.apophis_only is not None:
@@ -1190,6 +1190,11 @@ def run_one_case(
             raise RuntimeError(
                 diag or f"phantomsetup failed (returncode != 0); see {run_dir / 'setup.log'}"
             ) from None
+        if sample.use_dem is True:
+            in_text = run_input.read_text()
+            in_text = replace_setup_assignment(in_text, "nfulldump", f"{1:>10}")
+            run_input.write_text(in_text)
+            print(f"[INFO] Run {run_id}: DEM enabled — set nfulldump=1 in {run_input.name}", flush=True)
         run_command([str(phantom_bin), f"{prefix}.in"], cwd=run_dir, log_path=run_dir / "phantom.log")
         if skip_closest_approach(sample):
             return RunRecord(
