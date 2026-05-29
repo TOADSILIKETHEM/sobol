@@ -182,6 +182,8 @@ class RunRecord:
     closest_approach_km: float
     closest_approach_au: float
     error: str
+    dispersion_ratio: float = float("nan")
+    unbound_fraction: float = float("nan")
     # Values written for CSV secondary columns (setup-related names e.g. scale_vel; mass uses mass_input_kg).
     param_columns: Dict[str, str] = field(default_factory=dict)
 
@@ -353,7 +355,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Sample shape cropping with one Sobol dimension (u>=0.5 -> T, writes --shape-file "
-            "to obj_file in setup; else blanks obj_file to disable cropping)."
+            "to apophis_shape_file in setup; else blanks apophis_shape_file to disable cropping)."
         ),
     )
     parser.add_argument(
@@ -363,8 +365,8 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="{true,false}",
         help=(
             "Force shape cropping to a fixed value in every run: 'true' writes --shape-file to "
-            "obj_file; 'false' blanks obj_file to disable cropping. "
-            "Mutually exclusive with --vary-use-shape-crop; omit to leave the template obj_file unchanged."
+            "apophis_shape_file; 'false' blanks apophis_shape_file to disable cropping. "
+            "Mutually exclusive with --vary-use-shape-crop; omit to leave the template apophis_shape_file unchanged."
         ),
     )
     parser.add_argument(
@@ -372,7 +374,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="PATH",
         help=(
-            "Path to the shape config file (or .obj) written into obj_file when shape "
+            "Path to the shape config file (or .obj) written into apophis_shape_file when shape "
             "cropping is enabled (--vary-use-shape-crop or --use-shape-crop-fixed true). "
             "Required when cropping may be enabled."
         ),
@@ -674,8 +676,8 @@ def apply_run_sample_to_setup(
 
     if sample.use_shape_crop is not None:
         path_tok = (shape_file or "") if sample.use_shape_crop else ""
-        text = replace_setup_assignment(text, "obj_file", path_tok)
-        validate_assignment(text, "obj_file", path_tok)
+        text = replace_setup_assignment(text, "apophis_shape_file", path_tok)
+        validate_assignment(text, "apophis_shape_file", path_tok)
         columns["use_shape_crop"] = "T" if sample.use_shape_crop else "F"
 
     if sample.apophis_only is not None:
@@ -1051,6 +1053,109 @@ def extract_closest_approach(
     return closest_km, closest_km / AU_IN_KM
 
 
+SinkFullRow = Tuple[float, Tuple[float, float, float], Tuple[float, float, float], float]
+
+
+def parse_sink_full_rows(path: Path) -> List[SinkFullRow]:
+    """Parse a sink `.ev` file into (time, position, velocity, mass) rows (PHANTOM code units)."""
+    rows: List[SinkFullRow] = []
+    with path.open("r", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            parts = stripped.split()
+            if len(parts) < 8:
+                continue
+            try:
+                t = float(parts[0])
+                pos = (float(parts[1]), float(parts[2]), float(parts[3]))
+                mass = float(parts[4])
+                vel = (float(parts[5]), float(parts[6]), float(parts[7]))
+            except ValueError:
+                continue
+            rows.append((t, pos, vel, mass))
+    return rows
+
+
+def _sink_id_from_ev_name(name: str) -> Optional[int]:
+    """Sink ID (the 4-digit field) from a `<prefix>Sink<NNNN>N<dd>.ev` filename, or None."""
+    m = re.search(r"Sink(\d+)N\d+\.ev$", name, re.IGNORECASE)
+    return int(m.group(1)) if m else None
+
+
+def extract_breakup_metrics(
+    run_dir: Path, prefix: str, apophis_sink_id: int
+) -> Tuple[float, float]:
+    """Peak dispersion ratio and unbound mass fraction of the Apophis rubble pile.
+
+    Apophis particles are the equal-mass sinks with ID >= ``apophis_sink_id``. Everything is
+    in PHANTOM code units where G=1, so the energy criterion needs no unit conversion. Returns
+    ``(nan, nan)`` when fewer than two Apophis particles are present (non-DEM / single-sink runs).
+    """
+    latest_by_id: Dict[int, Path] = {}
+    for p in run_dir.glob(f"{prefix}Sink*N*.ev"):
+        sid = _sink_id_from_ev_name(p.name)
+        if sid is None or sid < apophis_sink_id:
+            continue
+        cur = latest_by_id.get(sid)
+        if cur is None or _sink_ev_dump_sort_key(p) > _sink_ev_dump_sort_key(cur):
+            latest_by_id[sid] = p
+
+    if len(latest_by_id) < 2:
+        return float("nan"), float("nan")
+
+    # Group particle rows by dump time. Identical dump times share the same float, so a
+    # fixed-precision string key groups them exactly while tolerating trivial noise.
+    groups: Dict[str, List[Tuple[Tuple[float, float, float], Tuple[float, float, float], float]]] = {}
+    time_of_key: Dict[str, float] = {}
+    for path in latest_by_id.values():
+        for t, pos, vel, mass in parse_sink_full_rows(path):
+            key = f"{t:.9g}"
+            groups.setdefault(key, []).append((pos, vel, mass))
+            time_of_key[key] = t
+
+    rg_initial: Optional[float] = None
+    disp_peak = float("nan")
+    unbound_peak = float("nan")
+    for key in sorted(groups, key=lambda k: time_of_key[k]):
+        parts = groups[key]
+        if len(parts) < 2:
+            continue
+        m_tot = math.fsum(m for _, _, m in parts)
+        if m_tot <= 0.0:
+            continue
+        rcom = tuple(math.fsum(p[a] * m for p, _, m in parts) / m_tot for a in range(3))
+        vcom = tuple(math.fsum(v[a] * m for _, v, m in parts) / m_tot for a in range(3))
+
+        sum_m_r2 = 0.0
+        unbound_mass = 0.0
+        for pos, vel, m in parts:
+            dr = (pos[0] - rcom[0], pos[1] - rcom[1], pos[2] - rcom[2])
+            r2 = dr[0] * dr[0] + dr[1] * dr[1] + dr[2] * dr[2]
+            sum_m_r2 += m * r2
+            dv = (vel[0] - vcom[0], vel[1] - vcom[1], vel[2] - vcom[2])
+            v2 = dv[0] * dv[0] + dv[1] * dv[1] + dv[2] * dv[2]
+            r = math.sqrt(r2)
+            # eps = 0.5 v_rel^2 - G*M/r with G=1 (code units); total mass M over-binds outer
+            # particles slightly, so unbound counts are conservative. r=0 => treat as bound.
+            if r > 0.0 and 0.5 * v2 - m_tot / r > 0.0:
+                unbound_mass += m
+        rg = math.sqrt(sum_m_r2 / m_tot)
+
+        if rg_initial is None:
+            rg_initial = rg
+        if rg_initial and rg_initial > 0.0:
+            ratio = rg / rg_initial
+            if math.isnan(disp_peak) or ratio > disp_peak:
+                disp_peak = ratio
+        frac = unbound_mass / m_tot
+        if math.isnan(unbound_peak) or frac > unbound_peak:
+            unbound_peak = frac
+
+    return disp_peak, unbound_peak
+
+
 def preflight(args: argparse.Namespace, base_dir: Path, output_root: Path) -> Tuple[Path, Path, Path, Path]:
     base_setup = base_dir / f"{args.prefix}.setup"
     base_input = base_dir / f"{args.prefix}.in"
@@ -1106,6 +1211,8 @@ def write_summary_csv(path: Path, records: List[RunRecord], param_column_order: 
         "status",
         "closest_approach_km",
         "closest_approach_au",
+        "dispersion_ratio",
+        "unbound_fraction",
         "error",
     ]
     ordered = sorted(records, key=lambda r: r.run_id)
@@ -1123,6 +1230,8 @@ def write_summary_csv(path: Path, records: List[RunRecord], param_column_order: 
                     row.status,
                     f"{row.closest_approach_km:.12g}" if not math.isnan(row.closest_approach_km) else "",
                     f"{row.closest_approach_au:.12g}" if not math.isnan(row.closest_approach_au) else "",
+                    f"{row.dispersion_ratio:.12g}" if not math.isnan(row.dispersion_ratio) else "",
+                    f"{row.unbound_fraction:.12g}" if not math.isnan(row.unbound_fraction) else "",
                     row.error,
                 ]
             )
@@ -1196,6 +1305,12 @@ def run_one_case(
             run_input.write_text(in_text)
             print(f"[INFO] Run {run_id}: DEM enabled — set nfulldump=1 in {run_input.name}", flush=True)
         run_command([str(phantom_bin), f"{prefix}.in"], cwd=run_dir, log_path=run_dir / "phantom.log")
+        dispersion_ratio = float("nan")
+        unbound_fraction = float("nan")
+        if sample.use_dem is True:
+            dispersion_ratio, unbound_fraction = extract_breakup_metrics(
+                run_dir, prefix, apophis_sink_id
+            )
         if skip_closest_approach(sample):
             return RunRecord(
                 run_id=run_id,
@@ -1205,6 +1320,8 @@ def run_one_case(
                 closest_approach_km=float("nan"),
                 closest_approach_au=float("nan"),
                 error="",
+                dispersion_ratio=dispersion_ratio,
+                unbound_fraction=unbound_fraction,
                 param_columns=param_columns,
             )
         closest_km, closest_au = extract_closest_approach(
@@ -1218,6 +1335,8 @@ def run_one_case(
             closest_approach_km=closest_km,
             closest_approach_au=closest_au,
             error="",
+            dispersion_ratio=dispersion_ratio,
+            unbound_fraction=unbound_fraction,
             param_columns=param_columns,
         )
     except Exception as exc:  # pragma: no cover - runtime path

@@ -4,7 +4,7 @@
         m_apophis_in =                ! mass of apophis (blank uses density-based default, e.g. 6e10 kg)
            asteroids =           F    ! add distant minor bodies as km-sized dust particles
           np_apophis =           1    ! number of particles used to represent apophis (0=none; 1=sink; n=gas)
-            obj_file =                ! OBJ mesh file for Apophis shape (blank = sphere)
+  apophis_shape_file =                ! shape config file for lattice cropping (blank = sphere)
                epoch =  2029-04-10    ! epoch to query ephemeris, YYYY-MMM-DD HH:MM:SS.fff, blank = today
              use_dem =           F    ! use the discrete element method for sink-sink interactions
         apophis_only =           F    ! only add apophis
