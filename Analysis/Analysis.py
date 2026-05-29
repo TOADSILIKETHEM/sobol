@@ -13,15 +13,28 @@ and optionally ``saltelli_meta.json`` — produced by ``run_mass_sobol_phantom.p
 You cannot compute Saltelli Sobol indices from a classic ``sobol_mass_outputs.csv`` alone;
 that design has only N evaluations instead of N*(D+2) or N*(2*D+2).
 
+Recognised input parameters (varied dimensions):
+  mass_input_kg, scale_vel, scale_pos, scale_r_apophis, scale_rho,
+  apophis_spin_period, apophis_spin_obliquity, apophis_spin_azimuth, np_apophis,
+  use_dem, use_shape_crop, apophis_only.
+
+Recognised response columns (--response / --saltelli-y-column):
+  closest_approach_km, closest_approach_au  — orbital closest-approach distance.
+  dispersion_ratio                           — DEM only; peak radius-of-gyration ratio (>=1).
+  unbound_fraction                           — DEM only; peak unbound mass fraction [0,1].
+
 Examples:
   python3 Analysis.py --method classic --csv sobol_mass_runs/.../sobol_mass_outputs.csv \\
       --response closest_approach_au
+
+  python3 Analysis.py --method classic --csv sobol_mass_runs/.../sobol_mass_outputs.csv \\
+      --response dispersion_ratio
 
   python3 Analysis.py --method saltelli \\
       --sobol-problem-json batch/saltelli_problem.json \\
       --saltelli-meta-json batch/saltelli_meta.json \\
       --saltelli-y-csv batch/saltelli_Y.csv \\
-      --saltelli-y-column closest_approach_au
+      --saltelli-y-column dispersion_ratio
 
 Classic mode writes ``<input_stem>_sensitivity.csv`` by default. Saltelli mode writes
 ``saltelli_sobol_indices.csv`` next to the problem JSON unless ``--output-sobol-csv`` is set.
@@ -68,9 +81,23 @@ INPUT_CANDIDATES: Tuple[str, ...] = (
     "scale_pos",
     "scale_r_apophis",
     "scale_rho",
+    # Spin orientation/rate — patched into setup; only affect DEM runs.
+    "apophis_spin_period",
+    "apophis_spin_obliquity",
+    "apophis_spin_azimuth",
+    # Particle count (varies in --np-apophis-list sweeps).
+    "np_apophis",
 )
 
-BOOL_INPUTS: Tuple[str, ...] = ("use_dem", "apophis_only")
+BOOL_INPUTS: Tuple[str, ...] = ("use_dem", "use_shape_crop", "apophis_only")
+
+# All response columns the runner can produce; used only for documentation / help text.
+RESPONSE_CANDIDATES: Tuple[str, ...] = (
+    "closest_approach_km",
+    "closest_approach_au",
+    "dispersion_ratio",
+    "unbound_fraction",
+)
 
 RESULT_CSV_FIELDS = (
     "parameter",
@@ -119,7 +146,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--response",
         default="closest_approach_au",
-        help="Output column for classic mode and default --saltelli-y-column.",
+        help=(
+            "Output column to analyse in classic mode; also the default for --saltelli-y-column. "
+            "Valid options from the runner: closest_approach_km, closest_approach_au, "
+            "dispersion_ratio (DEM only), unbound_fraction (DEM only)."
+        ),
     )
     p.add_argument(
         "--include-failed",
@@ -180,7 +211,11 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default=None,
         metavar="NAME",
-        help="Numeric column for Y (default: same as --response).",
+        help=(
+            "Numeric column to use as Y from the saltelli Y CSV (default: same as --response). "
+            "The runner writes closest_approach_km, closest_approach_au, dispersion_ratio, and "
+            "unbound_fraction to saltelli_Y.csv."
+        ),
     )
     p.add_argument(
         "--saltelli-calc-second-order",
@@ -574,7 +609,10 @@ def run_classic_analysis(args: argparse.Namespace) -> None:
     print(
         "Interpretation (classic): eta^2 is the correlation ratio from quantile bins on each input "
         "(marginal, nonlinear). R^2 Pearson/Spearman are linear/rank-linear. "
-        "These are not Saltelli Sobol indices."
+        "These are not Saltelli Sobol indices. "
+        "Spin inputs (apophis_spin_period/obliquity/azimuth) only vary in DEM sweeps; "
+        "dispersion_ratio and unbound_fraction responses are blank for non-DEM runs and are "
+        "excluded automatically when not finite."
     )
     if not HAS_SCIPY:
         print("[NOTE] Install scipy for Spearman R^2 (pip install scipy).")

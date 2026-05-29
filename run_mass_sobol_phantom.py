@@ -1531,6 +1531,8 @@ def main() -> int:
                     "run_id": result.run_id,
                     "closest_approach_km": result.closest_approach_km,
                     "closest_approach_au": result.closest_approach_au,
+                    "dispersion_ratio": result.dispersion_ratio,
+                    "unbound_fraction": result.unbound_fraction,
                     "status": result.status,
                 }
             )
@@ -1555,7 +1557,7 @@ def main() -> int:
         print(f"[INFO] Wrote Saltelli eval manifest: {manifest_path}")
 
         y_path = output_root / "saltelli_Y.csv"
-        y_fields = ["eval_index", "run_id", "closest_approach_km", "closest_approach_au", "status"]
+        y_fields = ["eval_index", "run_id", "closest_approach_km", "closest_approach_au", "dispersion_ratio", "unbound_fraction", "status"]
         with y_path.open("w", newline="", encoding="utf-8") as yf:
             yw = csv.DictWriter(yf, fieldnames=y_fields)
             yw.writeheader()
@@ -1569,7 +1571,8 @@ def main() -> int:
             f"       --sobol-problem-json {prob_p} \\\n"
             f"       --saltelli-meta-json {meta_p} \\\n"
             f"       --saltelli-y-csv {y_path.resolve()} \\\n"
-            "       --saltelli-y-column closest_approach_au"
+            "       --saltelli-y-column closest_approach_au  "
+            "# also: dispersion_ratio, unbound_fraction (DEM sweeps)"
             + (
                 " \\\n       --saltelli-calc-second-order"
                 if args.saltelli_calc_second_order
