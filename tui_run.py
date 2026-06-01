@@ -50,6 +50,16 @@ _SCALE_DIMS = [
 
 _MASS_GATE_IDS = ("mass-min-kg", "mass-max-kg", "apophis-ref-mass-kg")
 
+# DEM contact parameters: patched into .in after phantomsetup.
+# (css-id-stem, argparse-dest-stem, label, is_integer)
+# dest stem follows argparse convention: --kc-min → kc_min, getattr(d, "kc_min", None)
+_IN_DIMS = [
+    ("kc",    "kc",    "kc_cgs  — cohesive spring constant (dyne/cm; 0=off; DEM only)",       False),
+    ("ct",    "ct",    "ct_dem  — tangential damping coefficient (DEM only)",                   False),
+    ("eps-n", "eps_n", "epsilon_n_dem  — normal restitution coeff [0,1] (DEM only)",            False),
+    ("kn",    "kn",    "kn_cgs  — normal spring constant (dyne/cm; DEM only)",                  False),
+]
+
 
 # ── helper: one labelled row ─────────────────────────────────────────────────
 
@@ -228,6 +238,51 @@ class SobolTUIApp(App[Optional[List[str]]]):
                                  disabled=not active, placeholder="max"),
                            hint)
 
+            # ── DEM Contact parameters ─────────────────────────────────────
+            yield Static("DEM Contact  (optional Sobol dimensions — .in file, DEM mode only)", classes="sec")
+            for css, attr, label, is_int in _IN_DIMS:
+                lo = getattr(d, attr + "_min", None)
+                hi = getattr(d, attr + "_max", None)
+                active = lo is not None and hi is not None
+                hint = "int" if is_int else "float"
+                yield _Row(f"vary {attr}",
+                           Checkbox(label, value=active, id=f"vary-{css}"))
+                yield _Row(f"  {attr}_min",
+                           Input(str(lo or ""), id=f"{css}-min",
+                                 disabled=not active, placeholder="min"),
+                           hint)
+                yield _Row(f"  {attr}_max",
+                           Input(str(hi or ""), id=f"{css}-max",
+                                 disabled=not active, placeholder="max"),
+                           hint)
+
+            # ── Timeframe ──────────────────────────────────────────────────
+            yield Static("Timeframe  (fix for all runs, or sweep as Sobol dimension)", classes="sec")
+            for t_css, t_attr, t_label in (
+                ("tmax",  "tmax_hours",  "tmax_in — simulation end time"),
+                ("dtmax", "dtmax_hours", "dtmax_in — dump interval"),
+            ):
+                t_lo  = getattr(d, t_attr + "_min", None)
+                t_hi  = getattr(d, t_attr + "_max", None)
+                t_fix = getattr(d, t_attr, None)
+                t_vary = t_lo is not None and t_hi is not None
+                yield _Row(f"vary {t_attr}",
+                           Checkbox(f"{t_label}  (sweep as Sobol dim)",
+                                    value=t_vary, id=f"vary-{t_css}"))
+                yield _Row(f"  {t_attr} fixed",
+                           Input(str(t_fix or ""), id=f"{t_css}-fixed",
+                                 disabled=t_vary,
+                                 placeholder="hours  e.g. 108 = 4.5 days  (blank = keep template)"),
+                           "hr  fixed")
+                yield _Row(f"  {t_attr}_min",
+                           Input(str(t_lo or ""), id=f"{t_css}-min",
+                                 disabled=not t_vary, placeholder="min hr"),
+                           "hr")
+                yield _Row(f"  {t_attr}_max",
+                           Input(str(t_hi or ""), id=f"{t_css}-max",
+                                 disabled=not t_vary, placeholder="max hr"),
+                           "hr")
+
             # ── Setup toggles ──────────────────────────────────────────────
             yield Static("Setup toggles", classes="sec")
             vary_dem = bool(getattr(d, "vary_use_dem", False))
@@ -324,7 +379,7 @@ class SobolTUIApp(App[Optional[List[str]]]):
         # ── button bar ─────────────────────────────────────────────────────
         with Horizontal(id="bar"):
             yield Button("Run Sweep", id="btn-run",    variant="success")
-            yield Button("Dry Run",   id="btn-dryrun", variant="primary")
+            yield Button("Dry Run",   id="btn-dryrun", variant="warning")
             yield Button("Quit",      id="btn-quit",   variant="error")
             yield Static("Ready — edit fields above, then press Run Sweep.", id="status")
 
@@ -350,8 +405,14 @@ class SobolTUIApp(App[Optional[List[str]]]):
             # path field is needed whenever cropping may be on
             self.query_one("#shape-file").disabled = not active
 
+        elif cb_id in ("vary-tmax", "vary-dtmax"):
+            stem = cb_id[len("vary-"):]   # "tmax" or "dtmax"
+            self.query_one(f"#{stem}-fixed").disabled = active
+            self.query_one(f"#{stem}-min").disabled   = not active
+            self.query_one(f"#{stem}-max").disabled   = not active
+
         else:
-            for css, _, _, _ in _SCALE_DIMS:
+            for css, _, _, _ in (*_SCALE_DIMS, *_IN_DIMS):
                 if cb_id == f"vary-{css}":
                     self.query_one(f"#{css}-min").disabled = not active
                     self.query_one(f"#{css}-max").disabled = not active
@@ -492,6 +553,25 @@ class SobolTUIApp(App[Optional[List[str]]]):
                 else:
                     fi(f"{css}-min", f"{flag_base}-min")
                     fi(f"{css}-max", f"{flag_base}-max")
+
+        # DEM contact parameters
+        for css, attr, _, is_int in _IN_DIMS:
+            if self._cb(f"vary-{css}"):
+                flag_base = "--" + attr.replace("_", "-")
+                if is_int:
+                    ii(f"{css}-min", f"{flag_base}-min")
+                    ii(f"{css}-max", f"{flag_base}-max")
+                else:
+                    fi(f"{css}-min", f"{flag_base}-min")
+                    fi(f"{css}-max", f"{flag_base}-max")
+
+        # Timeframe
+        for t_css, t_flag in (("tmax", "--tmax-hours"), ("dtmax", "--dtmax-hours")):
+            if self._cb(f"vary-{t_css}"):
+                fi(f"{t_css}-min", f"{t_flag}-min")
+                fi(f"{t_css}-max", f"{t_flag}-max")
+            else:
+                fi(f"{t_css}-fixed", t_flag)
 
         # Setup toggles
         if self._cb("vary-use-dem"):

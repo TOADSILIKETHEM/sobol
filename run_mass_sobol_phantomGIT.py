@@ -134,6 +134,9 @@ class RunSample:
     scale_rho: Optional[float] = None
     use_dem: Optional[bool] = None
     apophis_only: Optional[bool] = None
+    # Timeframe: patched into the .setup file before phantomsetup as "X hr" strings.
+    tmax_hours:  Optional[float] = None   # simulation end time in hours
+    dtmax_hours: Optional[float] = None   # dump interval in hours
 
 
 class RunWorkerPayload(NamedTuple):
@@ -424,6 +427,11 @@ def format_real_token(val: float) -> str:
     return f"{val:.10g}"
 
 
+def hours_to_phantom_time_string(h: float) -> str:
+    """Format hours as a PHANTOM-readable time token (e.g. 12.5 -> '12.5 hr')."""
+    return f"{h:.6g} hr"
+
+
 def replace_setup_assignment(setup_text: str, key: str, value_str: str) -> str:
     pattern = re.compile(rf"^(\s*{re.escape(key)}\s*=\s*)([^!]*)(!.*)?$", re.MULTILINE)
     matches = list(pattern.finditer(setup_text))
@@ -479,6 +487,15 @@ def apply_run_sample_to_setup(setup_path: Path, sample: RunSample, mass_unit: st
         text = replace_setup_assignment(text, "apophis_only", tok)
         validate_assignment(text, "apophis_only", tok)
         columns["apophis_only"] = "T" if sample.apophis_only else "F"
+
+    _SETUP_TIME_KEYS = {"tmax_hours": "tmax_in", "dtmax_hours": "dtmax_in"}
+    for param, setup_key in _SETUP_TIME_KEYS.items():
+        h = getattr(sample, param)
+        if h is not None:
+            tok = hours_to_phantom_time_string(h)
+            text = replace_setup_assignment(text, setup_key, tok)
+            validate_assignment(text, setup_key, tok)
+            columns[param] = f"{h:.12g}"
 
     setup_path.write_text(text, encoding="utf-8")
     return columns

@@ -119,6 +119,25 @@ _SCALE_VARIATION_SPEC: Tuple[Tuple[str, str, str, str], ...] = (
     ("apophis_spin_azimuth",   "spin_azimuth_min",   "spin_azimuth_max",   "saz"),
 )
 
+# DEM contact parameters varied via CLI min/max: patched into the run's .in file AFTER
+# phantomsetup generates it (phantomsetup overwrites .in, so setup-time patching is lost).
+# (RunSample attribute == .in file key, argparse lo/hi dest stems, batch slug token)
+_IN_VARIATION_SPEC: Tuple[Tuple[str, str, str, str], ...] = (
+    ("kc_cgs",        "kc_min",    "kc_max",    "kc"),
+    ("ct_dem",        "ct_min",    "ct_max",    "ct"),
+    ("epsilon_n_dem", "eps_n_min", "eps_n_max", "eps"),
+    ("kn_cgs",        "kn_min",    "kn_max",    "kn"),
+)
+
+# Simulation timeframe parameters: stored in hours, written as "X hr" strings to the .setup file.
+# Fixed override (--tmax-hours / --dtmax-hours) applies to every run without consuming a Sobol dimension.
+# Sweep bounds (--tmax-hours-min/max / --dtmax-hours-min/max) make the parameter a Sobol dimension.
+# The two modes are mutually exclusive per parameter.
+_TIME_VARIATION_SPEC: Tuple[Tuple[str, str, str, str], ...] = (
+    ("tmax_hours",  "tmax_hours_min",  "tmax_hours_max",  "tmx"),
+    ("dtmax_hours", "dtmax_hours_min", "dtmax_hours_max", "dtmx"),
+)
+
 
 def _active_scale_variations(args: argparse.Namespace) -> List[Tuple[str, float, float, str]]:
     """Scale dimensions that are active (both bounds set), in canonical order."""
@@ -126,6 +145,28 @@ def _active_scale_variations(args: argparse.Namespace) -> List[Tuple[str, float,
     for param, lo_attr, hi_attr, slug_tok in _SCALE_VARIATION_SPEC:
         lo = getattr(args, lo_attr)
         hi = getattr(args, hi_attr)
+        if lo is not None and hi is not None:
+            out.append((param, lo, hi, slug_tok))
+    return out
+
+
+def _active_in_variations(args: argparse.Namespace) -> List[Tuple[str, float, float, str]]:
+    """In-file DEM contact dimensions that are active (both bounds set), in canonical order."""
+    out: List[Tuple[str, float, float, str]] = []
+    for param, lo_attr, hi_attr, slug_tok in _IN_VARIATION_SPEC:
+        lo = getattr(args, lo_attr, None)
+        hi = getattr(args, hi_attr, None)
+        if lo is not None and hi is not None:
+            out.append((param, lo, hi, slug_tok))
+    return out
+
+
+def _active_time_variations(args: argparse.Namespace) -> List[Tuple[str, float, float, str]]:
+    """Timeframe dimensions that are being swept (both min and max set), in canonical order."""
+    out: List[Tuple[str, float, float, str]] = []
+    for param, lo_attr, hi_attr, slug_tok in _TIME_VARIATION_SPEC:
+        lo = getattr(args, lo_attr, None)
+        hi = getattr(args, hi_attr, None)
         if lo is not None and hi is not None:
             out.append((param, lo, hi, slug_tok))
     return out
@@ -205,6 +246,14 @@ class RunSample:
     apophis_spin_period:    Optional[float] = None  # hours
     apophis_spin_obliquity: Optional[float] = None  # degrees from ecliptic north
     apophis_spin_azimuth:   Optional[float] = None  # degrees in ecliptic plane
+    # DEM contact params: patched into the .in file after phantomsetup; only active when isink_potential=2.
+    kc_cgs:        Optional[float] = None  # cohesive spring constant (dyne/cm); 0 = no cohesion
+    ct_dem:        Optional[float] = None  # tangential damping coefficient
+    epsilon_n_dem: Optional[float] = None  # normal restitution coefficient [0,1]
+    kn_cgs:        Optional[float] = None  # normal spring constant (dyne/cm)
+    # Timeframe: patched into the .setup file before phantomsetup as "X hr" strings.
+    tmax_hours:  Optional[float] = None   # simulation end time in hours
+    dtmax_hours: Optional[float] = None   # dump interval in hours
 
 
 class RunWorkerPayload(NamedTuple):
@@ -312,6 +361,77 @@ def build_parser() -> argparse.ArgumentParser:
             default=None,
             help=f"Upper bound for {helpt}; omit with min to leave unvaried.",
         )
+    # DEM contact parameters — optional Sobol dimensions patched into .in after phantomsetup.
+    # Only active when both min and max are set and the run uses DEM (isink_potential=2).
+    for key, helpt in (
+        ("kc",    "kc_cgs (cohesive spring constant in dyne/cm; DEM only; 0=off)"),
+        ("ct",    "ct_dem (tangential damping coefficient; DEM only)"),
+        ("eps-n", "epsilon_n_dem (normal restitution coefficient [0,1]; DEM only)"),
+        ("kn",    "kn_cgs (normal spring constant in dyne/cm; DEM only)"),
+    ):
+        parser.add_argument(
+            f"--{key}-min",
+            type=float,
+            default=None,
+            help=f"Lower bound for {helpt}; omit with max to leave unvaried.",
+        )
+        parser.add_argument(
+            f"--{key}-max",
+            type=float,
+            default=None,
+            help=f"Upper bound for {helpt}; omit with min to leave unvaried.",
+        )
+    # Timeframe parameters — fix for all runs or sweep as Sobol dimensions.
+    # Fixed (--tmax-hours / --dtmax-hours) and min/max bounds are mutually exclusive per parameter.
+    parser.add_argument(
+        "--tmax-hours",
+        type=float,
+        default=None,
+        metavar="H",
+        help=(
+            "Fix tmax_in for every run in this batch (hours). "
+            "E.g. --tmax-hours 12 sets tmax_in = '12 hr' in each run's .setup. "
+            "Mutually exclusive with --tmax-hours-min/max."
+        ),
+    )
+    parser.add_argument(
+        "--tmax-hours-min",
+        type=float,
+        default=None,
+        metavar="H",
+        help="Lower bound for tmax_in sweep (hours). Requires --tmax-hours-max. Mutually exclusive with --tmax-hours.",
+    )
+    parser.add_argument(
+        "--tmax-hours-max",
+        type=float,
+        default=None,
+        metavar="H",
+        help="Upper bound for tmax_in sweep (hours). Requires --tmax-hours-min.",
+    )
+    parser.add_argument(
+        "--dtmax-hours",
+        type=float,
+        default=None,
+        metavar="H",
+        help=(
+            "Fix dtmax_in (dump interval) for every run in this batch (hours). "
+            "Mutually exclusive with --dtmax-hours-min/max."
+        ),
+    )
+    parser.add_argument(
+        "--dtmax-hours-min",
+        type=float,
+        default=None,
+        metavar="H",
+        help="Lower bound for dtmax_in sweep (hours). Requires --dtmax-hours-max. Mutually exclusive with --dtmax-hours.",
+    )
+    parser.add_argument(
+        "--dtmax-hours-max",
+        type=float,
+        default=None,
+        metavar="H",
+        help="Upper bound for dtmax_in sweep (hours). Requires --dtmax-hours-min.",
+    )
     parser.add_argument(
         "--vary-use-dem",
         action="store_true",
@@ -388,6 +508,17 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--apophis-only-fixed",
+        choices=("true", "false"),
+        default=None,
+        metavar="{true,false}",
+        help=(
+            "Force apophis_only to a fixed value in every run. "
+            "Mutually exclusive with --vary-apophis-only. "
+            "When true, auto-sets --sink-apophis-id 1 (override explicitly if needed)."
+        ),
+    )
+    parser.add_argument(
         "--sink-earth-id",
         type=int,
         default=EARTH_SINK_ID_DEFAULT,
@@ -445,6 +576,16 @@ def build_parser() -> argparse.ArgumentParser:
             "Number of parallel worker processes for independent PHANTOM runs. "
             "If PHANTOM is built with OpenMP, set OMP_NUM_THREADS=1 (or ensure jobs×threads "
             "does not oversubscribe CPU cores)."
+        ),
+    )
+    parser.add_argument(
+        "--no-cleanup",
+        action="store_true",
+        dest="no_cleanup",
+        help=(
+            "Keep heavy output files (binary dumps, .ev files, phantom.log) after each run "
+            "completes. By default these are deleted once metrics are extracted to save disk space. "
+            "Use this flag when you need the files for post-processing or visualisation."
         ),
     )
     parser.add_argument(
@@ -525,9 +666,42 @@ def validate_args(args: argparse.Namespace) -> None:
             raise ValueError(f"{param}: set both min and max, or neither")
         if lo is not None and hi is not None and hi <= lo:
             raise ValueError(f"{param}: require min < max")
+    for param, lo_attr, hi_attr, _ in _IN_VARIATION_SPEC:
+        lo = getattr(args, lo_attr, None)
+        hi = getattr(args, hi_attr, None)
+        if (lo is None) ^ (hi is None):
+            raise ValueError(f"{param}: set both min and max, or neither")
+        if lo is not None and hi is not None and hi <= lo:
+            raise ValueError(f"{param}: require min < max")
+    for param, lo_attr, hi_attr, _ in _TIME_VARIATION_SPEC:
+        fixed_val = getattr(args, param, None)
+        lo = getattr(args, lo_attr, None)
+        hi = getattr(args, hi_attr, None)
+        if fixed_val is not None and (lo is not None or hi is not None):
+            flag = param.replace("_", "-")
+            raise ValueError(
+                f"{param}: use either fixed (--{flag}) or min/max sweep bounds, not both."
+            )
+        if (lo is None) ^ (hi is None):
+            raise ValueError(f"{param}: set both --{lo_attr.replace('_', '-')} and "
+                             f"--{hi_attr.replace('_', '-')}, or neither.")
+        if lo is not None and hi is not None and hi <= lo:
+            raise ValueError(f"{param}: require min < max ({lo} >= {hi}).")
+        if fixed_val is not None and fixed_val <= 0:
+            raise ValueError(f"{param}: must be positive (got {fixed_val}).")
+        if lo is not None and lo <= 0:
+            raise ValueError(f"{param}: min must be positive (got {lo}).")
 
     if args.vary_use_dem and args.use_dem_fixed is not None:
         raise ValueError("--vary-use-dem and --use-dem-fixed are mutually exclusive")
+
+    if args.vary_apophis_only and getattr(args, "apophis_only_fixed", None) is not None:
+        raise ValueError("--vary-apophis-only and --apophis-only-fixed are mutually exclusive")
+    if getattr(args, "apophis_only_fixed", None) == "true" and args.sink_apophis_id == APOPHIS_SINK_ID_DEFAULT:
+        args.sink_apophis_id = 1
+        print("[INFO] --apophis-only-fixed true: auto-set --sink-apophis-id 1 "
+              "(no solar-system bodies; Apophis sinks start at 1). "
+              "Override with explicit --sink-apophis-id if needed.", file=sys.stderr)
 
     if args.np_apophis is not None and args.np_apophis < 0:
         raise ValueError("--np-apophis must be >= 0")
@@ -582,6 +756,8 @@ def count_dimensions(args: argparse.Namespace) -> int:
     if _mass_bounds_active(args):
         n += 1
     n += len(_active_scale_variations(args))
+    n += len(_active_in_variations(args))
+    n += len(_active_time_variations(args))
     if args.vary_use_dem:
         n += 1
     if args.vary_use_shape_crop:
@@ -617,6 +793,11 @@ def format_logical_token(val: bool) -> str:
 
 def format_real_token(val: float) -> str:
     return f"{val:.10g}"
+
+
+def hours_to_phantom_time_string(h: float) -> str:
+    """Format hours as a PHANTOM-readable time token (e.g. 12.5 -> '12.5 hr')."""
+    return f"{h:.6g} hr"
 
 
 def replace_setup_assignment(setup_text: str, key: str, value_str: str) -> str:
@@ -692,7 +873,50 @@ def apply_run_sample_to_setup(
         text = _NP_APOPHIS_RE.sub(lambda m: m.group(1) + str(sample.np_apophis), text, count=1)
         columns["np_apophis"] = str(sample.np_apophis)
 
+    # Timeframe parameters: stored as hours, written as "X hr" strings to the .setup file.
+    _SETUP_TIME_KEYS = {"tmax_hours": "tmax_in", "dtmax_hours": "dtmax_in"}
+    for param, setup_key in _SETUP_TIME_KEYS.items():
+        h = getattr(sample, param)
+        if h is not None:
+            tok = hours_to_phantom_time_string(h)
+            text = replace_setup_assignment(text, setup_key, tok)
+            validate_assignment(text, setup_key, tok)
+            columns[param] = f"{h:.12g}"
+
     setup_path.write_text(text, encoding="utf-8")
+    return columns
+
+
+def apply_run_sample_to_in(in_path: Path, sample: RunSample) -> Dict[str, str]:
+    """Patch DEM contact parameters into a run's .in file; returns column map for CSV.
+
+    Only patches when the .in file contains isink_potential = 2 (DEM mode active) AND at
+    least one in-file parameter is set on the sample.  No-op otherwise — safe to call
+    unconditionally after phantomsetup.
+    """
+    columns: Dict[str, str] = {}
+    active = [(p, getattr(sample, p)) for p, *_ in _IN_VARIATION_SPEC if getattr(sample, p) is not None]
+    if not active:
+        return columns
+
+    text = in_path.read_text(encoding="utf-8")
+    if not re.search(r"^\s*isink_potential\s*=\s*2\b", text, re.MULTILINE):
+        return columns  # not DEM mode; DEM keys absent from .in
+
+    for param, v in active:
+        tok = format_real_token(v)
+        try:
+            text = replace_setup_assignment(text, param, tok)
+            validate_assignment(text, param, tok)
+        except RuntimeError as exc:
+            raise RuntimeError(
+                f"apply_run_sample_to_in: {exc}. "
+                "Ensure the binary was compiled from current source (make setup && make) "
+                "so that DEM contact keys appear in the generated .in file."
+            ) from None
+        columns[param] = f"{v:.12g}"
+
+    in_path.write_text(text, encoding="utf-8")
     return columns
 
 
@@ -709,6 +933,12 @@ def build_np_list_samples(args: argparse.Namespace) -> List[RunSample]:
             s.use_dem = args.use_dem_fixed == "true"
         if args.use_shape_crop_fixed is not None:
             s.use_shape_crop = args.use_shape_crop_fixed == "true"
+        if getattr(args, "apophis_only_fixed", None) is not None:
+            s.apophis_only = args.apophis_only_fixed == "true"
+        if getattr(args, "tmax_hours", None) is not None:
+            s.tmax_hours = args.tmax_hours
+        if getattr(args, "dtmax_hours", None) is not None:
+            s.dtmax_hours = args.dtmax_hours
         out.append(s)
     return out
 
@@ -726,6 +956,17 @@ def build_run_samples(num_samples: int, args: argparse.Namespace) -> List[RunSam
         for param, lo, hi, _ in _active_scale_variations(args):
             setattr(s, param, lo + row[di] * (hi - lo))
             di += 1
+        for param, lo, hi, _ in _active_in_variations(args):
+            setattr(s, param, lo + row[di] * (hi - lo))
+            di += 1
+        for param, lo, hi, _ in _active_time_variations(args):
+            setattr(s, param, lo + row[di] * (hi - lo))
+            di += 1
+        # Fixed time overrides applied to every sample (not a Sobol dimension).
+        if getattr(args, "tmax_hours", None) is not None:
+            s.tmax_hours = args.tmax_hours
+        if getattr(args, "dtmax_hours", None) is not None:
+            s.dtmax_hours = args.dtmax_hours
         if args.vary_use_dem:
             s.use_dem = row[di] >= 0.5
             di += 1
@@ -739,6 +980,8 @@ def build_run_samples(num_samples: int, args: argparse.Namespace) -> List[RunSam
         if args.vary_apophis_only:
             s.apophis_only = row[di] >= 0.5
             di += 1
+        elif getattr(args, "apophis_only_fixed", None) is not None:
+            s.apophis_only = args.apophis_only_fixed == "true"
         if args.np_apophis is not None:
             s.np_apophis = args.np_apophis
         if di != dim:
@@ -753,6 +996,10 @@ def sample_column_order(args: argparse.Namespace) -> List[str]:
     if _mass_bounds_active(args):
         order.append("mass_input_kg")
     for param, _, _, _ in _active_scale_variations(args):
+        order.append(param)
+    for param, _, _, _ in _active_in_variations(args):
+        order.append(param)
+    for param, _, _, _ in _active_time_variations(args):
         order.append(param)
     if args.vary_use_dem:
         order.append("use_dem")
@@ -774,6 +1021,12 @@ def build_salib_problem(args: argparse.Namespace) -> Dict[str, object]:
         names.append("mass_input_kg")
         bounds.append([float(args.mass_min_kg), float(args.mass_max_kg)])
     for param, lo, hi, _ in _active_scale_variations(args):
+        names.append(param)
+        bounds.append([float(lo), float(hi)])
+    for param, lo, hi, _ in _active_in_variations(args):
+        names.append(param)
+        bounds.append([float(lo), float(hi)])
+    for param, lo, hi, _ in _active_time_variations(args):
         names.append(param)
         bounds.append([float(lo), float(hi)])
     if args.vary_use_dem:
@@ -801,6 +1054,17 @@ def run_sample_from_salib_row(row: Sequence[float], args: argparse.Namespace) ->
     for param, _, _, _ in _active_scale_variations(args):
         setattr(s, param, float(row[i]))
         i += 1
+    for param, _, _, _ in _active_in_variations(args):
+        setattr(s, param, float(row[i]))
+        i += 1
+    for param, _, _, _ in _active_time_variations(args):
+        setattr(s, param, float(row[i]))
+        i += 1
+    # Fixed time overrides applied to every sample (not a Saltelli dimension).
+    if getattr(args, "tmax_hours", None) is not None:
+        s.tmax_hours = args.tmax_hours
+    if getattr(args, "dtmax_hours", None) is not None:
+        s.dtmax_hours = args.dtmax_hours
     if args.vary_use_dem:
         s.use_dem = float(row[i]) >= 0.5
         i += 1
@@ -814,6 +1078,8 @@ def run_sample_from_salib_row(row: Sequence[float], args: argparse.Namespace) ->
     if args.vary_apophis_only:
         s.apophis_only = float(row[i]) >= 0.5
         i += 1
+    elif getattr(args, "apophis_only_fixed", None) is not None:
+        s.apophis_only = args.apophis_only_fixed == "true"
     if args.np_apophis is not None:
         s.np_apophis = args.np_apophis
     if i != len(row):
@@ -847,9 +1113,18 @@ def canonical_sweep_descriptor(args: argparse.Namespace) -> str:
         parts.append(f"mass_max_kg={args.mass_max_kg}")
     for param, lo, hi, _ in _active_scale_variations(args):
         parts.append(f"{param}={lo}:{hi}")
+    for param, lo, hi, _ in _active_in_variations(args):
+        parts.append(f"{param}={lo}:{hi}")
+    for param, lo, hi, _ in _active_time_variations(args):
+        parts.append(f"{param}={lo}:{hi}")
+    for param, _, _, _ in _TIME_VARIATION_SPEC:
+        fixed_val = getattr(args, param, None)
+        if fixed_val is not None:
+            parts.append(f"{param}_fixed={fixed_val}")
     parts.append(f"vary_use_dem={args.vary_use_dem}")
     parts.append(f"vary_use_shape_crop={args.vary_use_shape_crop}")
     parts.append(f"vary_apophis_only={args.vary_apophis_only}")
+    parts.append(f"apophis_only_fixed={getattr(args, 'apophis_only_fixed', None)}")
     # np_apophis_list must be included so sweeps that differ only in particle counts
     # produce distinct hashes when the slug is truncated.
     np_list = getattr(args, "np_apophis_list", None)
@@ -882,12 +1157,22 @@ def build_auto_batch_sweep_slug(args: argparse.Namespace, max_len: int) -> str:
         )
     for _, lo, hi, slug_tok in _active_scale_variations(args):
         tokens.append(f"{slug_tok}{_fmt_slug_float(lo)}-{_fmt_slug_float(hi)}")
+    for _, lo, hi, slug_tok in _active_in_variations(args):
+        tokens.append(f"{slug_tok}{_fmt_slug_float(lo)}-{_fmt_slug_float(hi)}")
+    for _, lo, hi, slug_tok in _active_time_variations(args):
+        tokens.append(f"{slug_tok}{_fmt_slug_float(lo)}-{_fmt_slug_float(hi)}")
+    for param, _, _, slug_tok in _TIME_VARIATION_SPEC:
+        fixed_val = getattr(args, param, None)
+        if fixed_val is not None:
+            tokens.append(f"{slug_tok}{_fmt_slug_float(fixed_val)}")
     if args.vary_use_dem:
         tokens.append("dem")
     if args.vary_use_shape_crop:
         tokens.append("shapecrop")
     if args.vary_apophis_only:
         tokens.append("ao")
+    if getattr(args, "apophis_only_fixed", None) == "true":
+        tokens.append("aoT")
     slug = "_".join(tokens)
     if len(slug) <= max_len:
         return slug
@@ -1292,8 +1577,16 @@ def run_one_case(
     try:
         # phantomsetup is caught separately so we can inspect setup.log for the specific
         # MAXPTMASS overflow message before falling back to a generic "command failed" error.
+        # For DEM runs (pure-sink, no gas particles after setup), pass --maxp=1000 to both
+        # phantomsetup and phantom so they allocate ~1 MB instead of the 6.3 GB default
+        # (maxp_alloc=5200000).  The temporary SPH lattice used during setup has <=~600
+        # particles, so 1000 is a safe ceiling.
+        # 2000 covers the ~1089-particle (9×11×11) lattice phantomsetup tries when
+        # fitting np_apophis≈500 to a sphere.  After DEM conversion npart=0 so the
+        # phantom run needs virtually nothing; 2000 keeps both phases safe.
+        maxp_flag = ["--maxp=2000"] if sample.use_dem is True else []
         try:
-            run_command([str(phantomsetup_bin), prefix], cwd=run_dir, log_path=run_dir / "setup.log")
+            run_command([str(phantomsetup_bin), prefix] + maxp_flag, cwd=run_dir, log_path=run_dir / "setup.log")
         except RuntimeError:
             diag = _diagnose_maxptmass_error(run_dir / "setup.log")
             raise RuntimeError(
@@ -1304,7 +1597,9 @@ def run_one_case(
             in_text = replace_setup_assignment(in_text, "nfulldump", f"{1:>10}")
             run_input.write_text(in_text)
             print(f"[INFO] Run {run_id}: DEM enabled — set nfulldump=1 in {run_input.name}", flush=True)
-        run_command([str(phantom_bin), f"{prefix}.in"], cwd=run_dir, log_path=run_dir / "phantom.log")
+        in_param_cols = apply_run_sample_to_in(run_input, sample)
+        param_columns.update(in_param_cols)
+        run_command([str(phantom_bin), f"{prefix}.in"] + maxp_flag, cwd=run_dir, log_path=run_dir / "phantom.log")
         dispersion_ratio = float("nan")
         unbound_fraction = float("nan")
         if sample.use_dem is True:
@@ -1369,6 +1664,21 @@ def _execute_run_worker(payload: RunWorkerPayload) -> RunRecord:
         Path(payload.ephemeris_cache_dir) if payload.ephemeris_cache_dir else None,
         payload.shape_file,
     )
+
+
+def _cleanup_run_dir(run_dir: Path, prefix: str) -> None:
+    """Delete heavy output files after metrics are safely extracted.
+
+    Removes binary dump files (sobol_NNNNN), per-sink .ev files, and phantom.log.
+    Keeps .in, .setup, setup.log, and ephemeris .txt files for audit purposes.
+    """
+    removed = 0
+    for pattern in (f"{prefix}_[0-9]*", f"{prefix}Sink*N*.ev", f"{prefix}*.ev", "phantom.log"):
+        for f in run_dir.glob(pattern):
+            if f.is_file():
+                f.unlink()
+                removed += 1
+    print(f"[INFO] Cleaned {run_dir.name}: removed {removed} heavy files ({prefix}_* dumps, *.ev, phantom.log)", flush=True)
 
 
 def _print_run_progress(result: RunRecord, samples: List[RunSample], total: int) -> None:
@@ -1510,13 +1820,23 @@ def main() -> int:
             result = _execute_run_worker(p)
             results.append(result)
             _print_run_progress(result, samples, total_runs)
+            write_summary_csv(summary_csv, results, col_order)
+            print(f"[INFO] Partial results saved: {len(results)}/{total_runs} runs → {summary_csv}", flush=True)
+            if not args.no_cleanup and result.status == "ok" and result.run_dir:
+                _cleanup_run_dir(Path(result.run_dir), p.prefix)
     else:
+        payload_by_id = {p.run_id: p for p in payloads}
         with concurrent.futures.ProcessPoolExecutor(max_workers=args.jobs) as executor:
             futures = [executor.submit(_execute_run_worker, p) for p in payloads]
             for fut in as_completed(futures):
                 result = fut.result()
                 results.append(result)
                 _print_run_progress(result, samples, total_runs)
+                write_summary_csv(summary_csv, results, col_order)
+                print(f"[INFO] Partial results saved: {len(results)}/{total_runs} runs → {summary_csv}", flush=True)
+                p = payload_by_id[result.run_id]
+                if not args.no_cleanup and result.status == "ok" and result.run_dir:
+                    _cleanup_run_dir(Path(result.run_dir), p.prefix)
 
     write_summary_csv(summary_csv, results, col_order)
 

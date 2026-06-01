@@ -28,6 +28,35 @@ SCALE_BOUND_DESTS: FrozenSet[str] = frozenset(
     dest for _, lo, hi in SCALE_BOUND_PAIRS for dest in (lo, hi)
 )
 
+# DEM contact parameters: patched into .in after phantomsetup; gated separately from setup scales.
+IN_BOUND_PAIRS: Tuple[Tuple[str, str, str], ...] = (
+    ("kc_cgs",        "kc_min",    "kc_max"),
+    ("ct_dem",        "ct_min",    "ct_max"),
+    ("epsilon_n_dem", "eps_n_min", "eps_n_max"),
+    ("kn_cgs",        "kn_min",    "kn_max"),
+)
+IN_BOUND_DESTS: FrozenSet[str] = frozenset(
+    dest for _, lo, hi in IN_BOUND_PAIRS for dest in (lo, hi)
+)
+
+# Timeframe parameters: fixed override or sweep bounds per parameter.
+# Fixed dest (tmax_hours / dtmax_hours) and sweep dests (tmax_hours_min/max etc.) are mutually exclusive.
+TIME_BOUND_PAIRS: Tuple[Tuple[str, str, str], ...] = (
+    ("tmax_hours",  "tmax_hours_min",  "tmax_hours_max"),
+    ("dtmax_hours", "dtmax_hours_min", "dtmax_hours_max"),
+)
+TIME_BOUND_DESTS: FrozenSet[str] = frozenset(
+    dest for _, lo, hi in TIME_BOUND_PAIRS for dest in (lo, hi)
+)
+TIME_FIXED_DESTS: FrozenSet[str] = frozenset({"tmax_hours", "dtmax_hours"})
+
+IN_PARAM_LABELS: Dict[str, str] = {
+    "kc_cgs":        "kc_cgs (cohesive spring constant dyne/cm; 0=off; DEM only)",
+    "ct_dem":        "ct_dem (tangential damping coefficient; DEM only)",
+    "epsilon_n_dem": "epsilon_n_dem (normal restitution coeff [0=inelastic,1=elastic]; DEM only)",
+    "kn_cgs":        "kn_cgs (normal spring constant dyne/cm; DEM only)",
+}
+
 # Mass min/max/unit are skipped when user declines the mass gate (mirrors optional scale pattern).
 MASS_GATE_DESTS: FrozenSet[str] = frozenset({"mass_min_kg", "mass_max_kg", "apophis_ref_mass_kg"})
 
@@ -70,12 +99,27 @@ DEST_TO_SECTION: Dict[str, str] = {
     "spin_obliquity_max": "Spin (optional dimension)",
     "spin_azimuth_min":   "Spin (optional dimension)",
     "spin_azimuth_max":   "Spin (optional dimension)",
+    "kc_min":    "DEM Contact (optional dimensions)",
+    "kc_max":    "DEM Contact (optional dimensions)",
+    "ct_min":    "DEM Contact (optional dimensions)",
+    "ct_max":    "DEM Contact (optional dimensions)",
+    "eps_n_min": "DEM Contact (optional dimensions)",
+    "eps_n_max": "DEM Contact (optional dimensions)",
+    "kn_min":    "DEM Contact (optional dimensions)",
+    "kn_max":    "DEM Contact (optional dimensions)",
+    "tmax_hours":     "Time (optional override / dimension)",
+    "tmax_hours_min": "Time (optional override / dimension)",
+    "tmax_hours_max": "Time (optional override / dimension)",
+    "dtmax_hours":     "Time (optional override / dimension)",
+    "dtmax_hours_min": "Time (optional override / dimension)",
+    "dtmax_hours_max": "Time (optional override / dimension)",
     "vary_use_dem": "Setup toggles",
     "np_apophis": "Setup toggles",
     "vary_use_shape_crop": "Setup toggles",
     "use_shape_crop_fixed": "Setup toggles",
     "shape_file": "Paths",
     "vary_apophis_only": "Setup toggles",
+    "apophis_only_fixed": "Setup toggles",
     "np_apophis_list": "Setup toggles",
     "sink_earth_id": "Sinks / post-processing",
     "sink_apophis_id": "Sinks / post-processing",
@@ -213,6 +257,43 @@ INTERACTIVE_BRIEF: Dict[str, tuple[str, str]] = {
         "Upper bound for spin axis azimuth (degrees). Must be greater than min.",
         "Float in degrees, or Enter to leave azimuth unvaried.",
     ),
+    "kc_min": (
+        "Lower bound for kc_cgs (cohesive spring constant in dyne/cm; DEM only). "
+        "Physically plausible range for Apophis-scale rubble: 1e5–1e9 dyne/cm. "
+        "0 = no cohesion (default). Only active when run uses isink_potential=2.",
+        "Float ≥ 0, or Enter to leave unvaried.",
+    ),
+    "kc_max": (
+        "Upper bound for kc_cgs. Must be greater than min.",
+        "Float > min, or Enter.",
+    ),
+    "ct_min": (
+        "Lower bound for ct_dem (tangential damping coefficient; DEM only). "
+        "0 = no tangential damping. Default is 0.1 (10% of relative tangential velocity).",
+        "Float ≥ 0, or Enter to leave unvaried.",
+    ),
+    "ct_max": (
+        "Upper bound for ct_dem. Must be greater than min.",
+        "Float > min, or Enter.",
+    ),
+    "eps_n_min": (
+        "Lower bound for epsilon_n_dem (normal restitution coefficient; DEM only). "
+        "0 = perfectly inelastic, 1 = perfectly elastic. Default 0.5.",
+        "Float in [0, 1], or Enter to leave unvaried.",
+    ),
+    "eps_n_max": (
+        "Upper bound for epsilon_n_dem. Must be greater than min and ≤ 1.",
+        "Float in [0, 1] and > min, or Enter.",
+    ),
+    "kn_min": (
+        "Lower bound for kn_cgs (normal spring constant in dyne/cm; DEM only). "
+        "Default is 1e7 dyne/cm (10^4 kg/s^2).",
+        "Float > 0, or Enter to leave unvaried.",
+    ),
+    "kn_max": (
+        "Upper bound for kn_cgs. Must be greater than min.",
+        "Float > min, or Enter.",
+    ),
     "vary_use_dem": (
         "If yes, adds a Sobol dimension that toggles use_dem in the setup (T/F across runs).",
         "y, n, yes, no, t, f, 1, 0; or Enter to keep the current value.",
@@ -249,6 +330,13 @@ INTERACTIVE_BRIEF: Dict[str, tuple[str, str]] = {
     "vary_apophis_only": (
         "If yes, adds a dimension toggling apophis_only (Earth absent when true; CA metrics may be NaN).",
         "y, n, yes, no, t, f, 1, 0; or Enter to keep the current value.",
+    ),
+    "apophis_only_fixed": (
+        "Force apophis_only to a fixed value for every run. "
+        "'true' removes all solar-system bodies (Apophis-only sim); 'false' forces Earth present. "
+        "When true, --sink-apophis-id is auto-set to 1 (Apophis sinks start at 1 with no solar bodies). "
+        "Mutually exclusive with --vary-apophis-only.",
+        "true, false; or Enter for None (leave template unchanged).",
     ),
     "sink_earth_id": (
         "Sink index for Earth in .ev filenames when extracting closest approach.",
@@ -289,6 +377,34 @@ INTERACTIVE_BRIEF: Dict[str, tuple[str, str]] = {
     "saltelli_calc_second_order": (
         "If yes with Saltelli, use the larger design that also estimates second-order Sobol indices.",
         "y, n, yes, no, t, f, 1, 0; or Enter to keep the current value.",
+    ),
+    "tmax_hours": (
+        "Fix tmax_in for every run in this batch (hours). "
+        "E.g. 12 sets tmax_in = '12 hr'. Leave blank to keep the template value. "
+        "Mutually exclusive with tmax sweep bounds.",
+        "Positive float (e.g. 12, 24, 48); or Enter to leave template unchanged.",
+    ),
+    "tmax_hours_min": (
+        "Lower bound for tmax_in sweep (hours). Only prompted if you chose to vary tmax.",
+        "Positive float; must be less than tmax-hours-max.",
+    ),
+    "tmax_hours_max": (
+        "Upper bound for tmax_in sweep (hours). Must be greater than min.",
+        "Positive float; must be greater than tmax-hours-min.",
+    ),
+    "dtmax_hours": (
+        "Fix dtmax_in (dump interval) for every run in this batch (hours). "
+        "E.g. 0.5 sets dtmax_in = '0.5 hr' (30 min). Leave blank to keep the template value. "
+        "Mutually exclusive with dtmax sweep bounds.",
+        "Positive float (e.g. 0.5 = 30 min, 1 = 1 hr); or Enter to leave template unchanged.",
+    ),
+    "dtmax_hours_min": (
+        "Lower bound for dtmax_in sweep (hours). Only prompted if you chose to vary dtmax.",
+        "Positive float; must be less than dtmax-hours-max.",
+    ),
+    "dtmax_hours_max": (
+        "Upper bound for dtmax_in sweep (hours). Must be greater than min.",
+        "Positive float; must be greater than dtmax-hours-min.",
     ),
 }
 
@@ -360,6 +476,127 @@ def _prompt_scale_vary_selection(state: argparse.Namespace) -> FrozenSet[str]:
             print("  Please enter y or n (empty = suggested default).", file=sys.stderr)
         if choice:
             vary.append(param)
+    return frozenset(vary)
+
+
+def _prompt_dem_contact_vary_selection(state: argparse.Namespace) -> FrozenSet[str]:
+    """Ask which DEM contact parameters (.in-file) become Sobol dimensions."""
+    print(
+        "DEM Contact parameters: choose which become Sobol dimensions "
+        "(patched into each run's .in after phantomsetup; only active when DEM is enabled).",
+        flush=True,
+    )
+    vary: List[str] = []
+    for param, lo_attr, hi_attr in IN_BOUND_PAIRS:
+        lo = getattr(state, lo_attr, None)
+        hi = getattr(state, hi_attr, None)
+        default_yes = lo is not None and hi is not None
+        yn = "Y/n" if default_yes else "y/N"
+        label = IN_PARAM_LABELS.get(param, param)
+        what = f"Include {label} as a varied Sobol dimension (you will set min and max next)?"
+        valid = "y, n, yes, no, t, f, 1, 0; or Enter for the suggested default."
+        while True:
+            raw = _read_line(
+                f"{what}\n  Option: (DEM contact gate) vary {param}\n  Valid answers: {valid}\n  [{yn}]: "
+            ).strip().lower()
+            if not raw:
+                choice = default_yes
+                break
+            if raw in ("y", "yes", "t", "true", "1"):
+                choice = True
+                break
+            if raw in ("n", "no", "f", "false", "0"):
+                choice = False
+                break
+            print("  Please enter y or n (empty = suggested default).", file=sys.stderr)
+        if choice:
+            vary.append(param)
+    return frozenset(vary)
+
+
+def _prompt_time_vary_selection(state: argparse.Namespace, out: List[str]) -> FrozenSet[str]:
+    """Ask which timeframe parameters become Sobol dimensions, fixed overrides, or are left unchanged.
+
+    Emits argv tokens for any fixed values directly into ``out`` (same as the main loop would).
+    Returns the frozenset of param names the user chose to vary as Sobol dimensions.
+    """
+    print(
+        "\nTimeframe: optionally vary tmax_in (end time) and/or dtmax_in (dump interval) across runs "
+        "as Sobol dimensions, set a fixed override for all runs in this batch, or leave unchanged "
+        "from the template.",
+        flush=True,
+    )
+    TIME_LABELS = {
+        "tmax_hours":  "tmax_in (simulation end time)",
+        "dtmax_hours": "dtmax_in (dump interval)",
+    }
+    vary: List[str] = []
+    for param, lo_attr, hi_attr in TIME_BOUND_PAIRS:
+        lo_current = getattr(state, lo_attr, None)
+        hi_current = getattr(state, hi_attr, None)
+        fixed_current = getattr(state, param, None)
+        label = TIME_LABELS.get(param, param)
+        print(f"\n  {label}", flush=True)
+        # Determine default suggestion based on any CLI-seeded values
+        if lo_current is not None and hi_current is not None:
+            default_choice = "vary"
+        elif fixed_current is not None:
+            default_choice = "fix"
+        else:
+            default_choice = "skip"
+        default_hint = f"(default: {default_choice})"
+        while True:
+            raw = _read_line(
+                f"  Vary as Sobol dimension, Fix for all runs, or Skip? {default_hint}\n"
+                f"  [v=vary / f=fix / s=skip]: "
+            ).strip().lower()
+            if not raw:
+                choice = default_choice
+                break
+            if raw in ("v", "vary", "y", "yes", "1"):
+                choice = "vary"
+                break
+            if raw in ("f", "fix", "fixed", "x"):
+                choice = "fix"
+                break
+            if raw in ("s", "skip", "n", "no", "0"):
+                choice = "skip"
+                break
+            print("  Please enter v (vary), f (fix), or s (skip).", file=sys.stderr)
+        if choice == "vary":
+            # Bounds will be prompted by the main wizard loop; clear any stale fixed value.
+            setattr(state, param, None)
+            vary.append(param)
+        elif choice == "fix":
+            # Prompt for the fixed value and emit directly to out; bounds will be skipped.
+            what, valid = INTERACTIVE_BRIEF.get(param, (f"Fixed value for {param} (hours).", "Positive float."))
+            flag = f"--{param.replace('_', '-')}"
+            while True:
+                cur_s = f"{fixed_current:.6g}" if fixed_current is not None else ""
+                raw_val = _read_line(
+                    f"{what}\n  Option: {flag}\n  Valid answers: {valid}\n{flag} [{cur_s}]: "
+                ).strip()
+                if not raw_val:
+                    if fixed_current is not None:
+                        # Keep pre-seeded value and emit it
+                        _append_kv(out, flag, fixed_current)
+                    # else: no value — treat as skip
+                    break
+                try:
+                    v = float(raw_val)
+                    if v <= 0:
+                        print("  Value must be positive.", file=sys.stderr)
+                        continue
+                    setattr(state, param, v)
+                    _append_kv(out, flag, v)
+                    break
+                except ValueError:
+                    print("  Please enter a positive float.", file=sys.stderr)
+        else:
+            # Skip — clear any pre-seeded values; leave template unchanged
+            setattr(state, param, None)
+            setattr(state, lo_attr, None)
+            setattr(state, hi_attr, None)
     return frozenset(vary)
 
 
@@ -484,6 +721,10 @@ def run_interactive_wizard(parser: argparse.ArgumentParser, initial_args: argpar
     skipped_mass_dests: set[str] = set()
     scale_gate_done = False
     skipped_scale_dests: set[str] = set()
+    in_gate_done = False
+    skipped_in_dests: set[str] = set()
+    time_gate_done = False
+    skipped_time_dests: set[str] = set()
 
     for action in parser._actions:  # noqa: SLF001
         if _skip_action(action):
@@ -522,6 +763,33 @@ def run_interactive_wizard(parser: argparse.ArgumentParser, initial_args: argpar
         if action.dest in skipped_scale_dests:
             continue
 
+        if action.dest in IN_BOUND_DESTS and not in_gate_done:
+            vary_params = _prompt_dem_contact_vary_selection(state)
+            for param, lo_attr, hi_attr in IN_BOUND_PAIRS:
+                if param not in vary_params:
+                    setattr(state, lo_attr, None)
+                    setattr(state, hi_attr, None)
+                    skipped_in_dests.add(lo_attr)
+                    skipped_in_dests.add(hi_attr)
+            in_gate_done = True
+
+        if action.dest in skipped_in_dests:
+            continue
+
+        if (action.dest in TIME_BOUND_DESTS or action.dest in TIME_FIXED_DESTS) and not time_gate_done:
+            vary_params = _prompt_time_vary_selection(state, out)
+            for param, lo_attr, hi_attr in TIME_BOUND_PAIRS:
+                # Fixed dest is always handled by the gate (emit or cleared); skip it in main loop.
+                skipped_time_dests.add(param)
+                if param not in vary_params:
+                    # Not sweeping: skip the bound dests too (gate set fixed or cleared everything)
+                    skipped_time_dests.add(lo_attr)
+                    skipped_time_dests.add(hi_attr)
+            time_gate_done = True
+
+        if action.dest in skipped_time_dests:
+            continue
+
         if action.__class__.__name__ == "_StoreTrueAction":  # noqa: SLF001
             _collect_store_true(action, state, out)
             continue
@@ -545,6 +813,16 @@ def run_interactive_wizard(parser: argparse.ArgumentParser, initial_args: argpar
         hi = getattr(state, hi_attr, None)
         if lo is not None and hi is not None and lo >= hi:
             errors.append(f"{lo_attr}/{hi_attr}: min ({lo}) must be < max ({hi})")
+    for _param, lo_attr, hi_attr in IN_BOUND_PAIRS:
+        lo = getattr(state, lo_attr, None)
+        hi = getattr(state, hi_attr, None)
+        if lo is not None and hi is not None and lo >= hi:
+            errors.append(f"{lo_attr}/{hi_attr}: min ({lo}) must be < max ({hi})")
+    for _param, lo_attr, hi_attr in TIME_BOUND_PAIRS:
+        lo = getattr(state, lo_attr, None)
+        hi = getattr(state, hi_attr, None)
+        if lo is not None and hi is not None and lo >= hi:
+            errors.append(f"{lo_attr}/{hi_attr}: min ({lo}) must be < max ({hi})")
     if errors:
         for msg in errors:
             print(f"[ERROR] {msg}", file=sys.stderr)
@@ -555,10 +833,16 @@ def run_interactive_wizard(parser: argparse.ArgumentParser, initial_args: argpar
 
 __all__ = [
     "DEST_TO_SECTION",
+    "IN_BOUND_DESTS",
+    "IN_BOUND_PAIRS",
+    "IN_PARAM_LABELS",
     "INTERACTIVE_BRIEF",
     "MASS_GATE_DESTS",
     "SCALE_BOUND_DESTS",
     "SCALE_BOUND_PAIRS",
+    "TIME_BOUND_DESTS",
+    "TIME_BOUND_PAIRS",
+    "TIME_FIXED_DESTS",
     "WIZARD_CUSTOM_HANDLERS",
     "run_interactive_wizard",
 ]
