@@ -27,6 +27,14 @@ AU_IN_KM = 149_597_870.7
 EARTH_SINK_ID_DEFAULT = 4
 APOPHIS_SINK_ID_DEFAULT = 11
 
+# Literature Apophis shape assets (Shapes/apophis_v233s7.obj longest axis ~0.409741 km).
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_APOPHIS_SHAPE_CONFIG = REPO_ROOT / "Shapes" / "apophis.shape"
+DEFAULT_APOPHIS_OBJ = REPO_ROOT / "Shapes" / "apophis_v233s7.obj"
+LITERATURE_MESH_SCALE_KM = 0.205
+HORIZONS_APOPHIS_RADIUS_KM = 0.170
+LITERATURE_SCALE_R_APOPHIS = 0.409741 / 2.0 / HORIZONS_APOPHIS_RADIUS_KM
+
 # MAXPTMASS is a compile-time array bound on the number of sink particles (config.F90).
 # The default upstream value is 1000. The close-packed lattice placement routine overshoots
 # the requested np_apophis by ~2-3% (observed: np_apophis=1000 -> 1012 actual sinks), so
@@ -117,6 +125,12 @@ _SCALE_VARIATION_SPEC: Tuple[Tuple[str, str, str, str], ...] = (
     ("apophis_spin_period",    "spin_period_min",    "spin_period_max",    "sspd"),
     ("apophis_spin_obliquity", "spin_obliquity_min", "spin_obliquity_max", "sobl"),
     ("apophis_spin_azimuth",   "spin_azimuth_min",   "spin_azimuth_max",   "saz"),
+    (
+        "apophis_spin_torque_align_deg",
+        "spin_torque_align_min",
+        "spin_torque_align_max",
+        "stal",
+    ),
 )
 
 # DEM contact parameters varied via CLI min/max: patched into the run's .in file AFTER
@@ -246,6 +260,7 @@ class RunSample:
     apophis_spin_period:    Optional[float] = None  # hours
     apophis_spin_obliquity: Optional[float] = None  # degrees from ecliptic north
     apophis_spin_azimuth:   Optional[float] = None  # degrees in ecliptic plane
+    apophis_spin_torque_align_deg: Optional[float] = None  # 0=+h, 180=-h; <0 uses obl/az
     # DEM contact params: patched into the .in file after phantomsetup; only active when isink_potential=2.
     kc_cgs:        Optional[float] = None  # cohesive spring constant (dyne/cm); 0 = no cohesion
     ct_dem:        Optional[float] = None  # tangential damping coefficient
@@ -273,6 +288,28 @@ class RunWorkerPayload(NamedTuple):
     apophis_sink_id: int
     ephemeris_cache_dir: Optional[str]
     shape_file: Optional[str]
+    literature_scale_r_allowed: bool
+
+
+def _shape_crop_may_be_enabled(args: argparse.Namespace) -> bool:
+    return bool(args.vary_use_shape_crop or args.use_shape_crop_fixed == "true")
+
+
+def resolve_default_shape_file() -> Path:
+    """Default shape config for literature-scale Apophis mesh cropping."""
+    if DEFAULT_APOPHIS_SHAPE_CONFIG.is_file():
+        return DEFAULT_APOPHIS_SHAPE_CONFIG
+    if DEFAULT_APOPHIS_OBJ.is_file():
+        print(
+            "[WARN] Shapes/apophis.shape missing; using bare .obj — PHANTOM forces mesh scale=1.0. "
+            "Add apophis.shape with 'mesh apophis_v233s7.obj 0.205' for literature sizing.",
+            file=sys.stderr,
+        )
+        return DEFAULT_APOPHIS_OBJ
+    raise FileNotFoundError(
+        f"Default Apophis shape assets not found under {REPO_ROOT / 'Shapes'} "
+        "(expected apophis.shape and/or apophis_v233s7.obj)"
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -348,6 +385,10 @@ def build_parser() -> argparse.ArgumentParser:
         ("spin-period",    "apophis_spin_period in hours (0 = no spin; DEM runs only)"),
         ("spin-obliquity", "apophis_spin_obliquity in degrees from ecliptic north (DEM runs only)"),
         ("spin-azimuth",   "apophis_spin_azimuth in degrees in ecliptic plane (DEM runs only)"),
+        (
+            "spin-torque-align",
+            "apophis_spin_torque_align_deg: 0=spin || +h, 180=|| -h (h=r×v); <0 uses obl/az (DEM only)",
+        ),
     ):
         parser.add_argument(
             f"--{key}-min",
@@ -381,6 +422,27 @@ def build_parser() -> argparse.ArgumentParser:
             default=None,
             help=f"Upper bound for {helpt}; omit with min to leave unvaried.",
         )
+    parser.add_argument(
+        "--kc-fixed",
+        type=float,
+        default=None,
+        metavar="DYNE_CM",
+        help=(
+            "Fix kc_cgs (cohesive spring constant in dyne/cm) for every DEM run. "
+            "Patched into each run's .in after phantomsetup. "
+            "Mutually exclusive with --kc-min/--kc-max."
+        ),
+    )
+    parser.add_argument(
+        "--spin-period-fixed",
+        type=float,
+        default=None,
+        metavar="HOURS",
+        help=(
+            "Fix apophis_spin_period (hours) for every run. "
+            "Mutually exclusive with --spin-period-min/--spin-period-max."
+        ),
+    )
     # Timeframe parameters — fix for all runs or sweep as Sobol dimensions.
     # Fixed (--tmax-hours / --dtmax-hours) and min/max bounds are mutually exclusive per parameter.
     parser.add_argument(
@@ -494,9 +556,9 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="PATH",
         help=(
-            "Path to the shape config file (or .obj) written into apophis_shape_file when shape "
-            "cropping is enabled (--vary-use-shape-crop or --use-shape-crop-fixed true). "
-            "Required when cropping may be enabled."
+            "Path to the shape config file (or .obj) staged into each run when shape cropping is "
+            "enabled. Default when cropping is on: Shapes/apophis.shape (mesh apophis_v233s7.obj "
+            f"at literature scale {LITERATURE_MESH_SCALE_KM} km)."
         ),
     )
     parser.add_argument(
@@ -673,6 +735,34 @@ def validate_args(args: argparse.Namespace) -> None:
             raise ValueError(f"{param}: set both min and max, or neither")
         if lo is not None and hi is not None and hi <= lo:
             raise ValueError(f"{param}: require min < max")
+    if getattr(args, "kc_fixed", None) is not None:
+        if args.kc_min is not None or args.kc_max is not None:
+            raise ValueError("--kc-fixed is mutually exclusive with --kc-min and --kc-max")
+        if args.kc_fixed < 0:
+            raise ValueError("--kc-fixed must be >= 0")
+    if getattr(args, "spin_period_fixed", None) is not None:
+        if args.spin_period_min is not None or args.spin_period_max is not None:
+            raise ValueError(
+                "--spin-period-fixed is mutually exclusive with --spin-period-min and --spin-period-max"
+            )
+        if args.spin_period_fixed <= 0:
+            raise ValueError("--spin-period-fixed must be > 0")
+    _obl_az_active = (
+        (args.spin_obliquity_min is not None and args.spin_obliquity_max is not None)
+        or (args.spin_azimuth_min is not None and args.spin_azimuth_max is not None)
+    )
+    _torque_align_active = (
+        args.spin_torque_align_min is not None and args.spin_torque_align_max is not None
+    )
+    if _obl_az_active and _torque_align_active:
+        raise ValueError(
+            "Cannot sweep both ecliptic spin angles (obliquity/azimuth) and "
+            "apophis_spin_torque_align_deg: use --spin-torque-align-min/max OR obl/az bounds, not both."
+        )
+    if _torque_align_active and (
+        args.spin_torque_align_min < 0 or args.spin_torque_align_max > 180
+    ):
+        raise ValueError("spin-torque-align bounds must lie in [0, 180] degrees")
     for param, lo_attr, hi_attr, _ in _TIME_VARIATION_SPEC:
         fixed_val = getattr(args, param, None)
         lo = getattr(args, lo_attr, None)
@@ -727,11 +817,19 @@ def validate_args(args: argparse.Namespace) -> None:
 
     if args.vary_use_shape_crop and args.use_shape_crop_fixed is not None:
         raise ValueError("--vary-use-shape-crop and --use-shape-crop-fixed are mutually exclusive")
-    if (args.vary_use_shape_crop or args.use_shape_crop_fixed == "true") and not args.shape_file:
-        raise ValueError("--shape-file must be set when shape cropping may be enabled")
+    if _shape_crop_may_be_enabled(args) and not args.shape_file:
+        args.shape_file = str(resolve_default_shape_file())
+    if _shape_crop_may_be_enabled(args):
+        if not Path(args.shape_file).is_file():
+            raise ValueError(f"--shape-file not found: {args.shape_file}")
 
     # Warn if spin bounds are active but DEM is not enabled; spin only affects DEM particles.
-    _spin_lo_dests = frozenset({"spin_period_min", "spin_obliquity_min", "spin_azimuth_min"})
+    _spin_lo_dests = frozenset({
+        "spin_period_min",
+        "spin_obliquity_min",
+        "spin_azimuth_min",
+        "spin_torque_align_min",
+    })
     if any(getattr(args, d, None) is not None for d in _spin_lo_dests):
         dem_on = args.vary_use_dem or getattr(args, "use_dem_fixed", None) == "true"
         if not dem_on:
@@ -828,7 +926,10 @@ def validate_assignment(setup_text: str, key: str, expected: str) -> None:
 
 
 def apply_run_sample_to_setup(
-    setup_path: Path, sample: RunSample, ref_mass_kg: Optional[float] = None, shape_file: Optional[str] = None
+    setup_path: Path,
+    sample: RunSample,
+    ref_mass_kg: Optional[float] = None,
+    shape_setup_value: Optional[str] = None,
 ) -> Dict[str, str]:
     """Patch setup file; returns map of column_name -> value string for CSV."""
     text = setup_path.read_text(encoding="utf-8")
@@ -856,7 +957,7 @@ def apply_run_sample_to_setup(
         columns["use_dem"] = "T" if sample.use_dem else "F"
 
     if sample.use_shape_crop is not None:
-        path_tok = (shape_file or "") if sample.use_shape_crop else ""
+        path_tok = (shape_setup_value or "") if sample.use_shape_crop else ""
         text = replace_setup_assignment(text, "apophis_shape_file", path_tok)
         validate_assignment(text, "apophis_shape_file", path_tok)
         columns["use_shape_crop"] = "T" if sample.use_shape_crop else "F"
@@ -920,6 +1021,18 @@ def apply_run_sample_to_in(in_path: Path, sample: RunSample) -> Dict[str, str]:
     return columns
 
 
+def _apply_fixed_run_sample_overrides(s: RunSample, args: argparse.Namespace) -> None:
+    """Apply CLI fixed overrides that are not Sobol dimensions."""
+    if getattr(args, "tmax_hours", None) is not None:
+        s.tmax_hours = args.tmax_hours
+    if getattr(args, "dtmax_hours", None) is not None:
+        s.dtmax_hours = args.dtmax_hours
+    if getattr(args, "kc_fixed", None) is not None:
+        s.kc_cgs = args.kc_fixed
+    if getattr(args, "spin_period_fixed", None) is not None:
+        s.apophis_spin_period = args.spin_period_fixed
+
+
 def build_np_list_samples(args: argparse.Namespace) -> List[RunSample]:
     """One RunSample per value in --np-apophis-list; all other params at template or fixed values.
 
@@ -935,10 +1048,7 @@ def build_np_list_samples(args: argparse.Namespace) -> List[RunSample]:
             s.use_shape_crop = args.use_shape_crop_fixed == "true"
         if getattr(args, "apophis_only_fixed", None) is not None:
             s.apophis_only = args.apophis_only_fixed == "true"
-        if getattr(args, "tmax_hours", None) is not None:
-            s.tmax_hours = args.tmax_hours
-        if getattr(args, "dtmax_hours", None) is not None:
-            s.dtmax_hours = args.dtmax_hours
+        _apply_fixed_run_sample_overrides(s, args)
         out.append(s)
     return out
 
@@ -962,11 +1072,7 @@ def build_run_samples(num_samples: int, args: argparse.Namespace) -> List[RunSam
         for param, lo, hi, _ in _active_time_variations(args):
             setattr(s, param, lo + row[di] * (hi - lo))
             di += 1
-        # Fixed time overrides applied to every sample (not a Sobol dimension).
-        if getattr(args, "tmax_hours", None) is not None:
-            s.tmax_hours = args.tmax_hours
-        if getattr(args, "dtmax_hours", None) is not None:
-            s.dtmax_hours = args.dtmax_hours
+        _apply_fixed_run_sample_overrides(s, args)
         if args.vary_use_dem:
             s.use_dem = row[di] >= 0.5
             di += 1
@@ -1060,11 +1166,7 @@ def run_sample_from_salib_row(row: Sequence[float], args: argparse.Namespace) ->
     for param, _, _, _ in _active_time_variations(args):
         setattr(s, param, float(row[i]))
         i += 1
-    # Fixed time overrides applied to every sample (not a Saltelli dimension).
-    if getattr(args, "tmax_hours", None) is not None:
-        s.tmax_hours = args.tmax_hours
-    if getattr(args, "dtmax_hours", None) is not None:
-        s.dtmax_hours = args.dtmax_hours
+    _apply_fixed_run_sample_overrides(s, args)
     if args.vary_use_dem:
         s.use_dem = float(row[i]) >= 0.5
         i += 1
@@ -1121,6 +1223,10 @@ def canonical_sweep_descriptor(args: argparse.Namespace) -> str:
         fixed_val = getattr(args, param, None)
         if fixed_val is not None:
             parts.append(f"{param}_fixed={fixed_val}")
+    if getattr(args, "kc_fixed", None) is not None:
+        parts.append(f"kc_fixed={args.kc_fixed}")
+    if getattr(args, "spin_period_fixed", None) is not None:
+        parts.append(f"spin_period_fixed={args.spin_period_fixed}")
     parts.append(f"vary_use_dem={args.vary_use_dem}")
     parts.append(f"vary_use_shape_crop={args.vary_use_shape_crop}")
     parts.append(f"vary_apophis_only={args.vary_apophis_only}")
@@ -1226,6 +1332,53 @@ def copy_ephemeris_txt_cache(cache_dir: Path, run_dir: Path) -> int:
             shutil.copy2(src, run_dir / src.name)
             n += 1
     return n
+
+
+def stage_shape_assets(shape_file: Path, run_dir: Path) -> str:
+    """Copy shape config and referenced mesh into run_dir; return basename for apophis_shape_file."""
+    src = shape_file.resolve()
+    if not src.is_file():
+        raise FileNotFoundError(f"shape file not found: {src}")
+
+    if src.suffix.lower() == ".obj":
+        shutil.copy2(src, run_dir / src.name)
+        print(
+            "[WARN] Shape crop uses bare .obj; PHANTOM applies mesh scale=1.0 (not literature sizing). "
+            "Prefer Shapes/apophis.shape.",
+            file=sys.stderr,
+        )
+        return src.name
+
+    dest_cfg = run_dir / src.name
+    shutil.copy2(src, dest_cfg)
+    for line in dest_cfg.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        parts = stripped.split()
+        if len(parts) >= 2 and parts[0].lower() == "mesh":
+            obj_ref = parts[1]
+            obj_path = Path(obj_ref)
+            if not obj_path.is_absolute():
+                obj_path = (src.parent / obj_path).resolve()
+            if not obj_path.is_file():
+                raise FileNotFoundError(
+                    f"mesh OBJ '{obj_ref}' not found (resolved {obj_path})"
+                )
+            shutil.copy2(obj_path, run_dir / obj_path.name)
+            break
+    return src.name
+
+
+def _maybe_apply_literature_scale_r(
+    sample: RunSample, *, literature_scale_r_allowed: bool
+) -> None:
+    """Match lattice r_apophis to literature mesh half-extent when shape crop is on."""
+    if not sample.use_shape_crop or not literature_scale_r_allowed:
+        return
+    if sample.scale_r_apophis is not None:
+        return
+    sample.scale_r_apophis = LITERATURE_SCALE_R_APOPHIS
 
 
 def parse_sink_rows(path: Path) -> Tuple[List[float], List[Tuple[float, float, float]]]:
@@ -1542,6 +1695,7 @@ def run_one_case(
     apophis_sink_id: int,
     ephemeris_cache_dir: Optional[Path] = None,
     shape_file: Optional[str] = None,
+    literature_scale_r_allowed: bool = True,
 ) -> RunRecord:
     run_dir = output_root / f"run_{run_id:04d}"
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -1549,7 +1703,17 @@ def run_one_case(
     run_input = run_dir / f"{prefix}.in"
     shutil.copy2(base_setup, run_setup)
     shutil.copy2(base_input, run_input)
-    param_columns = apply_run_sample_to_setup(run_setup, sample, ref_mass_kg, shape_file)
+
+    shape_setup_value: Optional[str] = None
+    if sample.use_shape_crop and shape_file:
+        shape_setup_value = stage_shape_assets(Path(shape_file), run_dir)
+        _maybe_apply_literature_scale_r(
+            sample, literature_scale_r_allowed=literature_scale_r_allowed
+        )
+
+    param_columns = apply_run_sample_to_setup(
+        run_setup, sample, ref_mass_kg, shape_setup_value
+    )
 
     if ephemeris_cache_dir is not None:
         copy_ephemeris_txt_cache(ephemeris_cache_dir, run_dir)
@@ -1582,9 +1746,14 @@ def run_one_case(
         # (maxp_alloc=5200000).  The temporary SPH lattice used during setup has <=~600
         # particles, so 1000 is a safe ceiling.
         # 2000 covers the ~1089-particle (9×11×11) lattice phantomsetup tries when
-        # fitting np_apophis≈500 to a sphere.  After DEM conversion npart=0 so the
-        # phantom run needs virtually nothing; 2000 keeps both phases safe.
-        maxp_flag = ["--maxp=2000"] if sample.use_dem is True else []
+        # fitting np_apophis≈500 to a sphere.  Mesh cropping uses a larger bounding box
+        # (11×13×14 ≈ 2002 lattice sites) so use 4000 when shape crop is on.
+        # After DEM conversion npart=0 so the phantom run needs virtually nothing.
+        if sample.use_dem is True:
+            maxp = 4000 if sample.use_shape_crop else 2000
+            maxp_flag = [f"--maxp={maxp}"]
+        else:
+            maxp_flag = []
         try:
             run_command([str(phantomsetup_bin), prefix] + maxp_flag, cwd=run_dir, log_path=run_dir / "setup.log")
         except RuntimeError:
@@ -1663,6 +1832,7 @@ def _execute_run_worker(payload: RunWorkerPayload) -> RunRecord:
         payload.apophis_sink_id,
         Path(payload.ephemeris_cache_dir) if payload.ephemeris_cache_dir else None,
         payload.shape_file,
+        payload.literature_scale_r_allowed,
     )
 
 
@@ -1794,6 +1964,9 @@ def main() -> int:
             "(set OMP_NUM_THREADS=1 if PHANTOM is OpenMP to limit threads per process)."
         )
 
+    literature_scale_r_allowed = "scale_r_apophis" not in {
+        p for p, _, _, _ in _active_scale_variations(args)
+    }
     payloads = [
         RunWorkerPayload(
             run_id=idx,
@@ -1810,6 +1983,7 @@ def main() -> int:
             apophis_sink_id=args.sink_apophis_id,
             ephemeris_cache_dir=str(ephemeris_cache) if ephemeris_cache is not None else None,
             shape_file=args.shape_file if args.shape_file else None,
+            literature_scale_r_allowed=literature_scale_r_allowed,
         )
         for idx, sample in enumerate(samples, start=1)
     ]

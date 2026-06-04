@@ -1,6 +1,6 @@
 # input file for solar system setup routines
-             tmax_in =      4 days    ! end time of simulation (e.g. 3 days)
-            dtmax_in =      0.5 hr    ! time between dumps (e.g. 1 hr)
+             tmax_in =    4.5 days    ! end time of simulation (e.g. 3 days)
+            dtmax_in =     30 min    ! time between dumps (e.g. 1 hr)
         m_apophis_in =                ! mass of apophis (blank uses density-based default, e.g. 6e10 kg)
            asteroids =           F    ! add distant minor bodies as km-sized dust particles
           np_apophis =           1    ! number of particles used to represent apophis (0=none; 1=sink; n=gas)
@@ -12,6 +12,7 @@
            scale_pos =       1.000    ! scaling factor for apophis initial position
      scale_r_apophis =       1.000    ! scaling factor for apophis radius
            scale_rho =       1.000    ! scaling factor for apophis bulk density
- apophis_spin_period =       0.000    ! spin period in hours (0 = no spin applied; DEM runs only)
+ apophis_spin_period =      30.000    ! spin period in hours (0 = no spin applied; DEM runs only)
 apophis_spin_obliquity =     0.000    ! obliquity of spin axis from ecliptic north (degrees)
  apophis_spin_azimuth =       0.000    ! azimuth of spin axis in ecliptic plane (degrees)
+apophis_spin_torque_align_deg =    -1.000    ! flyby torque alignment: rotate spin from +h to -h about Earth-Apophis r_hat; <0=use obl/az

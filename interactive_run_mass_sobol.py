@@ -323,9 +323,10 @@ INTERACTIVE_BRIEF: Dict[str, tuple[str, str]] = {
         "true, false; or Enter to keep the current value (None = leave template unchanged).",
     ),
     "shape_file": (
-        "Path to the shape config file (or .obj) written into apophis_shape_file when shape cropping is enabled. "
-        "Required when --vary-use-shape-crop or --use-shape-crop-fixed true.",
-        "File path string; or Enter for none / current value.",
+        "Path to the shape config (or .obj) staged into each run when shape cropping is enabled. "
+        "Default when cropping is on: repo Shapes/apophis.shape (mesh apophis_v233s7.obj at literature "
+        "~0.41 km long axis; runner also sets scale_r_apophis ≈ 1.205 unless you sweep that dimension).",
+        "File path string; or Enter to use the default when cropping is enabled.",
     ),
     "vary_apophis_only": (
         "If yes, adds a dimension toggling apophis_only (Earth absent when true; CA metrics may be NaN).",
