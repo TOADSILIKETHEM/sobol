@@ -22,6 +22,8 @@ Recognised response columns (--response / --saltelli-y-column):
   closest_approach_km, closest_approach_au  — orbital closest-approach distance.
   dispersion_ratio                           — DEM only; peak radius-of-gyration ratio (>=1).
   unbound_fraction                           — DEM only; peak unbound mass fraction [0,1].
+  settled_spin_period_hr                     — mean bound-rubble spin after settling, before flyby (hours).
+  post_flyby_spin_period_hr                  — mean bound-rubble spin period after closest approach (hours).
 
 Examples:
   python3 Analysis.py --method classic --csv sobol_mass_runs/.../sobol_mass_outputs.csv \\
@@ -97,6 +99,8 @@ RESPONSE_CANDIDATES: Tuple[str, ...] = (
     "closest_approach_au",
     "dispersion_ratio",
     "unbound_fraction",
+    "settled_spin_period_hr",
+    "post_flyby_spin_period_hr",
 )
 
 RESULT_CSV_FIELDS = (
@@ -149,7 +153,9 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Output column to analyse in classic mode; also the default for --saltelli-y-column. "
             "Valid options from the runner: closest_approach_km, closest_approach_au, "
-            "dispersion_ratio (DEM only), unbound_fraction (DEM only)."
+            "dispersion_ratio (DEM only), unbound_fraction (DEM only), "
+            "settled_spin_period_hr, post_flyby_spin_period_hr (multi-sink Apophis; "
+            "post-flyby needs Earth flyby)."
         ),
     )
     p.add_argument(
@@ -213,8 +219,9 @@ def parse_args() -> argparse.Namespace:
         metavar="NAME",
         help=(
             "Numeric column to use as Y from the saltelli Y CSV (default: same as --response). "
-            "The runner writes closest_approach_km, closest_approach_au, dispersion_ratio, and "
-            "unbound_fraction to saltelli_Y.csv."
+            "The runner writes closest_approach_km, closest_approach_au, dispersion_ratio, "
+            "unbound_fraction, settled_spin_period_hr, and post_flyby_spin_period_hr "
+            "to saltelli_Y.csv."
         ),
     )
     p.add_argument(

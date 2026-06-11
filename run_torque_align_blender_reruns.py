@@ -75,6 +75,20 @@ def build_parser() -> argparse.ArgumentParser:
         default="both",
         help="Which torque-align case(s) to run (default: both).",
     )
+    p.add_argument(
+        "--spin-period",
+        type=float,
+        default=None,
+        metavar="HR",
+        help=f"Apophis spin period in hours (default: {SPIN_PERIOD_HR}).",
+    )
+    p.add_argument(
+        "--np-apophis",
+        type=int,
+        default=None,
+        metavar="N",
+        help=f"Number of DEM particles (default: {NP_APOPHIS}).",
+    )
     return p
 
 
@@ -103,14 +117,17 @@ def main() -> int:
         if not shape_path.is_file():
             raise FileNotFoundError(f"shape file not found: {shape_path}")
 
+    spin_period = args.spin_period if args.spin_period is not None else SPIN_PERIOD_HR
+    np_apophis = args.np_apophis if args.np_apophis is not None else NP_APOPHIS
+
     cases = _select_cases(args.case)
     samples: List[RunSample] = []
     for _label, align_deg in cases:
         samples.append(
             RunSample(
                 use_dem=True,
-                np_apophis=NP_APOPHIS,
-                apophis_spin_period=SPIN_PERIOD_HR,
+                np_apophis=np_apophis,
+                apophis_spin_period=spin_period,
                 apophis_spin_torque_align_deg=align_deg,
                 kc_cgs=KC_CGS,
                 use_shape_crop=True if args.use_shape_crop else None,
@@ -126,6 +143,7 @@ def main() -> int:
     write_samples_csv(output_root / "sobol_mass_samples.csv", samples, col_order)
     print(f"[INFO] Output directory: {output_root}")
     print(f"[INFO] Cases: {', '.join(f'{lab} ({deg:.4g}°)' for lab, deg in cases)}")
+    print(f"[INFO] spin_period = {spin_period:.4g} hr, np_apophis = {np_apophis}")
     if args.dtmax_hours is not None:
         print(f"[INFO] dtmax_in = {args.dtmax_hours:.6g} hr ({args.dtmax_hours * 60:.4g} min between dumps)")
     else:
@@ -179,7 +197,7 @@ def main() -> int:
         "\n".join(
             [
                 "Torque-align Blender re-runs (original batch runs 4 and 19).",
-                f"spin_period = {SPIN_PERIOD_HR} hr, kc_cgs = {KC_CGS:g}, np_apophis = {NP_APOPHIS}",
+                f"spin_period = {spin_period} hr, kc_cgs = {KC_CGS:g}, np_apophis = {np_apophis}",
                 f"shape_crop = {args.use_shape_crop}"
                 + (f", shape_file = {shape_path.name}" if shape_path else ""),
                 f"case filter = {args.case}",
