@@ -22,7 +22,8 @@ Recognised response columns (--response / --saltelli-y-column):
   closest_approach_km, closest_approach_au  — orbital closest-approach distance.
   dispersion_ratio                           — DEM only; peak radius-of-gyration ratio (>=1).
   unbound_fraction                           — DEM only; peak unbound mass fraction [0,1].
-  settled_spin_period_hr                     — mean bound-rubble spin after settling, before flyby (hours).
+  intrinsic_spin_period_hr                   — early-plateau bound-rubble spin before tidal ramp-up (hours).
+  approach_spin_period_hr                    — mean spin in last 24 h before closest approach (hours).
   post_flyby_spin_period_hr                  — mean bound-rubble spin period after closest approach (hours).
 
 Examples:
@@ -99,7 +100,8 @@ RESPONSE_CANDIDATES: Tuple[str, ...] = (
     "closest_approach_au",
     "dispersion_ratio",
     "unbound_fraction",
-    "settled_spin_period_hr",
+    "intrinsic_spin_period_hr",
+    "approach_spin_period_hr",
     "post_flyby_spin_period_hr",
 )
 
@@ -154,8 +156,8 @@ def parse_args() -> argparse.Namespace:
             "Output column to analyse in classic mode; also the default for --saltelli-y-column. "
             "Valid options from the runner: closest_approach_km, closest_approach_au, "
             "dispersion_ratio (DEM only), unbound_fraction (DEM only), "
-            "settled_spin_period_hr, post_flyby_spin_period_hr (multi-sink Apophis; "
-            "post-flyby needs Earth flyby)."
+            "intrinsic_spin_period_hr, approach_spin_period_hr, post_flyby_spin_period_hr "
+            "(multi-sink Apophis; approach/post need Earth flyby)."
         ),
     )
     p.add_argument(
@@ -220,7 +222,8 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Numeric column to use as Y from the saltelli Y CSV (default: same as --response). "
             "The runner writes closest_approach_km, closest_approach_au, dispersion_ratio, "
-            "unbound_fraction, settled_spin_period_hr, and post_flyby_spin_period_hr "
+            "unbound_fraction, intrinsic_spin_period_hr, approach_spin_period_hr, "
+            "and post_flyby_spin_period_hr "
             "to saltelli_Y.csv."
         ),
     )

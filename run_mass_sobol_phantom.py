@@ -12,6 +12,7 @@ import csv
 import hashlib
 import json
 import math
+import multiprocessing
 import os
 import re
 import shutil
@@ -23,9 +24,14 @@ from pathlib import Path
 from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 import numpy as np
+from scipy.spatial import cKDTree
 
 
 AU_IN_KM = 149_597_870.7
+SPIN_MEAN_MAX_DUMPS = 50
+SPIN_INTRINSIC_MAX_HOURS = 24.0
+SPIN_INTRINSIC_MAX_CA_FRACTION = 0.3
+SPIN_APPROACH_HOURS_BEFORE_CA = 24.0
 EARTH_SINK_ID_DEFAULT = 4
 APOPHIS_SINK_ID_DEFAULT = 11
 
@@ -241,7 +247,8 @@ class RunRecord:
     error: str
     dispersion_ratio: float = float("nan")
     unbound_fraction: float = float("nan")
-    settled_spin_period_hr: float = float("nan")
+    intrinsic_spin_period_hr: float = float("nan")
+    approach_spin_period_hr: float = float("nan")
     post_flyby_spin_period_hr: float = float("nan")
     # Values written for CSV secondary columns (setup-related names e.g. scale_vel; mass uses mass_input_kg).
     param_columns: Dict[str, str] = field(default_factory=dict)
@@ -1453,68 +1460,83 @@ def _sink_ev_dump_sort_key(path: Path) -> Tuple[int, str]:
     return (-1, path.name)
 
 
-def extract_closest_approach(
+def _metrics_legacy_substeps() -> bool:
+    """When set (``METRICS_LEGACY_SUBSTEPS=1``), use every hydro substep row in sink ``.ev`` files."""
+    return os.environ.get("METRICS_LEGACY_SUBSTEPS", "").strip().lower() in ("1", "true", "yes")
+
+
+def _parse_dtmax_from_in(run_dir: Path, prefix: str) -> Optional[float]:
+    """``dtmax`` in PHANTOM code time units from the run ``.in`` file."""
+    in_path = run_dir / f"{prefix}.in"
+    if not in_path.is_file():
+        return None
+    text = in_path.read_text(encoding="utf-8", errors="replace")
+    m = re.search(r"^\s*dtmax\s*=\s*([\d.Ee+-]+)", text, re.MULTILINE | re.IGNORECASE)
+    if not m:
+        return None
+    try:
+        dtmax = float(m.group(1))
+    except ValueError:
+        return None
+    return dtmax if dtmax > 0.0 else None
+
+
+def _is_dump_time(t: float, dtmax: float) -> bool:
+    """True when ``t`` lies on the PHANTOM dump grid ``k * dtmax``."""
+    atol = max(1e-6 * dtmax, 1.0)
+    k_grid = round(t / dtmax)
+    return math.isclose(t, k_grid * dtmax, rel_tol=0.0, abs_tol=atol)
+
+
+def _subsample_sink_ev_to_dumps(arr: np.ndarray, dtmax: float) -> np.ndarray:
+    """Keep dump-grid rows from one sink ``.ev`` array; fallback to last row per dump bin."""
+    if arr.shape[0] == 0:
+        return arr
+    times = arr[:, 0]
+    atol = max(1e-6 * dtmax, 1.0)
+    k_grid = np.round(times / dtmax)
+    dump_mask = np.isclose(times, k_grid * dtmax, rtol=0.0, atol=atol)
+    if int(dump_mask.sum()) >= 3:
+        return arr[dump_mask]
+    bins = np.floor(times / dtmax).astype(np.int64)
+    order = np.argsort(bins, kind="stable")
+    sorted_bins = bins[order]
+    sorted_arr = arr[order]
+    boundaries = np.concatenate(
+        [[0], np.where(np.diff(sorted_bins) != 0)[0] + 1, [len(sorted_bins)]]
+    )
+    last_rows = [sorted_arr[boundaries[i + 1] - 1] for i in range(len(boundaries) - 1)]
+    if not last_rows:
+        return arr
+    return np.vstack(last_rows)
+
+
+def _latest_centroid_ev_path(run_dir: Path, prefix: str, sink_id: int) -> Path:
+    candidates = sorted(
+        run_dir.glob(f"{prefix}Sink{sink_id:04d}N*.ev"),
+        key=_sink_ev_dump_sort_key,
+    )
+    if not candidates:
+        raise RuntimeError(
+            f"Could not find sink {sink_id:04d} `.ev` files under {run_dir} (prefix {prefix!r})."
+        )
+    return candidates[-1]
+
+
+def _earth_apophis_closest_approach(
     run_dir: Path, prefix: str, earth_sink_id: int, apophis_sink_id: int
-) -> Tuple[float, float]:
-    earth_candidates = sorted(
-        run_dir.glob(f"{prefix}Sink{earth_sink_id:04d}N*.ev"),
-        key=_sink_ev_dump_sort_key,
-    )
-    apophis_candidates = sorted(
-        run_dir.glob(f"{prefix}Sink{apophis_sink_id:04d}N*.ev"),
-        key=_sink_ev_dump_sort_key,
-    )
+) -> Tuple[float, float, float]:
+    """Minimum Earth–Apophis separation and the simulation time (code units) at that minimum."""
+    earth_arr = _parse_sink_ev_array(_latest_centroid_ev_path(run_dir, prefix, earth_sink_id))
+    apo_arr = _parse_sink_ev_array(_latest_centroid_ev_path(run_dir, prefix, apophis_sink_id))
+    if earth_arr.shape[0] == 0 or apo_arr.shape[0] == 0:
+        raise RuntimeError("No numeric sink rows in Earth/Apophis centroid `.ev` files.")
 
-    if not earth_candidates or not apophis_candidates:
-        raise RuntimeError(
-            "Could not find Earth/Apophis sink files "
-            f"(expected IDs {earth_sink_id} and {apophis_sink_id})."
-        )
+    t_earth = earth_arr[:, 0].tolist()
+    xyz_earth = [tuple(row) for row in earth_arr[:, 1:4]]
+    t_apophis = apo_arr[:, 0].tolist()
+    xyz_apophis = [tuple(row) for row in apo_arr[:, 1:4]]
 
-    t_earth, xyz_earth = parse_sink_rows(earth_candidates[-1])
-    t_apophis, xyz_apophis = parse_sink_rows(apophis_candidates[-1])
-
-    pairs = _pair_sink_rows_by_time(t_earth, xyz_earth, t_apophis, xyz_apophis)
-    if not pairs:
-        raise RuntimeError(
-            "No Earth/Apophis sink rows with matching time (after sorting and time alignment). "
-            "Check sink `.ev` dumps share the same simulation clock."
-        )
-
-    closest_km = float("inf")
-    for ve, va in pairs:
-        dx = va[0] - ve[0]
-        dy = va[1] - ve[1]
-        dz = va[2] - ve[2]
-        d = math.sqrt(dx * dx + dy * dy + dz * dz)
-        if d < closest_km:
-            closest_km = d
-
-    if not math.isfinite(closest_km):
-        raise RuntimeError("Failed to compute closest approach from sink rows.")
-    return closest_km, closest_km / AU_IN_KM
-
-
-def _closest_approach_time(
-    run_dir: Path, prefix: str, earth_sink_id: int, apophis_sink_id: int
-) -> float:
-    """Simulation time (code units) at minimum Earth–Apophis separation."""
-    earth_candidates = sorted(
-        run_dir.glob(f"{prefix}Sink{earth_sink_id:04d}N*.ev"),
-        key=_sink_ev_dump_sort_key,
-    )
-    apophis_candidates = sorted(
-        run_dir.glob(f"{prefix}Sink{apophis_sink_id:04d}N*.ev"),
-        key=_sink_ev_dump_sort_key,
-    )
-    if not earth_candidates or not apophis_candidates:
-        raise RuntimeError(
-            "Could not find Earth/Apophis sink files "
-            f"(expected IDs {earth_sink_id} and {apophis_sink_id})."
-        )
-
-    t_earth, xyz_earth = parse_sink_rows(earth_candidates[-1])
-    t_apophis, xyz_apophis = parse_sink_rows(apophis_candidates[-1])
     earth = sorted(zip(t_earth, xyz_earth), key=lambda r: r[0])
     apo = sorted(zip(t_apophis, xyz_apophis), key=lambda r: r[0])
     i, j = 0, 0
@@ -1538,7 +1560,26 @@ def _closest_approach_time(
         else:
             j += 1
     if not math.isfinite(closest_km) or not math.isfinite(t_ca):
-        raise RuntimeError("Failed to compute closest-approach time from sink rows.")
+        raise RuntimeError("Failed to compute closest approach from sink rows.")
+    return closest_km, closest_km / AU_IN_KM, t_ca
+
+
+def extract_closest_approach(
+    run_dir: Path, prefix: str, earth_sink_id: int, apophis_sink_id: int
+) -> Tuple[float, float]:
+    closest_km, closest_au, _ = _earth_apophis_closest_approach(
+        run_dir, prefix, earth_sink_id, apophis_sink_id
+    )
+    return closest_km, closest_au
+
+
+def _closest_approach_time(
+    run_dir: Path, prefix: str, earth_sink_id: int, apophis_sink_id: int
+) -> float:
+    """Simulation time (code units) at minimum Earth–Apophis separation."""
+    _, _, t_ca = _earth_apophis_closest_approach(
+        run_dir, prefix, earth_sink_id, apophis_sink_id
+    )
     return t_ca
 
 
@@ -1615,9 +1656,10 @@ def extract_breakup_metrics(
 ) -> Tuple[float, float]:
     """Peak dispersion ratio and unbound mass fraction of the Apophis rubble pile.
 
-    Apophis particles are the equal-mass sinks with ID >= ``apophis_sink_id``. Everything is
-    in PHANTOM code units where G=1, so the energy criterion needs no unit conversion. Returns
-    ``(nan, nan)`` when fewer than two Apophis particles are present (non-DEM / single-sink runs).
+    Apophis particles are the equal-mass sinks with ID >= ``apophis_sink_id``. Dispersion uses
+    the global mass-weighted centre of mass (unchanged). Unbound fraction is peak mass not
+    belonging to the main rubble fragment — see ``_unbound_mass_main_body``. Returns ``(nan, nan)``
+    when fewer than two Apophis particles are present (non-DEM / single-sink runs).
 
     ``_groups`` / ``_time_of_key``: pre-built from ``_apophis_time_groups`` to avoid a redundant
     full re-read of all sink files when multiple metrics are computed for the same run.
@@ -1631,39 +1673,46 @@ def extract_breakup_metrics(
     disp_peak = float("nan")
     unbound_peak = float("nan")
     for key in sorted(_groups, key=lambda k: _time_of_key[k]):
-        arr = _groups[key]  # shape (N, 7): x, y, z, mass, vx, vy, vz
-        if len(arr) < 2:
-            continue
-        pos = arr[:, :3]
-        mass = arr[:, 3]
-        vel = arr[:, 4:7]
-        m_tot = float(mass.sum())
-        if m_tot <= 0.0:
-            continue
-        rcom = (pos * mass[:, None]).sum(0) / m_tot
-        vcom = (vel * mass[:, None]).sum(0) / m_tot
-        dr = pos - rcom
-        dv = vel - vcom
-        r2 = (dr * dr).sum(1)
-        v2 = (dv * dv).sum(1)
-        rg = math.sqrt(float((mass * r2).sum()) / m_tot)
-        # eps = 0.5 v_rel^2 - G*M/r, G=1; r=0 => treat as bound (same gate as _bound_apophis_grains).
-        r = np.sqrt(r2)
-        safe_r = np.where(r > 0.0, r, 1.0)
-        eps = np.where(r > 0.0, 0.5 * v2 - m_tot / safe_r, -1.0)
-        unbound_mass = float(mass[eps > 0.0].sum())
-
-        if rg_initial is None:
-            rg_initial = rg
-        if rg_initial and rg_initial > 0.0:
-            ratio = rg / rg_initial
-            if math.isnan(disp_peak) or ratio > disp_peak:
-                disp_peak = ratio
-        frac = unbound_mass / m_tot
-        if math.isnan(unbound_peak) or frac > unbound_peak:
-            unbound_peak = frac
+        arr = _groups[key]
+        rg_initial, disp_peak, unbound_peak = _update_breakup_peaks(
+            arr, rg_initial, disp_peak, unbound_peak
+        )
 
     return disp_peak, unbound_peak
+
+
+def _update_breakup_peaks(
+    arr: np.ndarray,
+    rg_initial: Optional[float],
+    disp_peak: float,
+    unbound_peak: float,
+) -> Tuple[Optional[float], float, float]:
+    """Incorporate one dump frame into running breakup peak metrics."""
+    if len(arr) < 2:
+        return rg_initial, disp_peak, unbound_peak
+    pos = arr[:, :3]
+    mass = arr[:, 3]
+    vel = arr[:, 4:7]
+    m_tot = float(mass.sum())
+    if m_tot <= 0.0:
+        return rg_initial, disp_peak, unbound_peak
+    rcom = (pos * mass[:, None]).sum(0) / m_tot
+    dr = pos - rcom
+    r2 = (dr * dr).sum(1)
+    rg = math.sqrt(float((mass * r2).sum()) / m_tot)
+    mb_all = _main_body_mask(pos, mass)
+    unbound_mass = _unbound_mass_main_body(pos, mass, vel, main_body_mask=mb_all)
+
+    if rg_initial is None:
+        rg_initial = rg
+    if rg_initial and rg_initial > 0.0:
+        ratio = rg / rg_initial
+        if math.isnan(disp_peak) or ratio > disp_peak:
+            disp_peak = ratio
+    frac = unbound_mass / m_tot
+    if math.isnan(unbound_peak) or frac > unbound_peak:
+        unbound_peak = frac
+    return rg_initial, disp_peak, unbound_peak
 
 
 def _parse_spin_axis_from_setup_log(log_path: Path) -> Optional[Tuple[float, float, float]]:
@@ -1707,19 +1756,11 @@ def _main_body_mask(b_pos: np.ndarray, b_mass: np.ndarray, link_factor: float = 
     if N < 2:
         return np.ones(N, dtype=bool)
 
-    # N×N pairwise squared distances (fine for N ≤ ~2000 DEM particles)
-    diff = b_pos[:, None, :] - b_pos[None, :, :]   # (N, N, 3)
-    dist2 = (diff * diff).sum(2)                     # (N, N)
-    np.fill_diagonal(dist2, np.inf)
+    tree = cKDTree(b_pos)
+    dists, _ = tree.query(b_pos, k=2)
+    nn_dist = dists[:, 1]
+    link_length = link_factor * float(np.median(nn_dist))
 
-    # Adaptive link length: 2.5 × median nearest-neighbour distance.
-    # Close-packed lattice has 12 neighbours at distance d; next shell at d√2.
-    # 2.5× connects first-neighbour shell (within cluster) and always bridges the intra-cluster
-    # gap, while the inter-cluster gap after physical breakup is >> 2.5 × particle spacing.
-    nn_dist = np.sqrt(dist2.min(1))
-    link2 = (link_factor * float(np.median(nn_dist))) ** 2
-
-    # Union-Find (path-halving) connected components
     parent: List[int] = list(range(N))
 
     def _find(x: int) -> int:
@@ -1728,7 +1769,7 @@ def _main_body_mask(b_pos: np.ndarray, b_mass: np.ndarray, link_factor: float = 
             x = parent[x]
         return x
 
-    for i, j in zip(*np.where(dist2 < link2)):
+    for i, j in tree.query_pairs(link_length):
         ri, rj = _find(int(i)), _find(int(j))
         if ri != rj:
             parent[ri] = rj
@@ -1739,10 +1780,51 @@ def _main_body_mask(b_pos: np.ndarray, b_mass: np.ndarray, link_factor: float = 
     return roots == largest_root
 
 
+def _unbound_mass_main_body(
+    pos: np.ndarray,
+    mass: np.ndarray,
+    vel: np.ndarray,
+    *,
+    main_body_mask: Optional[np.ndarray] = None,
+) -> float:
+    """Mass not on the main Apophis fragment (largest FOF cluster), in code units.
+
+    After breakup into two separated chunks the global-CoM energy test mis-classifies
+    secondary-fragment grains; this matches the spin path (``_main_body_mask``). Mass in
+    smaller spatial clusters counts as unbound from the main body. Grains still in the main
+    cluster but with positive specific energy in that fragment's CoM frame
+    (``eps = 0.5 v_rel^2 - M_main/r``, G=1) also count.
+    """
+    m_tot = float(mass.sum())
+    if m_tot <= 0.0:
+        return 0.0
+    mb = main_body_mask if main_body_mask is not None else _main_body_mask(pos, mass)
+    unbound = float(mass[~mb].sum())
+    m_main = float(mass[mb].sum())
+    if m_main <= 0.0:
+        return unbound
+    main_pos = pos[mb]
+    main_vel = vel[mb]
+    main_mass = mass[mb]
+    rcom_m = (main_pos * main_mass[:, None]).sum(0) / m_main
+    vcom_m = (main_vel * main_mass[:, None]).sum(0) / m_main
+    dr_m = main_pos - rcom_m
+    dv_m = main_vel - vcom_m
+    r2_m = (dr_m * dr_m).sum(1)
+    v2_m = (dv_m * dv_m).sum(1)
+    r_m = np.sqrt(r2_m)
+    safe_r_m = np.where(r_m > 0.0, r_m, 1.0)
+    eps_m = np.where(r_m > 0.0, 0.5 * v2_m - m_main / safe_r_m, -1.0)
+    unbound += float(main_mass[eps_m > 0.0].sum())
+    return unbound
+
+
 def _spin_period_hr_bound_rubble(
     arr: np.ndarray,
     utime: float,
     spin_axis: Optional[Tuple[float, float, float]] = None,
+    *,
+    main_body_mask_bound: Optional[np.ndarray] = None,
 ) -> float:
     """Spin period (hours) of bound Apophis rubble at one dump; ``nan`` if undefined.
 
@@ -1785,7 +1867,11 @@ def _spin_period_hr_bound_rubble(
     # momentum (45 hr period in the 1.55 hr run) dominates the spin estimate. Restrict to the
     # largest spatially-connected cluster so post-breakup spin reflects the main body only.
     # Pre-breakup: all particles are one cluster → mask is all-True, result identical to before.
-    mb = _main_body_mask(b_pos, b_mass)
+    mb = (
+        main_body_mask_bound
+        if main_body_mask_bound is not None
+        else _main_body_mask(b_pos, b_mass)
+    )
     b_pos = b_pos[mb]
     b_mass = b_mass[mb]
     b_vel = b_vel[mb]
@@ -1853,8 +1939,8 @@ def _apophis_time_groups(
 
     Returns ``(groups, time_of_key, n_apophis_sinks)`` where ``groups[key]`` is a float64 array
     of shape ``(N_particles, 7)`` with columns ``[x, y, z, mass, vx, vy, vz]`` (time dropped —
-    it is the dict key). Files are read in parallel via ``ThreadPoolExecutor`` and duplicate
-    time rows per sink are deduplicated before merging.
+    it is the dict key). By default only PHANTOM **dump-grid** rows are kept (not hydro substeps);
+    set ``METRICS_LEGACY_SUBSTEPS=1`` to retain every unique timestamp.
     """
     # Collect the latest .ev file per Apophis sink ID; cache sort keys (avoids double regex).
     sort_cache: Dict[Path, Tuple[int, str]] = {}
@@ -1876,32 +1962,52 @@ def _apophis_time_groups(
     if not latest_by_id:
         return {}, {}, 0
 
-    # Read files in parallel. np.loadtxt holds the GIL so threads don't help; use processes.
-    # Cap workers to avoid oversubscription when run_one_case is itself inside a process pool.
     paths = list(latest_by_id.values())
-    max_workers = min(4, max(1, (os.cpu_count() or 4) // 2), len(paths))
-    with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as ex:
-        arrays = list(ex.map(_parse_sink_ev_array, paths, chunksize=max(1, len(paths) // (max_workers * 4))))
+    use_pool = (
+        multiprocessing.current_process().name == "MainProcess"
+        and len(paths) >= 64
+    )
+    if use_pool:
+        max_workers = min(4, max(1, (os.cpu_count() or 4) // 2), len(paths))
+        with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as ex:
+            arrays = list(
+                ex.map(
+                    _parse_sink_ev_array,
+                    paths,
+                    chunksize=max(1, len(paths) // (max_workers * 4)),
+                )
+            )
+    else:
+        arrays = [_parse_sink_ev_array(p) for p in paths]
 
-    # Deduplicate per-sink (PHANTOM may emit the same dump time twice) then concatenate.
+    dtmax: Optional[float] = None
+    if not _metrics_legacy_substeps():
+        dtmax = _parse_dtmax_from_in(run_dir, prefix)
+        if dtmax is None:
+            print(
+                "[WARN] Could not read dtmax from .in; using all .ev timestamps for metrics",
+                file=sys.stderr,
+                flush=True,
+            )
+
     deduped: List[np.ndarray] = []
     for arr in arrays:
         if arr.shape[0] == 0:
             continue
         times = arr[:, 0]
-        # np.unique on a time-ordered array returns first-occurrence indices in sorted order,
-        # which matches the original seen_t set logic (keep first row per unique time per sink).
         _, first_idx = np.unique(times, return_index=True)
-        deduped.append(arr[np.sort(first_idx)])
+        row = arr[np.sort(first_idx)]
+        if dtmax is not None:
+            row = _subsample_sink_ev_to_dumps(row, dtmax)
+        deduped.append(row)
 
     if not deduped:
         return {}, {}, 0
 
-    big = np.vstack(deduped)           # shape (N_total_rows, 8): t,x,y,z,mass,vx,vy,vz
+    big = np.vstack(deduped)
     times_big = big[:, 0]
-    data = big[:, 1:]                  # shape (N_total_rows, 7): x,y,z,mass,vx,vy,vz
+    data = big[:, 1:]
 
-    # Group rows by time using argsort + split — O(N log N), no per-row Python loops.
     sort_idx = np.argsort(times_big, kind="stable")
     sorted_times = times_big[sort_idx]
     sorted_data = data[sort_idx]
@@ -1920,6 +2026,136 @@ def _apophis_time_groups(
     return groups, time_of_key, len(latest_by_id)
 
 
+def _hours_to_code_time(hours: float, utime: float) -> float:
+    """Convert physical hours to PHANTOM code time units."""
+    if utime <= 0.0:
+        return float("nan")
+    return hours * 3600.0 / utime
+
+
+def _spin_in_time_window(
+    t: float,
+    time_relation: str,
+    t_ca: Optional[float],
+    *,
+    utime: Optional[float] = None,
+) -> bool:
+    if time_relation == "all":
+        return True
+    if t_ca is None:
+        return False
+    if time_relation == "after_ca":
+        return t >= t_ca or _sink_times_close(t, t_ca)
+    if time_relation == "before_ca":
+        return t < t_ca and not _sink_times_close(t, t_ca)
+    if utime is None or utime <= 0.0:
+        return False
+    if time_relation == "intrinsic_early":
+        t_intrinsic_end = min(
+            SPIN_INTRINSIC_MAX_CA_FRACTION * t_ca,
+            _hours_to_code_time(SPIN_INTRINSIC_MAX_HOURS, utime),
+        )
+        t_approach_start = t_ca - _hours_to_code_time(SPIN_APPROACH_HOURS_BEFORE_CA, utime)
+        return t < t_intrinsic_end and t < t_approach_start
+    if time_relation == "approach_pre_ca":
+        t_approach_start = t_ca - _hours_to_code_time(SPIN_APPROACH_HOURS_BEFORE_CA, utime)
+        return t_approach_start <= t < t_ca and not _sink_times_close(t, t_ca)
+    raise ValueError(f"unknown time_relation: {time_relation!r}")
+
+
+def _mean_spin_from_timed_periods(
+    timed_periods: List[Tuple[float, float]],
+    *,
+    skip_earliest_in_window: bool,
+) -> float:
+    if not timed_periods:
+        return float("nan")
+    if skip_earliest_in_window and len(timed_periods) >= 3:
+        timed_periods = sorted(timed_periods, key=lambda tp: tp[0])[1:]
+    if not timed_periods:
+        return float("nan")
+    if len(timed_periods) > SPIN_MEAN_MAX_DUMPS:
+        sorted_tp = sorted(timed_periods, key=lambda tp: tp[0])
+        idx = np.linspace(0, len(sorted_tp) - 1, SPIN_MEAN_MAX_DUMPS, dtype=int)
+        timed_periods = [sorted_tp[int(i)] for i in idx]
+    periods = [p for _, p in timed_periods]
+    return math.fsum(periods) / len(periods)
+
+
+def _extract_dem_metrics_bundle(
+    run_dir: Path,
+    prefix: str,
+    apophis_sink_id: int,
+    *,
+    apophis_only: bool,
+    earth_sink_id: Optional[int] = None,
+    t_ca: Optional[float] = None,
+    _groups: Dict[str, np.ndarray],
+    _time_of_key: Dict[str, float],
+    _n_sinks: int,
+) -> Tuple[float, float, float, float, float]:
+    """Breakup peaks + intrinsic/approach/post spin in one pass over pre-built dump groups."""
+    if _n_sinks < 2:
+        return float("nan"), float("nan"), float("nan"), float("nan"), float("nan")
+
+    utime = _parse_utime_from_phantom_log(run_dir / "phantom.log")
+    if utime is None:
+        return float("nan"), float("nan"), float("nan"), float("nan"), float("nan")
+
+    spin_axis = _parse_spin_axis_from_setup_log(run_dir / "setup.log")
+
+    if not apophis_only and t_ca is None:
+        if earth_sink_id is None:
+            return float("nan"), float("nan"), float("nan"), float("nan"), float("nan")
+        try:
+            t_ca = _closest_approach_time(run_dir, prefix, earth_sink_id, apophis_sink_id)
+        except RuntimeError:
+            return float("nan"), float("nan"), float("nan"), float("nan"), float("nan")
+
+    rg_initial: Optional[float] = None
+    disp_peak = float("nan")
+    unbound_peak = float("nan")
+    intrinsic_periods: List[Tuple[float, float]] = []
+    approach_periods: List[Tuple[float, float]] = []
+    post_periods: List[Tuple[float, float]] = []
+
+    for key in sorted(_groups, key=lambda k: _time_of_key[k]):
+        t = _time_of_key[key]
+        arr = _groups[key]
+        rg_initial, disp_peak, unbound_peak = _update_breakup_peaks(
+            arr, rg_initial, disp_peak, unbound_peak
+        )
+        if len(arr) < 2:
+            continue
+        period = _spin_period_hr_bound_rubble(arr, utime, spin_axis=spin_axis)
+        if not math.isfinite(period):
+            continue
+        if apophis_only:
+            if _spin_in_time_window(t, "all", None):
+                intrinsic_periods.append((t, period))
+        else:
+            if _spin_in_time_window(t, "intrinsic_early", t_ca, utime=utime):
+                intrinsic_periods.append((t, period))
+            if _spin_in_time_window(t, "approach_pre_ca", t_ca, utime=utime):
+                approach_periods.append((t, period))
+            if _spin_in_time_window(t, "after_ca", t_ca):
+                post_periods.append((t, period))
+
+    intrinsic_spin = _mean_spin_from_timed_periods(
+        intrinsic_periods, skip_earliest_in_window=True
+    )
+    approach_spin = float("nan")
+    post_spin = float("nan")
+    if not apophis_only:
+        approach_spin = _mean_spin_from_timed_periods(
+            approach_periods, skip_earliest_in_window=False
+        )
+        post_spin = _mean_spin_from_timed_periods(
+            post_periods, skip_earliest_in_window=False
+        )
+    return disp_peak, unbound_peak, intrinsic_spin, approach_spin, post_spin
+
+
 def _extract_mean_spin_period_hr(
     run_dir: Path,
     prefix: str,
@@ -1928,6 +2164,7 @@ def _extract_mean_spin_period_hr(
     earth_sink_id: Optional[int] = None,
     time_relation: str,
     skip_earliest_in_window: bool = False,
+    t_ca: Optional[float] = None,
     _groups: Optional[Dict[str, np.ndarray]] = None,
     _time_of_key: Optional[Dict[str, float]] = None,
     _n_sinks: Optional[int] = None,
@@ -1935,12 +2172,16 @@ def _extract_mean_spin_period_hr(
     """Mean bound-rubble spin period (hours) over a dump time window.
 
     ``time_relation`` is one of:
-    - ``before_ca``: dumps strictly before closest approach (settled pre-flyby state).
+    - ``intrinsic_early``: early plateau before tidal ramp-up (min of 24 h and 30% of way to CA).
+    - ``approach_pre_ca``: last ``SPIN_APPROACH_HOURS_BEFORE_CA`` strictly before closest approach.
     - ``after_ca``: dumps at or after closest approach (post-flyby tidal spin).
     - ``all``: every dump (e.g. ``apophis_only`` runs with no Earth sink).
 
     When ``skip_earliest_in_window`` is True and at least three dumps fall in the window, the
     earliest-time dump is omitted so the mean is not dominated by immediate post-setup transients.
+    The mean uses at most ``SPIN_MEAN_MAX_DUMPS`` evenly spaced dumps in the window.
+
+    ``t_ca``: if supplied, closest-approach time is not re-read from Earth/Apophis centroid files.
 
     ``_groups`` / ``_time_of_key`` / ``_n_sinks``: pre-built from ``_apophis_time_groups`` to
     avoid a redundant full re-read when multiple metrics are computed for the same run.
@@ -1956,24 +2197,20 @@ def _extract_mean_spin_period_hr(
 
     spin_axis = _parse_spin_axis_from_setup_log(run_dir / "setup.log")
 
-    t_ca: Optional[float] = None
-    if time_relation in ("before_ca", "after_ca"):
-        if earth_sink_id is None:
-            return float("nan")
-        try:
-            t_ca = _closest_approach_time(run_dir, prefix, earth_sink_id, apophis_sink_id)
-        except RuntimeError:
-            return float("nan")
+    if time_relation in ("intrinsic_early", "approach_pre_ca", "after_ca"):
+        if t_ca is None:
+            if earth_sink_id is None:
+                return float("nan")
+            try:
+                t_ca = _closest_approach_time(run_dir, prefix, earth_sink_id, apophis_sink_id)
+            except RuntimeError:
+                return float("nan")
 
     timed_periods: List[Tuple[float, float]] = []
     for key in sorted(_groups, key=lambda k: _time_of_key[k]):
         t = _time_of_key[key]
-        if time_relation == "before_ca":
-            if t_ca is not None and (t >= t_ca or math.isclose(t, t_ca, rel_tol=1e-9, abs_tol=1e-12)):
-                continue
-        elif time_relation == "after_ca":
-            if t_ca is not None and t < t_ca and not math.isclose(t, t_ca, rel_tol=1e-9, abs_tol=1e-12):
-                continue
+        if not _spin_in_time_window(t, time_relation, t_ca, utime=utime):
+            continue
         arr = _groups[key]
         if len(arr) < 2:
             continue
@@ -1981,17 +2218,12 @@ def _extract_mean_spin_period_hr(
         if math.isfinite(period):
             timed_periods.append((t, period))
 
-    if not timed_periods:
-        return float("nan")
-
-    if skip_earliest_in_window and len(timed_periods) >= 3:
-        timed_periods = sorted(timed_periods, key=lambda tp: tp[0])[1:]
-
-    periods = [p for _, p in timed_periods]
-    return math.fsum(periods) / len(periods)
+    return _mean_spin_from_timed_periods(
+        timed_periods, skip_earliest_in_window=skip_earliest_in_window
+    )
 
 
-def extract_settled_spin_period_hr(
+def extract_intrinsic_spin_period_hr(
     run_dir: Path,
     prefix: str,
     apophis_sink_id: int,
@@ -1999,11 +2231,11 @@ def extract_settled_spin_period_hr(
     *,
     apophis_only: bool = False,
 ) -> float:
-    """Mean spin period (hours) after rubble has settled, before Earth flyby effects dominate.
+    """Mean spin period (hours) of settled rubble before tidal ramp-up.
 
-    For full solar-system runs, averages pre-closest-approach dumps (optionally skipping the
-    earliest dump when three or more exist). For ``apophis_only`` runs, averages all dumps with
-    the same earliest-dump skip (no closest-approach time). Spin inference matches
+    For full solar-system runs, averages the early plateau (min of 24 h and 30% of way to CA,
+    excluding the last 24 h before CA). For ``apophis_only`` runs, averages all dumps with the
+    earliest-dump skip when three or more exist. Spin inference matches
     ``extract_post_flyby_spin_period_hr``.
     """
     if apophis_only:
@@ -2019,8 +2251,25 @@ def extract_settled_spin_period_hr(
         prefix,
         apophis_sink_id,
         earth_sink_id=earth_sink_id,
-        time_relation="before_ca",
+        time_relation="intrinsic_early",
         skip_earliest_in_window=True,
+    )
+
+
+def extract_approach_spin_period_hr(
+    run_dir: Path,
+    prefix: str,
+    apophis_sink_id: int,
+    earth_sink_id: int,
+) -> float:
+    """Mean spin period (hours) over the last 24 h strictly before closest approach."""
+    return _extract_mean_spin_period_hr(
+        run_dir,
+        prefix,
+        apophis_sink_id,
+        earth_sink_id=earth_sink_id,
+        time_relation="approach_pre_ca",
+        skip_earliest_in_window=False,
     )
 
 
@@ -2105,7 +2354,8 @@ def write_summary_csv(path: Path, records: List[RunRecord], param_column_order: 
         "closest_approach_au",
         "dispersion_ratio",
         "unbound_fraction",
-        "settled_spin_period_hr",
+        "intrinsic_spin_period_hr",
+        "approach_spin_period_hr",
         "post_flyby_spin_period_hr",
         "error",
     ]
@@ -2126,8 +2376,11 @@ def write_summary_csv(path: Path, records: List[RunRecord], param_column_order: 
                     f"{row.closest_approach_au:.12g}" if not math.isnan(row.closest_approach_au) else "",
                     f"{row.dispersion_ratio:.12g}" if not math.isnan(row.dispersion_ratio) else "",
                     f"{row.unbound_fraction:.12g}" if not math.isnan(row.unbound_fraction) else "",
-                    f"{row.settled_spin_period_hr:.12g}"
-                    if not math.isnan(row.settled_spin_period_hr)
+                    f"{row.intrinsic_spin_period_hr:.12g}"
+                    if not math.isnan(row.intrinsic_spin_period_hr)
+                    else "",
+                    f"{row.approach_spin_period_hr:.12g}"
+                    if not math.isnan(row.approach_spin_period_hr)
                     else "",
                     f"{row.post_flyby_spin_period_hr:.12g}"
                     if not math.isnan(row.post_flyby_spin_period_hr)
@@ -2232,30 +2485,58 @@ def run_one_case(
         param_columns.update(in_param_cols)
         run_command([str(phantom_bin), f"{prefix}.in"] + maxp_flag, cwd=run_dir, log_path=run_dir / "phantom.log")
 
-        # Read all Apophis sink .ev files once and share across all three metric functions.
-        # This avoids 3 independent full corpus reads (the dominant post-run cost for large np).
+        # Read all Apophis sink .ev files once and share across all metric functions.
         _groups, _time_of_key, _n_sinks = _apophis_time_groups(run_dir, prefix, apophis_sink_id)
-        _grp_kw: Dict[str, Any] = dict(_groups=_groups, _time_of_key=_time_of_key, _n_sinks=_n_sinks)
+        _apophis_only = skip_closest_approach(sample)
 
         dispersion_ratio = float("nan")
         unbound_fraction = float("nan")
-        if sample.use_dem is True:
-            dispersion_ratio, unbound_fraction = extract_breakup_metrics(
-                run_dir, prefix, apophis_sink_id,
-                _groups=_groups, _time_of_key=_time_of_key,
-            )
-        _apophis_only = skip_closest_approach(sample)
-        settled_spin_period_hr = _extract_mean_spin_period_hr(
-            run_dir,
-            prefix,
-            apophis_sink_id,
-            earth_sink_id=None if _apophis_only else earth_sink_id,
-            time_relation="all" if _apophis_only else "before_ca",
-            skip_earliest_in_window=True,
-            **_grp_kw,
-        )
+        intrinsic_spin_period_hr = float("nan")
+        approach_spin_period_hr = float("nan")
         post_flyby_spin_period_hr = float("nan")
-        if _apophis_only:
+        closest_km = float("nan")
+        closest_au = float("nan")
+        t_ca: Optional[float] = None
+
+        if sample.use_dem is True and _n_sinks >= 2:
+            if _apophis_only:
+                (
+                    dispersion_ratio,
+                    unbound_fraction,
+                    intrinsic_spin_period_hr,
+                    _,
+                    _,
+                ) = _extract_dem_metrics_bundle(
+                    run_dir,
+                    prefix,
+                    apophis_sink_id,
+                    apophis_only=True,
+                    _groups=_groups,
+                    _time_of_key=_time_of_key,
+                    _n_sinks=_n_sinks,
+                )
+            else:
+                closest_km, closest_au, t_ca = _earth_apophis_closest_approach(
+                    run_dir, prefix, earth_sink_id, apophis_sink_id
+                )
+                (
+                    dispersion_ratio,
+                    unbound_fraction,
+                    intrinsic_spin_period_hr,
+                    approach_spin_period_hr,
+                    post_flyby_spin_period_hr,
+                ) = _extract_dem_metrics_bundle(
+                    run_dir,
+                    prefix,
+                    apophis_sink_id,
+                    apophis_only=False,
+                    earth_sink_id=earth_sink_id,
+                    t_ca=t_ca,
+                    _groups=_groups,
+                    _time_of_key=_time_of_key,
+                    _n_sinks=_n_sinks,
+                )
+        elif _apophis_only:
             return RunRecord(
                 run_id=run_id,
                 mass_input_kg=mass_for_record,
@@ -2266,22 +2547,15 @@ def run_one_case(
                 error="",
                 dispersion_ratio=dispersion_ratio,
                 unbound_fraction=unbound_fraction,
-                settled_spin_period_hr=settled_spin_period_hr,
+                intrinsic_spin_period_hr=intrinsic_spin_period_hr,
+                approach_spin_period_hr=approach_spin_period_hr,
                 post_flyby_spin_period_hr=post_flyby_spin_period_hr,
                 param_columns=param_columns,
             )
-        closest_km, closest_au = extract_closest_approach(
-            run_dir, prefix, earth_sink_id, apophis_sink_id
-        )
-        post_flyby_spin_period_hr = _extract_mean_spin_period_hr(
-            run_dir,
-            prefix,
-            apophis_sink_id,
-            earth_sink_id=earth_sink_id,
-            time_relation="after_ca",
-            skip_earliest_in_window=False,
-            **_grp_kw,
-        )
+        else:
+            closest_km, closest_au = extract_closest_approach(
+                run_dir, prefix, earth_sink_id, apophis_sink_id
+            )
         return RunRecord(
             run_id=run_id,
             mass_input_kg=mass_for_record,
@@ -2292,7 +2566,8 @@ def run_one_case(
             error="",
             dispersion_ratio=dispersion_ratio,
             unbound_fraction=unbound_fraction,
-            settled_spin_period_hr=settled_spin_period_hr,
+            intrinsic_spin_period_hr=intrinsic_spin_period_hr,
+            approach_spin_period_hr=approach_spin_period_hr,
             post_flyby_spin_period_hr=post_flyby_spin_period_hr,
             param_columns=param_columns,
         )
@@ -2520,7 +2795,8 @@ def main() -> int:
                     "closest_approach_au": result.closest_approach_au,
                     "dispersion_ratio": result.dispersion_ratio,
                     "unbound_fraction": result.unbound_fraction,
-                    "settled_spin_period_hr": result.settled_spin_period_hr,
+                    "intrinsic_spin_period_hr": result.intrinsic_spin_period_hr,
+                    "approach_spin_period_hr": result.approach_spin_period_hr,
                     "post_flyby_spin_period_hr": result.post_flyby_spin_period_hr,
                     "status": result.status,
                 }
@@ -2553,7 +2829,8 @@ def main() -> int:
             "closest_approach_au",
             "dispersion_ratio",
             "unbound_fraction",
-            "settled_spin_period_hr",
+            "intrinsic_spin_period_hr",
+            "approach_spin_period_hr",
             "post_flyby_spin_period_hr",
             "status",
         ]
@@ -2571,8 +2848,8 @@ def main() -> int:
             f"       --saltelli-meta-json {meta_p} \\\n"
             f"       --saltelli-y-csv {y_path.resolve()} \\\n"
             "       --saltelli-y-column closest_approach_au  "
-            "# also: dispersion_ratio, unbound_fraction, settled_spin_period_hr, "
-            "post_flyby_spin_period_hr (DEM sweeps) "
+            "# also: dispersion_ratio, unbound_fraction, intrinsic_spin_period_hr, "
+            "approach_spin_period_hr, post_flyby_spin_period_hr (DEM sweeps) "
             + (
                 " \\\n       --saltelli-calc-second-order"
                 if args.saltelli_calc_second_order
