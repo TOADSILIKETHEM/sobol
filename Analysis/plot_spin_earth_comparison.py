@@ -80,13 +80,15 @@ def main() -> None:
     )
     ax_main.axhline(1.0, color="gray", linestyle=":", linewidth=1, alpha=0.8)
     ax_main.set_ylabel("Peak dispersion ratio")
-    ax_main.set_title(
-        "DEM rubble-pile deformation vs spin period\n"
-        r"$k_c = 0$, $t_\mathrm{max} = 4.5$ days, same 16 Sobol spin samples"
-    )
     ax_main.legend(loc="upper right", framealpha=0.95)
     ax_main.set_ylim(bottom=0.995)
     ax_main.grid(True, alpha=0.3)
+
+    fig.suptitle(
+        "Earth tidal loading on fast-spinning spheres (bound deformation only)\n"
+        r"Sphere DEM, $k_c = 0$, $n_p = 500$, $t_\mathrm{max} = 4.5$ d, matched 16 Sobol spin samples",
+        fontsize=11,
+    )
 
     # Match spins (same samples); difference = Earth − control
     if not np.allclose(spin_e, spin_n):

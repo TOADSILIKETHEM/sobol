@@ -223,8 +223,8 @@ def main() -> None:
     cbar1.set_label("dispersion_ratio")
 
     fig.suptitle(
-        "Priority 3: Earth flyby DEM ($t_\\mathrm{max}=4.5$ d, $n_p=500$)\n"
-        "16 Sobol samples; shaded field = linear interpolation (illustrative)",
+        "Cohesion and spin near the Earth flyby boundary (sphere DEM)\n"
+        r"$t_\mathrm{max}=4.5$ d, $n_p=500$, 16 Sobol samples; shaded field = linear interpolation",
         fontsize=11,
         y=1.02,
     )
@@ -262,6 +262,11 @@ def main() -> None:
     ax2.set_xlim(spin_lim)
     ax2.set_ylim(log_kc_lim)
     ax2.yaxis.set_major_formatter(FuncFormatter(_kc_tick_formatter))
+    fig2.suptitle(
+        "Cohesion and spin near the Earth flyby boundary (sphere DEM)\n"
+        r"$t_\mathrm{max}=4.5$ d, $n_p=500$ — log scale shows catastrophic run 4",
+        fontsize=10,
+    )
     fig2.colorbar(im2, ax=ax2, label=r"$\log_{10}$(dispersion_ratio)")
     fig2.savefig(out_log, dpi=150, bbox_inches="tight")
     print(f"Wrote {out_log}")

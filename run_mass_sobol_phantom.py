@@ -29,6 +29,10 @@ from scipy.spatial import cKDTree
 
 AU_IN_KM = 149_597_870.7
 SPIN_MEAN_MAX_DUMPS = 50
+MAIN_BODY_INTACT_DISP_RATIO = 1.15
+MAIN_BODY_MIN_CLUSTER_FRAC = 0.50
+MAIN_BODY_LINK_FACTOR_INIT = 2.5
+MAIN_BODY_LINK_FACTOR_MAX = 40.0
 SPIN_INTRINSIC_MAX_HOURS = 24.0
 SPIN_INTRINSIC_MAX_CA_FRACTION = 0.3
 SPIN_APPROACH_HOURS_BEFORE_CA = 24.0
@@ -1461,8 +1465,17 @@ def _sink_ev_dump_sort_key(path: Path) -> Tuple[int, str]:
 
 
 def _metrics_legacy_substeps() -> bool:
-    """When set (``METRICS_LEGACY_SUBSTEPS=1``), use every hydro substep row in sink ``.ev`` files."""
+    """True only when ``METRICS_LEGACY_SUBSTEPS=1`` (debug/regression; not used by sweep runs)."""
     return os.environ.get("METRICS_LEGACY_SUBSTEPS", "").strip().lower() in ("1", "true", "yes")
+
+
+def _use_fast_metrics_defaults() -> None:
+    """Ensure sweep metric extraction uses dump-grid rows and spin window gating.
+
+    Clears ``METRICS_LEGACY_SUBSTEPS`` so a shell export cannot slow every worker.
+    Legacy substep scanning is opt-in for ``verify_metric_extraction.py --legacy`` only.
+    """
+    os.environ.pop("METRICS_LEGACY_SUBSTEPS", None)
 
 
 def _parse_dtmax_from_in(run_dir: Path, prefix: str) -> Optional[float]:
@@ -1673,38 +1686,62 @@ def extract_breakup_metrics(
     disp_peak = float("nan")
     unbound_peak = float("nan")
     for key in sorted(_groups, key=lambda k: _time_of_key[k]):
-        arr = _groups[key]
-        rg_initial, disp_peak, unbound_peak = _update_breakup_peaks(
-            arr, rg_initial, disp_peak, unbound_peak
+        rg_initial, disp_peak, unbound_peak, _ = _process_dem_dump_frame(
+            _groups[key], rg_initial, disp_peak, unbound_peak
         )
 
     return disp_peak, unbound_peak
 
 
-def _update_breakup_peaks(
+def _mass_weighted_rg(pos: np.ndarray, mass: np.ndarray) -> float:
+    """Mass-weighted radius of gyration for Apophis grains at one dump."""
+    m_tot = float(mass.sum())
+    if m_tot <= 0.0:
+        return float("nan")
+    rcom = (pos * mass[:, None]).sum(0) / m_tot
+    dr = pos - rcom
+    r2 = (dr * dr).sum(1)
+    return math.sqrt(float((mass * r2).sum()) / m_tot)
+
+
+def _process_dem_dump_frame(
     arr: np.ndarray,
     rg_initial: Optional[float],
     disp_peak: float,
     unbound_peak: float,
-) -> Tuple[Optional[float], float, float]:
-    """Incorporate one dump frame into running breakup peak metrics."""
+    *,
+    utime: Optional[float] = None,
+    spin_axis: Optional[Tuple[float, float, float]] = None,
+    compute_spin: bool = True,
+) -> Tuple[Optional[float], float, float, float]:
+    """Incorporate one dump into breakup peaks and optionally spin period.
+
+    Returns ``(rg_initial, disp_peak, unbound_peak, spin_period_hr)``. Spin is ``nan`` when
+    ``utime`` is ``None`` or ``compute_spin`` is False. Main-body masking shares one FOF/intact
+    pass for unbound and spin when spin is computed.
+    """
+    spin_period = float("nan")
     if len(arr) < 2:
-        return rg_initial, disp_peak, unbound_peak
+        return rg_initial, disp_peak, unbound_peak, spin_period
     pos = arr[:, :3]
     mass = arr[:, 3]
     vel = arr[:, 4:7]
     m_tot = float(mass.sum())
     if m_tot <= 0.0:
-        return rg_initial, disp_peak, unbound_peak
-    rcom = (pos * mass[:, None]).sum(0) / m_tot
-    dr = pos - rcom
-    r2 = (dr * dr).sum(1)
-    rg = math.sqrt(float((mass * r2).sum()) / m_tot)
-    mb_all = _main_body_mask(pos, mass)
-    unbound_mass = _unbound_mass_main_body(pos, mass, vel, main_body_mask=mb_all)
+        return rg_initial, disp_peak, unbound_peak, spin_period
 
+    rg = _mass_weighted_rg(pos, mass)
     if rg_initial is None:
         rg_initial = rg
+        rg_ratio = 1.0
+    elif rg_initial > 0.0:
+        rg_ratio = rg / rg_initial
+    else:
+        rg_ratio = 1.0
+
+    mb_all = _main_body_mask(pos, mass, rg_ratio=rg_ratio)
+    unbound_mass = _unbound_mass_main_body(pos, mass, vel, main_body_mask=mb_all)
+
     if rg_initial and rg_initial > 0.0:
         ratio = rg / rg_initial
         if math.isnan(disp_peak) or ratio > disp_peak:
@@ -1712,7 +1749,13 @@ def _update_breakup_peaks(
     frac = unbound_mass / m_tot
     if math.isnan(unbound_peak) or frac > unbound_peak:
         unbound_peak = frac
-    return rg_initial, disp_peak, unbound_peak
+
+    if compute_spin and utime is not None and utime > 0.0:
+        spin_period = _spin_period_hr_bound_rubble(
+            arr, utime, spin_axis=spin_axis, main_body_mask_all=mb_all
+        )
+
+    return rg_initial, disp_peak, unbound_peak, spin_period
 
 
 def _parse_spin_axis_from_setup_log(log_path: Path) -> Optional[Tuple[float, float, float]]:
@@ -1744,14 +1787,10 @@ def _period_hr_from_omega_code(omega_code: float, utime: float) -> float:
     return (2.0 * math.pi * utime) / (omega_code * 3600.0)
 
 
-def _main_body_mask(b_pos: np.ndarray, b_mass: np.ndarray, link_factor: float = 2.5) -> np.ndarray:
-    """Boolean mask of the largest spatially-connected cluster among bound rubble particles.
-
-    Uses friends-of-friends: link_length = link_factor × median(nearest-neighbour spacing).
-    Before breakup all particles form one cluster → mask is all-True (identical to current
-    behaviour). After breakup into two separated fragments the orbital motion of the two-body
-    system would corrupt the spin estimate; this function isolates the main fragment.
-    """
+def _main_body_mask_fof(
+    b_pos: np.ndarray, b_mass: np.ndarray, link_factor: float
+) -> np.ndarray:
+    """Largest friends-of-friends cluster at a fixed link factor."""
     N = len(b_pos)
     if N < 2:
         return np.ones(N, dtype=bool)
@@ -1778,6 +1817,40 @@ def _main_body_mask(b_pos: np.ndarray, b_mass: np.ndarray, link_factor: float = 
     unique_roots, counts = np.unique(roots, return_counts=True)
     largest_root = unique_roots[np.argmax(counts)]
     return roots == largest_root
+
+
+def _main_body_mask_fof_adaptive(b_pos: np.ndarray, b_mass: np.ndarray) -> np.ndarray:
+    """FOF main body with increasing link length until the largest cluster is substantial."""
+    N = len(b_pos)
+    if N < 2:
+        return np.ones(N, dtype=bool)
+    min_count = max(2, int(math.ceil(MAIN_BODY_MIN_CLUSTER_FRAC * N)))
+    link_factor = MAIN_BODY_LINK_FACTOR_INIT
+    mb = _main_body_mask_fof(b_pos, b_mass, link_factor)
+    while int(mb.sum()) < min_count and link_factor < MAIN_BODY_LINK_FACTOR_MAX:
+        link_factor = min(link_factor * 2.0, MAIN_BODY_LINK_FACTOR_MAX)
+        mb = _main_body_mask_fof(b_pos, b_mass, link_factor)
+    return mb
+
+
+def _main_body_mask(
+    b_pos: np.ndarray,
+    b_mass: np.ndarray,
+    *,
+    rg_ratio: Optional[float] = None,
+) -> np.ndarray:
+    """Boolean mask of the main Apophis rubble fragment at one dump.
+
+    When ``rg_ratio`` (current rg / initial rg) is below ``MAIN_BODY_INTACT_DISP_RATIO``,
+    all grains are treated as the main body (cohesive pile with settling gaps only).
+    Otherwise adaptive friends-of-friends isolates the largest spatial cluster after breakup.
+    """
+    N = len(b_pos)
+    if N < 2:
+        return np.ones(N, dtype=bool)
+    if rg_ratio is not None and rg_ratio < MAIN_BODY_INTACT_DISP_RATIO:
+        return np.ones(N, dtype=bool)
+    return _main_body_mask_fof_adaptive(b_pos, b_mass)
 
 
 def _unbound_mass_main_body(
@@ -1824,6 +1897,7 @@ def _spin_period_hr_bound_rubble(
     utime: float,
     spin_axis: Optional[Tuple[float, float, float]] = None,
     *,
+    main_body_mask_all: Optional[np.ndarray] = None,
     main_body_mask_bound: Optional[np.ndarray] = None,
 ) -> float:
     """Spin period (hours) of bound Apophis rubble at one dump; ``nan`` if undefined.
@@ -1862,16 +1936,12 @@ def _spin_period_hr_bound_rubble(
     b_mass = mass[bound_mask]
     b_vel = vel[bound_mask]
 
-    # After breakup into two separated fragments, both are still gravitationally bound to the
-    # shared CoM (eps ≤ 0), so the bound gate alone keeps both clusters. Their orbital angular
-    # momentum (45 hr period in the 1.55 hr run) dominates the spin estimate. Restrict to the
-    # largest spatially-connected cluster so post-breakup spin reflects the main body only.
-    # Pre-breakup: all particles are one cluster → mask is all-True, result identical to before.
-    mb = (
-        main_body_mask_bound
-        if main_body_mask_bound is not None
-        else _main_body_mask(b_pos, b_mass)
-    )
+    if main_body_mask_bound is not None:
+        mb = main_body_mask_bound
+    elif main_body_mask_all is not None:
+        mb = main_body_mask_all[bound_mask]
+    else:
+        mb = _main_body_mask(b_pos, b_mass)
     b_pos = b_pos[mb]
     b_mass = b_mass[mb]
     b_vel = b_vel[mb]
@@ -1940,7 +2010,8 @@ def _apophis_time_groups(
     Returns ``(groups, time_of_key, n_apophis_sinks)`` where ``groups[key]`` is a float64 array
     of shape ``(N_particles, 7)`` with columns ``[x, y, z, mass, vx, vy, vz]`` (time dropped —
     it is the dict key). By default only PHANTOM **dump-grid** rows are kept (not hydro substeps);
-    set ``METRICS_LEGACY_SUBSTEPS=1`` to retain every unique timestamp.
+    set ``METRICS_LEGACY_SUBSTEPS=1`` to retain every unique timestamp (regression/debug only —
+    sweep runs call ``_use_fast_metrics_defaults()`` first).
     """
     # Collect the latest .ev file per Apophis sink ID; cache sort keys (avoids double regex).
     sort_cache: Dict[Path, Tuple[int, str]] = {}
@@ -2063,6 +2134,25 @@ def _spin_in_time_window(
     raise ValueError(f"unknown time_relation: {time_relation!r}")
 
 
+def _dump_in_any_spin_window(
+    t: float,
+    *,
+    apophis_only: bool,
+    t_ca: Optional[float],
+    utime: Optional[float],
+) -> bool:
+    """True when ``t`` can contribute to at least one spin metric (union of spin windows)."""
+    if apophis_only:
+        return _spin_in_time_window(t, "all", None)
+    if t_ca is None or utime is None or utime <= 0.0:
+        return False
+    return (
+        _spin_in_time_window(t, "intrinsic_early", t_ca, utime=utime)
+        or _spin_in_time_window(t, "approach_pre_ca", t_ca, utime=utime)
+        or _spin_in_time_window(t, "after_ca", t_ca)
+    )
+
+
 def _mean_spin_from_timed_periods(
     timed_periods: List[Tuple[float, float]],
     *,
@@ -2118,17 +2208,24 @@ def _extract_dem_metrics_bundle(
     intrinsic_periods: List[Tuple[float, float]] = []
     approach_periods: List[Tuple[float, float]] = []
     post_periods: List[Tuple[float, float]] = []
+    spin_enabled = apophis_only or t_ca is not None
 
     for key in sorted(_groups, key=lambda k: _time_of_key[k]):
         t = _time_of_key[key]
         arr = _groups[key]
-        rg_initial, disp_peak, unbound_peak = _update_breakup_peaks(
-            arr, rg_initial, disp_peak, unbound_peak
+        do_spin = spin_enabled and _dump_in_any_spin_window(
+            t, apophis_only=apophis_only, t_ca=t_ca, utime=utime
         )
-        if len(arr) < 2:
-            continue
-        period = _spin_period_hr_bound_rubble(arr, utime, spin_axis=spin_axis)
-        if not math.isfinite(period):
+        rg_initial, disp_peak, unbound_peak, period = _process_dem_dump_frame(
+            arr,
+            rg_initial,
+            disp_peak,
+            unbound_peak,
+            utime=utime,
+            spin_axis=spin_axis,
+            compute_spin=do_spin,
+        )
+        if len(arr) < 2 or not math.isfinite(period):
             continue
         if apophis_only:
             if _spin_in_time_window(t, "all", None):
@@ -2207,14 +2304,24 @@ def _extract_mean_spin_period_hr(
                 return float("nan")
 
     timed_periods: List[Tuple[float, float]] = []
+    rg_initial: Optional[float] = None
     for key in sorted(_groups, key=lambda k: _time_of_key[k]):
         t = _time_of_key[key]
-        if not _spin_in_time_window(t, time_relation, t_ca, utime=utime):
-            continue
         arr = _groups[key]
         if len(arr) < 2:
             continue
-        period = _spin_period_hr_bound_rubble(arr, utime, spin_axis=spin_axis)
+        in_window = _spin_in_time_window(t, time_relation, t_ca, utime=utime)
+        rg_initial, _, _, period = _process_dem_dump_frame(
+            arr,
+            rg_initial,
+            float("nan"),
+            float("nan"),
+            utime=utime,
+            spin_axis=spin_axis,
+            compute_spin=in_window,
+        )
+        if not in_window:
+            continue
         if math.isfinite(period):
             timed_periods.append((t, period))
 
@@ -2485,6 +2592,8 @@ def run_one_case(
         param_columns.update(in_param_cols)
         run_command([str(phantom_bin), f"{prefix}.in"] + maxp_flag, cwd=run_dir, log_path=run_dir / "phantom.log")
 
+        # Dump-grid metrics only (fast path); ignore METRICS_LEGACY_SUBSTEPS from the shell.
+        _use_fast_metrics_defaults()
         # Read all Apophis sink .ev files once and share across all metric functions.
         _groups, _time_of_key, _n_sinks = _apophis_time_groups(run_dir, prefix, apophis_sink_id)
         _apophis_only = skip_closest_approach(sample)

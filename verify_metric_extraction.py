@@ -5,8 +5,9 @@ Usage:
   python3 sobol/verify_metric_extraction.py --run-dir sobol_mass_runs/.../run_0001
   python3 sobol/verify_metric_extraction.py --run-dir ... --prefix sobol --apophis-sink-id 11
 
-Recomputes metrics with the current (dump-time) path and, unless --skip-legacy,
-with METRICS_LEGACY_SUBSTEPS=1. Optionally compares to a row in sobol_mass_outputs.csv.
+Recomputes metrics with the current (dump-time) path. Pass ``--legacy`` to also run a slow
+substep-dense comparison (``METRICS_LEGACY_SUBSTEPS=1``) for regression against pre-2026 CSVs.
+Optionally compares to a row in sobol_mass_outputs.csv.
 """
 
 from __future__ import annotations
@@ -17,7 +18,9 @@ import math
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
+
+import numpy as np
 
 _REPO = Path(__file__).resolve().parents[1]
 if str(_REPO) not in sys.path:
@@ -28,6 +31,11 @@ from sobol.run_mass_sobol_phantom import (  # noqa: E402
     _earth_apophis_closest_approach,
     _extract_dem_metrics_bundle,
     _extract_mean_spin_period_hr,
+    _main_body_mask,
+    _mass_weighted_rg,
+    _parse_spin_axis_from_setup_log,
+    _parse_utime_from_phantom_log,
+    _use_fast_metrics_defaults,
     extract_breakup_metrics,
 )
 
@@ -54,7 +62,7 @@ def _metrics_for_run(
     if legacy_substeps:
         os.environ["METRICS_LEGACY_SUBSTEPS"] = "1"
     else:
-        os.environ.pop("METRICS_LEGACY_SUBSTEPS", None)
+        _use_fast_metrics_defaults()
 
     groups, time_of_key, n_sinks = _apophis_time_groups(run_dir, prefix, apophis_sink_id)
     out: Dict[str, Any] = {"n_dump_groups": len(groups), "n_sinks": n_sinks}
@@ -158,6 +166,86 @@ def _load_csv_expectations(csv_path: Path, run_dir: Path) -> Dict[str, float]:
     return {}
 
 
+def _spin_grain_fractions_per_dump(
+    run_dir: Path,
+    prefix: str,
+    apophis_sink_id: int,
+    groups: Dict[str, np.ndarray],
+    time_of_key: Dict[str, float],
+) -> List[Tuple[float, float]]:
+    """Per-dump (time_code, spin_grain_fraction) using the same masks as metric extraction."""
+    utime = _parse_utime_from_phantom_log(run_dir / "phantom.log")
+    if utime is None:
+        return []
+    rg_initial: Optional[float] = None
+    out: List[Tuple[float, float]] = []
+    for key in sorted(groups, key=lambda k: time_of_key[k]):
+        arr = groups[key]
+        if len(arr) < 2:
+            continue
+        pos = arr[:, :3]
+        mass = arr[:, 3]
+        vel = arr[:, 4:7]
+        m_tot = float(mass.sum())
+        if m_tot <= 0.0:
+            continue
+        rg = _mass_weighted_rg(pos, mass)
+        if rg_initial is None:
+            rg_initial = rg
+            rg_ratio = 1.0
+        elif rg_initial > 0.0:
+            rg_ratio = rg / rg_initial
+        else:
+            rg_ratio = 1.0
+        mb_all = _main_body_mask(pos, mass, rg_ratio=rg_ratio)
+        rcom = (pos * mass[:, None]).sum(0) / m_tot
+        dv = vel - (vel * mass[:, None]).sum(0) / m_tot
+        dr = pos - rcom
+        r = np.sqrt((dr * dr).sum(1))
+        v2 = (dv * dv).sum(1)
+        safe_r = np.where(r > 0.0, r, 1.0)
+        eps = np.where(r > 0.0, 0.5 * v2 - m_tot / safe_r, -1.0)
+        bound_mask = eps <= 0.0
+        n_spin = int(mb_all[bound_mask].sum())
+        out.append((time_of_key[key], n_spin / len(pos)))
+    return out
+
+
+def _print_dump_stats(
+    run_dir: Path,
+    prefix: str,
+    apophis_sink_id: int,
+    groups: Dict[str, np.ndarray],
+    time_of_key: Dict[str, float],
+) -> Dict[str, float]:
+    fracs = _spin_grain_fractions_per_dump(
+        run_dir, prefix, apophis_sink_id, groups, time_of_key
+    )
+    if not fracs:
+        print("  dump-stats: (no dumps)")
+        return {}
+    utime = _parse_utime_from_phantom_log(run_dir / "phantom.log")
+    values = np.asarray([f for _, f in fracs], dtype=np.float64)
+    sample_idx = np.linspace(0, len(fracs) - 1, min(6, len(fracs)), dtype=int)
+    print("  dump-stats spin_grain_fraction (sampled dumps):")
+    for i in sample_idx:
+        t, frac = fracs[int(i)]
+        t_hr = t * utime / 3600.0 if utime else float("nan")
+        print(f"    t={t_hr:.2f} hr  spin_N/N={frac:.3f}")
+    stats = {
+        "spin_grain_frac_min": float(values.min()),
+        "spin_grain_frac_max": float(values.max()),
+        "spin_grain_frac_median": float(np.median(values)),
+    }
+    print(
+        f"  spin_grain_fraction min/median/max: "
+        f"{stats['spin_grain_frac_min']:.3f} / "
+        f"{stats['spin_grain_frac_median']:.3f} / "
+        f"{stats['spin_grain_frac_max']:.3f}"
+    )
+    return stats
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Verify DEM metric extraction on a run dir.")
     parser.add_argument("--run-dir", type=Path, required=True)
@@ -166,7 +254,27 @@ def main() -> int:
     parser.add_argument("--apophis-sink-id", type=int, default=11)
     parser.add_argument("--apophis-only", action="store_true")
     parser.add_argument("--csv", type=Path, default=None, help="sobol_mass_outputs.csv row to compare")
-    parser.add_argument("--skip-legacy", action="store_true")
+    parser.add_argument(
+        "--legacy",
+        action="store_true",
+        help="Also run slow substep-dense metrics (METRICS_LEGACY_SUBSTEPS=1) for regression",
+    )
+    parser.add_argument(
+        "--dump-stats",
+        action="store_true",
+        help="Print per-dump spin grain fraction audit (main-body mask after bound gate)",
+    )
+    parser.add_argument(
+        "--expect-intact",
+        action="store_true",
+        help="Assert unbound_fraction < 0.05 and median spin grain fraction >= 0.80",
+    )
+    parser.add_argument(
+        "--expect-unbound-min",
+        type=float,
+        default=None,
+        help="Assert unbound_fraction >= this value (breakup regression runs)",
+    )
     args = parser.parse_args()
 
     run_dir = args.run_dir.resolve()
@@ -225,6 +333,39 @@ def main() -> int:
             return 1
     print("OK: bundle matches standalone extractors")
 
+    groups, time_of_key, _ = _apophis_time_groups(
+        run_dir, args.prefix, args.apophis_sink_id
+    )
+    dump_stats: Dict[str, float] = {}
+    if args.dump_stats or args.expect_intact:
+        dump_stats = _print_dump_stats(
+            run_dir, args.prefix, args.apophis_sink_id, groups, time_of_key
+        )
+
+    if args.expect_intact:
+        unb = new.get("unbound_fraction", float("nan"))
+        if not (math.isfinite(unb) and unb < 0.05):
+            print(f"ERROR: --expect-intact unbound_fraction={unb} (want < 0.05)", file=sys.stderr)
+            return 1
+        med = dump_stats.get("spin_grain_frac_median", 0.0)
+        if med < 0.80:
+            print(
+                f"ERROR: --expect-intact median spin_grain_fraction={med:.3f} (want >= 0.80)",
+                file=sys.stderr,
+            )
+            return 1
+        print("OK: --expect-intact passed")
+
+    if args.expect_unbound_min is not None:
+        unb = new.get("unbound_fraction", float("nan"))
+        if not (math.isfinite(unb) and unb >= args.expect_unbound_min):
+            print(
+                f"ERROR: unbound_fraction={unb} (want >= {args.expect_unbound_min})",
+                file=sys.stderr,
+            )
+            return 1
+        print(f"OK: unbound_fraction >= {args.expect_unbound_min}")
+
     if args.csv:
         expected = _load_csv_expectations(args.csv.resolve(), run_dir)
         if not expected:
@@ -250,7 +391,7 @@ def main() -> int:
                 else:
                     print(f"OK: {key} matches CSV within rtol={rtol}")
 
-    if not args.skip_legacy:
+    if args.legacy:
         legacy = _metrics_for_run(
             run_dir,
             args.prefix,
