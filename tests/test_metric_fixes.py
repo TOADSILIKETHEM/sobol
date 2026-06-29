@@ -278,3 +278,30 @@ def test_load_batch_spin30_skips_blank_intrinsic(tmp_path):
 
     data = ps30.load_batch(csv_path)
     assert len(data["align"]) == 1, f"Expected 1 valid row (blank intrinsic skipped), got {len(data['align'])}"
+
+
+# ── Task 4: hard-coded kmin_obj path ────────────────────────────────────────
+
+def test_load_obj_earth_opposite_uses_latest_kmin_batch(tmp_path):
+    """load_obj_earth_opposite must use the LATEST kmin_obj batch, not a fixed timestamp."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent.parent / "Analysis"))
+    import plot_spin_disruption_threshold as psd
+
+    runs_root = tmp_path / "sobol_mass_runs"
+    # Create two fake kmin_obj batches — old and new
+    for ts in ("sobol_20260611_172636", "sobol_20260701_090000"):
+        batch_dir = runs_root / f"{ts}_flyby_spin_torque_period_kmin_obj"
+        batch_dir.mkdir(parents=True)
+        fieldnames = ["status", "apophis_spin_torque_align_deg", "apophis_spin_period", "dispersion_ratio"]
+        rows = [{"status": "ok", "apophis_spin_torque_align_deg": "170.0",
+                 "apophis_spin_period": "2.0", "dispersion_ratio": "1.5"}]
+        with (batch_dir / "sobol_mass_outputs.csv").open("w", newline="") as f:
+            w = csv_mod.DictWriter(f, fieldnames=fieldnames)
+            w.writeheader()
+            w.writerows(rows)
+
+    # Call with explicit repo override (tmp_path)
+    spin, disp = psd.load_obj_earth_opposite(tmp_path)
+    # Should have one point (from the latest kmin batch, NOT from fine-dt batches which don't exist)
+    assert len(spin) == 1, f"Expected 1 row from latest kmin batch, got {len(spin)}"

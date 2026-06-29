@@ -64,13 +64,13 @@ def load_obj_earth_opposite(repo: Path) -> tuple[np.ndarray, np.ndarray]:
                 spin.append(s)
                 disp.append(d)
 
-    kmin_csv = (
-        repo
-        / "sobol_mass_runs/sobol_20260611_172636_flyby_spin_torque_period_kmin_obj/"
-        "sobol_mass_outputs.csv"
+    kmin_matches = sorted(
+        (repo / "sobol_mass_runs").glob(
+            "sobol_*_flyby_spin_torque_period_kmin_obj/sobol_mass_outputs.csv"
+        )
     )
-    if kmin_csv.exists():
-        with kmin_csv.open(newline="") as f:
+    if kmin_matches:
+        with kmin_matches[-1].open(newline="") as f:
             for row in csv.DictReader(f):
                 if row.get("status") != "ok":
                     continue
