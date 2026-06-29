@@ -27,14 +27,18 @@ if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
 from sobol.run_mass_sobol_phantom import (  # noqa: E402
+    SPIN_INTRINSIC_MAX_HOURS,
     _apophis_time_groups,
     _earth_apophis_closest_approach,
     _extract_dem_metrics_bundle,
     _extract_mean_spin_period_hr,
+    _intrinsic_spin_dump_intact,
     _main_body_mask,
     _mass_weighted_rg,
     _parse_spin_axis_from_setup_log,
     _parse_utime_from_phantom_log,
+    _process_dem_dump_frame,
+    _spin_in_time_window,
     _use_fast_metrics_defaults,
     extract_breakup_metrics,
 )
@@ -107,7 +111,7 @@ def _metrics_for_run(
             run_dir,
             prefix,
             apophis_sink_id,
-            time_relation="all",
+            time_relation="intrinsic_early_absolute",
             skip_earliest_in_window=True,
             **grp_kw,
         )
@@ -246,6 +250,53 @@ def _print_dump_stats(
     return stats
 
 
+def _print_spin_timeline(
+    run_dir: Path,
+    prefix: str,
+    apophis_sink_id: int,
+    groups: Dict[str, np.ndarray],
+    time_of_key: Dict[str, float],
+    *,
+    apophis_only: bool,
+    t_ca: Optional[float],
+) -> None:
+    """Per-dump spin period, dispersion, unbound, and intrinsic-window gate status."""
+    utime = _parse_utime_from_phantom_log(run_dir / "phantom.log")
+    if utime is None:
+        print("  spin-timeline: (no utime in phantom.log)")
+        return
+    spin_axis = _parse_spin_axis_from_setup_log(run_dir / "setup.log")
+    intrinsic_rel = "intrinsic_early_absolute" if apophis_only else "intrinsic_early"
+    print(
+        f"  spin-timeline (intrinsic window: first {SPIN_INTRINSIC_MAX_HOURS:g} h, "
+        f"intact disp < 1.15, unbound < 1%):"
+    )
+    print("    t_hr    period_hr  rg_ratio  unbound%  in_win  intact")
+    rg_initial: Optional[float] = None
+    for key in sorted(groups, key=lambda k: time_of_key[k]):
+        t = time_of_key[key]
+        arr = groups[key]
+        if len(arr) < 2:
+            continue
+        in_win = _spin_in_time_window(t, intrinsic_rel, t_ca, utime=utime)
+        rg_initial, _, _, period, rg_ratio, unbound_frac = _process_dem_dump_frame(
+            arr,
+            rg_initial,
+            float("nan"),
+            float("nan"),
+            utime=utime,
+            spin_axis=spin_axis,
+            compute_spin=True,
+        )
+        t_hr = t * utime / 3600.0
+        intact = _intrinsic_spin_dump_intact(rg_ratio, unbound_frac)
+        period_s = f"{period:.4f}" if math.isfinite(period) else "nan"
+        print(
+            f"    {t_hr:6.3f}  {period_s:>9}  {rg_ratio:8.4f}  "
+            f"{100.0 * unbound_frac:7.3f}  {str(in_win):5}  {str(intact):5}"
+        )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Verify DEM metric extraction on a run dir.")
     parser.add_argument("--run-dir", type=Path, required=True)
@@ -263,6 +314,11 @@ def main() -> int:
         "--dump-stats",
         action="store_true",
         help="Print per-dump spin grain fraction audit (main-body mask after bound gate)",
+    )
+    parser.add_argument(
+        "--spin-timeline",
+        action="store_true",
+        help="Print per-dump spin period, dispersion, unbound, and intrinsic gate status",
     )
     parser.add_argument(
         "--expect-intact",
@@ -309,6 +365,10 @@ def main() -> int:
         if key in new:
             print(f"  {key}: {new[key]:.12g}")
 
+    if "dispersion_ratio" not in new:
+        print(f"  Non-DEM or single-sink run (n_sinks={new.get('n_sinks')}), skipping metric validation")
+        return 0
+
     if not _finite_close(new["dispersion_ratio"], new["dispersion_ratio_standalone"], 1e-12):
         print("ERROR: bundle vs standalone dispersion_ratio mismatch", file=sys.stderr)
         return 1
@@ -336,6 +396,21 @@ def main() -> int:
     groups, time_of_key, _ = _apophis_time_groups(
         run_dir, args.prefix, args.apophis_sink_id
     )
+    t_ca_timeline: Optional[float] = None
+    if not apophis_only:
+        _, _, t_ca_timeline = _earth_apophis_closest_approach(
+            run_dir, args.prefix, args.earth_sink_id, args.apophis_sink_id
+        )
+    if args.spin_timeline:
+        _print_spin_timeline(
+            run_dir,
+            args.prefix,
+            args.apophis_sink_id,
+            groups,
+            time_of_key,
+            apophis_only=apophis_only,
+            t_ca=t_ca_timeline,
+        )
     dump_stats: Dict[str, float] = {}
     if args.dump_stats or args.expect_intact:
         dump_stats = _print_dump_stats(

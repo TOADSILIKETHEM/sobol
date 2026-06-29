@@ -125,3 +125,51 @@ def test_spin_period_hr_bound_rubble_retrograde():
         "check that omega_code = abs(w) in the function body"
     )
     assert period > 0.0
+
+
+# ── Task 2: verify_metric_extraction crash on non-DEM runs ──────────────────
+
+import verify_metric_extraction as vme
+
+
+def test_metrics_for_run_single_sink_returns_no_dispersion_key(tmp_path):
+    """_metrics_for_run with n_sinks < 2 must not include dispersion_ratio key."""
+    # Create a minimal fake run dir with a single-sink .ev file.
+    # Content format: header + one row for sink ID 11 only.
+    ev_content = (
+        "# time x y z mass vx vy vz spinx spiny spinz\n"
+        "1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 0.0 0.0 0.0\n"
+    )
+    run_dir = tmp_path / "run_0001"
+    run_dir.mkdir()
+    ev_file = run_dir / "sobol_00011.ev"
+    ev_file.write_text(ev_content)
+
+    result = vme._metrics_for_run(
+        run_dir, "sobol", earth_sink_id=4, apophis_sink_id=11, apophis_only=True,
+        legacy_substeps=False
+    )
+    assert "dispersion_ratio" not in result, (
+        f"Expected no 'dispersion_ratio' key for single-sink run, got keys: {list(result)}"
+    )
+
+
+def test_main_does_not_crash_on_single_sink_run(tmp_path):
+    """verify_metric_extraction main() must exit 0 (not KeyError) for non-DEM runs.
+
+    Patches _metrics_for_run to return a non-DEM result (no dispersion_ratio key)
+    so the test is independent of .ev file parsing format.
+    """
+    run_dir = tmp_path / "run_0001"
+    run_dir.mkdir()
+
+    with patch.object(vme, "_metrics_for_run", return_value={"n_dump_groups": 0, "n_sinks": 1}):
+        orig_argv = sys.argv[:]
+        sys.argv = ["verify_metric_extraction.py", "--run-dir", str(run_dir), "--apophis-only"]
+        try:
+            exit_code = vme.main()
+        except SystemExit as e:
+            exit_code = e.code
+        finally:
+            sys.argv = orig_argv
+    assert exit_code == 0, f"Expected exit 0 for non-DEM run, got {exit_code}"
