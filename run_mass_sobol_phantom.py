@@ -1334,7 +1334,8 @@ def canonical_sweep_descriptor(args: argparse.Namespace) -> str:
     if getattr(args, "spin_period_fixed", None) is not None:
         parts.append(f"spin_period_fixed={args.spin_period_fixed}")
     spin_list = getattr(args, "spin_period_list", None)
-    parts.append(f"spin_period_list={spin_list}")
+    if spin_list is not None:
+        parts.append(f"spin_period_list={spin_list}")
     parts.append(f"vary_use_dem={args.vary_use_dem}")
     parts.append(f"vary_use_shape_crop={args.vary_use_shape_crop}")
     parts.append(f"vary_apophis_only={args.vary_apophis_only}")

@@ -34,7 +34,6 @@ def test_spin_period_hr_retrograde():
     """
     # Construct a toy rubble pile with ~5 grains in retrograde rotation.
     # Spin axis n = +z. Angular velocity ω = -1.0 code units (retrograde).
-    rng = np.random.default_rng(42)
     n_grains = 10
     # Positions on unit circle in x–y plane
     theta = np.linspace(0, 2 * np.pi, n_grains, endpoint=False)
@@ -99,3 +98,30 @@ def test_dump_in_any_spin_window_returns_false_apophis_only_utime_none():
         t=1.0, apophis_only=True, t_ca=None, utime=None
     )
     assert result is False
+
+
+def test_spin_period_hr_bound_rubble_retrograde():
+    """_spin_period_hr_bound_rubble must return a finite positive period for retrograde spin.
+
+    Without the abs(w) fix in the function body, this test fails because
+    _period_hr_from_omega_code returns NaN for negative omega_code.
+    """
+    # 10 grains on unit circle, retrograde rotation (omega = -1 z-hat)
+    n_grains = 10
+    theta = np.linspace(0, 2 * np.pi, n_grains, endpoint=False)
+    r = 0.5
+    pos = np.column_stack([r * np.cos(theta), r * np.sin(theta), np.zeros(n_grains)])
+    omega_true = np.array([0.0, 0.0, -1.0])
+    vel = np.cross(omega_true, pos)
+    mass = np.ones(n_grains)
+    # _spin_period_hr_bound_rubble expects arr with shape (N, 7): columns [x, y, z, mass, vx, vy, vz]
+    ev = np.column_stack([pos, mass, vel])
+    assert ev.shape == (n_grains, 7), f"Expected shape ({n_grains}, 7), got {ev.shape}"
+    spin_axis = np.array([0.0, 0.0, 1.0])  # +z axis
+    utime = 4.0  # code-time units per hour (arbitrary)
+    period = runner._spin_period_hr_bound_rubble(ev, utime, spin_axis=spin_axis)
+    assert math.isfinite(period), (
+        f"_spin_period_hr_bound_rubble returned {period} for retrograde spin — "
+        "check that omega_code = abs(w) in the function body"
+    )
+    assert period > 0.0
