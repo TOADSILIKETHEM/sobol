@@ -15,6 +15,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
+def _to_float(val: str) -> "float | None":
+    s = val.strip()
+    return float(s) if s else None
+
+
 def load_spin_disp(csv_path: Path) -> tuple[np.ndarray, np.ndarray]:
     spin: list[float] = []
     disp: list[float] = []
@@ -22,8 +27,12 @@ def load_spin_disp(csv_path: Path) -> tuple[np.ndarray, np.ndarray]:
         for row in csv.DictReader(f):
             if row.get("status") != "ok":
                 continue
-            spin.append(float(row["apophis_spin_period"]))
-            disp.append(float(row["dispersion_ratio"]))
+            s = _to_float(row["apophis_spin_period"])
+            d = _to_float(row["dispersion_ratio"])
+            if s is None or d is None:
+                continue
+            spin.append(s)
+            disp.append(d)
     order = np.argsort(spin)
     return np.asarray(spin)[order], np.asarray(disp)[order]
 
@@ -33,21 +42,27 @@ def load_obj_earth_opposite(repo: Path) -> tuple[np.ndarray, np.ndarray]:
     spin: list[float] = []
     disp: list[float] = []
 
-    fine_dt_batches = [
-        "sobol_20260607_122950_torque_align_obj_fine_dt_p155_np1000",
-        "sobol_20260607_170345_torque_align_obj_fine_dt_p1p6hr_np1000",
-        "sobol_20260607_160805_torque_align_obj_fine_dt_p2hr_np1000",
+    fine_dt_suffixes = [
+        "torque_align_obj_fine_dt_p155_np1000",
+        "torque_align_obj_fine_dt_p1p6hr_np1000",
+        "torque_align_obj_fine_dt_p2hr_np1000",
     ]
-    for batch in fine_dt_batches:
-        csv_path = repo / "sobol_mass_runs" / batch / "sobol_mass_outputs.csv"
-        if not csv_path.exists():
+    runs_root = repo / "sobol_mass_runs"
+    for suffix in fine_dt_suffixes:
+        matches = sorted(runs_root.glob(f"sobol_*_{suffix}/sobol_mass_outputs.csv"))
+        if not matches:
             continue
+        csv_path = matches[-1]
         with csv_path.open(newline="") as f:
             for row in csv.DictReader(f):
                 if row.get("status") != "ok":
                     continue
-                spin.append(float(row["apophis_spin_period"]))
-                disp.append(float(row["dispersion_ratio"]))
+                s = _to_float(row["apophis_spin_period"])
+                d = _to_float(row["dispersion_ratio"])
+                if s is None or d is None:
+                    continue
+                spin.append(s)
+                disp.append(d)
 
     kmin_csv = (
         repo
@@ -59,10 +74,15 @@ def load_obj_earth_opposite(repo: Path) -> tuple[np.ndarray, np.ndarray]:
             for row in csv.DictReader(f):
                 if row.get("status") != "ok":
                     continue
-                align = float(row["apophis_spin_torque_align_deg"])
-                if 160.0 <= align <= 180.0:
-                    spin.append(float(row["apophis_spin_period"]))
-                    disp.append(float(row["dispersion_ratio"]))
+                a = _to_float(row["apophis_spin_torque_align_deg"])
+                if a is None or not (160.0 <= a <= 180.0):
+                    continue
+                s = _to_float(row["apophis_spin_period"])
+                d = _to_float(row["dispersion_ratio"])
+                if s is None or d is None:
+                    continue
+                spin.append(s)
+                disp.append(d)
 
     order = np.argsort(spin)
     return np.asarray(spin)[order], np.asarray(disp)[order]
@@ -131,10 +151,8 @@ def main() -> None:
     parser.add_argument(
         "--obj-noearth-csv",
         type=Path,
-        default=Path(
-            "sobol_mass_runs/sobol_20260614_171414_noearth_obj_ctrl_spin_1p5_2hr/"
-            "sobol_mass_outputs.csv"
-        ),
+        default=None,
+        help="OBJ no-Earth control CSV (default: latest noearth_obj_ctrl_spin_1p5_2hr batch)",
     )
     parser.add_argument(
         "-o",
@@ -149,7 +167,7 @@ def main() -> None:
 
     sphere_kc1e7 = (repo / args.sphere_kc1e7_csv).resolve()
     sphere_kc0 = resolve_batch(repo, "spin_kc0_12hr", args.sphere_kc0_csv)
-    obj_noearth = (repo / args.obj_noearth_csv).resolve()
+    obj_noearth = resolve_batch(repo, "noearth_obj_ctrl_spin_1p5_2hr", args.obj_noearth_csv)
 
     spin_s1, disp_s1 = load_spin_disp(sphere_kc1e7)
     spin_s0, disp_s0 = load_spin_disp(sphere_kc0)

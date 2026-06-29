@@ -173,3 +173,108 @@ def test_main_does_not_crash_on_single_sink_run(tmp_path):
         finally:
             sys.argv = orig_argv
     assert exit_code == 0, f"Expected exit 0 for non-DEM run, got {exit_code}"
+
+
+# ── Task 3: plot script blank-cell crash ────────────────────────────────────
+
+import io
+import csv as csv_mod
+
+def _make_csv_with_blank(fieldnames, row_data):
+    """Return a StringIO CSV with given fieldnames and one row (values may be '')."""
+    buf = io.StringIO()
+    w = csv_mod.DictWriter(buf, fieldnames=fieldnames)
+    w.writeheader()
+    w.writerow(row_data)
+    buf.seek(0)
+    return buf
+
+
+def test_to_float_blank_returns_none():
+    """_to_float contract: '' → None (no ValueError); '1.23' → 1.23.
+
+    Verified indirectly through load_spin_disp / load_batch tests below.
+    Direct contract test using the expected implementation:
+    """
+    def _to_float(val):
+        s = val.strip()
+        return float(s) if s else None
+
+    assert _to_float("") is None
+    assert _to_float("  ") is None
+    assert _to_float("1.234") == 1.234
+    assert _to_float("0") == 0.0
+
+
+def test_load_spin_disp_skips_blank_dispersion(tmp_path):
+    """plot_spin_disruption_threshold.load_spin_disp must skip rows with blank dispersion_ratio."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent.parent / "Analysis"))
+    import plot_spin_disruption_threshold as psd
+
+    csv_path = tmp_path / "test.csv"
+    fieldnames = ["status", "apophis_spin_period", "dispersion_ratio"]
+    rows = [
+        {"status": "ok", "apophis_spin_period": "2.0", "dispersion_ratio": "1.05"},
+        {"status": "ok", "apophis_spin_period": "1.5", "dispersion_ratio": ""},   # blank
+        {"status": "ok", "apophis_spin_period": "1.8", "dispersion_ratio": "1.12"},
+    ]
+    with csv_path.open("w", newline="") as f:
+        w = csv_mod.DictWriter(f, fieldnames=fieldnames)
+        w.writeheader()
+        w.writerows(rows)
+
+    spin, disp = psd.load_spin_disp(csv_path)
+    assert len(spin) == 2, f"Expected 2 valid rows (blank row skipped), got {len(spin)}"
+    assert set(spin.tolist()) == {1.8, 2.0}
+
+
+def test_load_batch_noearth_obj_skips_blank(tmp_path):
+    """plot_noearth_obj_ctrl_spin.load_batch must skip rows with blank dispersion_ratio."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent.parent / "Analysis"))
+    import plot_noearth_obj_ctrl_spin as pnoc
+
+    csv_path = tmp_path / "test.csv"
+    fieldnames = ["status", "run_id", "apophis_spin_period", "dispersion_ratio", "unbound_fraction"]
+    rows = [
+        {"status": "ok", "run_id": "1", "apophis_spin_period": "1.55", "dispersion_ratio": "8.83", "unbound_fraction": "0.163"},
+        {"status": "ok", "run_id": "2", "apophis_spin_period": "2.00", "dispersion_ratio": "", "unbound_fraction": ""},
+    ]
+    with csv_path.open("w", newline="") as f:
+        w = csv_mod.DictWriter(f, fieldnames=fieldnames)
+        w.writeheader()
+        w.writerows(rows)
+
+    data = pnoc.load_batch(csv_path)
+    assert len(data["spin"]) == 1, f"Expected 1 valid row, got {len(data['spin'])}"
+
+
+def test_load_batch_spin30_skips_blank_intrinsic(tmp_path):
+    """plot_flyby_spin30_torque_align.load_batch must skip rows with blank intrinsic spin."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent.parent / "Analysis"))
+    import plot_flyby_spin30_torque_align as ps30
+
+    csv_path = tmp_path / "test.csv"
+    fieldnames = [
+        "status", "apophis_spin_torque_align_deg",
+        "intrinsic_spin_period_hr", "approach_spin_period_hr",
+        "post_flyby_spin_period_hr", "dispersion_ratio", "unbound_fraction"
+    ]
+    rows = [
+        {"status": "ok", "apophis_spin_torque_align_deg": "45.0",
+         "intrinsic_spin_period_hr": "30.6", "approach_spin_period_hr": "30.7",
+         "post_flyby_spin_period_hr": "30.5", "dispersion_ratio": "1.02", "unbound_fraction": "0.0"},
+        {"status": "ok", "apophis_spin_torque_align_deg": "177.0",
+         "intrinsic_spin_period_hr": "",    # blank — disrupting run
+         "approach_spin_period_hr": "30.8",
+         "post_flyby_spin_period_hr": "30.9", "dispersion_ratio": "1.034", "unbound_fraction": "0.0"},
+    ]
+    with csv_path.open("w", newline="") as f:
+        w = csv_mod.DictWriter(f, fieldnames=fieldnames)
+        w.writeheader()
+        w.writerows(rows)
+
+    data = ps30.load_batch(csv_path)
+    assert len(data["align"]) == 1, f"Expected 1 valid row (blank intrinsic skipped), got {len(data['align'])}"

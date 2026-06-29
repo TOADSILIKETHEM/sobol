@@ -11,6 +11,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
+def _to_float(val: str) -> "float | None":
+    s = val.strip()
+    return float(s) if s else None
+
+
 def load_batch(csv_path: Path) -> dict[str, np.ndarray]:
     spin: list[float] = []
     disp: list[float] = []
@@ -20,10 +25,15 @@ def load_batch(csv_path: Path) -> dict[str, np.ndarray]:
         for row in csv.DictReader(f):
             if row.get("status") != "ok":
                 continue
+            s = _to_float(row["apophis_spin_period"])
+            d = _to_float(row["dispersion_ratio"])
+            u = _to_float(row["unbound_fraction"])
+            if s is None or d is None or u is None:
+                continue
             run_id.append(int(row["run_id"]))
-            spin.append(float(row["apophis_spin_period"]))
-            disp.append(float(row["dispersion_ratio"]))
-            unbound.append(float(row["unbound_fraction"]))
+            spin.append(s)
+            disp.append(d)
+            unbound.append(u)
     order = np.argsort(spin)
     return {
         "run_id": np.asarray(run_id)[order],
@@ -33,15 +43,24 @@ def load_batch(csv_path: Path) -> dict[str, np.ndarray]:
     }
 
 
+def resolve_batch_csv(repo: Path, label: str, explicit: Path | None) -> Path:
+    if explicit is not None:
+        return (repo / explicit).resolve()
+    matches = sorted(
+        (repo / "sobol_mass_runs").glob(f"sobol_*_{label}/sobol_mass_outputs.csv")
+    )
+    if not matches:
+        raise SystemExit(f"No batch found for label {label!r}")
+    return matches[-1].resolve()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--csv",
         type=Path,
-        default=Path(
-            "sobol_mass_runs/sobol_20260614_171414_noearth_obj_ctrl_spin_1p5_2hr/"
-            "sobol_mass_outputs.csv"
-        ),
+        default=None,
+        help="Batch CSV (default: latest noearth_obj_ctrl_spin_1p5_2hr)",
     )
     parser.add_argument(
         "-o",
@@ -51,7 +70,7 @@ def main() -> None:
     )
     args = parser.parse_args()
     repo = Path(__file__).resolve().parents[2]
-    csv_path = (repo / args.csv).resolve()
+    csv_path = resolve_batch_csv(repo, "noearth_obj_ctrl_spin_1p5_2hr", args.csv)
     out = (repo / args.output).resolve()
     out.parent.mkdir(parents=True, exist_ok=True)
 

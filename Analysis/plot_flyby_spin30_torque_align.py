@@ -11,18 +11,31 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
+def _to_float(val: str) -> "float | None":
+    s = val.strip()
+    return float(s) if s else None
+
+
 def load_batch(csv_path: Path) -> dict[str, np.ndarray]:
     align, intr, app, post, disp, unb = [], [], [], [], [], []
     with csv_path.open(newline="") as f:
         for row in csv.DictReader(f):
             if row.get("status") != "ok":
                 continue
-            align.append(float(row["apophis_spin_torque_align_deg"]))
-            intr.append(float(row["intrinsic_spin_period_hr"]))
-            app.append(float(row["approach_spin_period_hr"]))
-            post.append(float(row["post_flyby_spin_period_hr"]))
-            disp.append(float(row["dispersion_ratio"]))
-            unb.append(float(row["unbound_fraction"]))
+            a = _to_float(row["apophis_spin_torque_align_deg"])
+            i = _to_float(row["intrinsic_spin_period_hr"])
+            ap = _to_float(row["approach_spin_period_hr"])
+            po = _to_float(row["post_flyby_spin_period_hr"])
+            d = _to_float(row["dispersion_ratio"])
+            u = _to_float(row["unbound_fraction"])
+            if any(v is None for v in (a, i, ap, po, d, u)):
+                continue
+            align.append(a)
+            intr.append(i)
+            app.append(ap)
+            post.append(po)
+            disp.append(d)
+            unb.append(u)
     order = np.argsort(align)
     return {
         k: np.asarray(v)[order]

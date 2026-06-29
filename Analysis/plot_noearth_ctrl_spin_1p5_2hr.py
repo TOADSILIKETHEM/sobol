@@ -11,6 +11,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
+def _to_float(val: str) -> "float | None":
+    s = val.strip()
+    return float(s) if s else None
+
+
 def load_batch(csv_path: Path) -> dict[str, np.ndarray]:
     spin: list[float] = []
     disp: list[float] = []
@@ -19,9 +24,14 @@ def load_batch(csv_path: Path) -> dict[str, np.ndarray]:
         for row in csv.DictReader(f):
             if row.get("status") != "ok":
                 continue
-            spin.append(float(row["apophis_spin_period"]))
-            disp.append(float(row["dispersion_ratio"]))
-            unbound.append(float(row["unbound_fraction"]))
+            s = _to_float(row["apophis_spin_period"])
+            d = _to_float(row["dispersion_ratio"])
+            u = _to_float(row["unbound_fraction"])
+            if s is None or d is None or u is None:
+                continue
+            spin.append(s)
+            disp.append(d)
+            unbound.append(u)
     order = np.argsort(spin)
     return {
         "spin": np.asarray(spin)[order],
