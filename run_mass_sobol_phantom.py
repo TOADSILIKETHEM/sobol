@@ -33,7 +33,10 @@ MAIN_BODY_INTACT_DISP_RATIO = 1.15
 MAIN_BODY_MIN_CLUSTER_FRAC = 0.50
 MAIN_BODY_LINK_FACTOR_INIT = 2.5
 MAIN_BODY_LINK_FACTOR_MAX = 40.0
-SPIN_INTRINSIC_MAX_HOURS = 24.0
+SPIN_INTRINSIC_MAX_HOURS = 6.0
+SPIN_INTRINSIC_MAX_DUMPS = 12
+SPIN_INTRINSIC_INTACT_DISP_RATIO = MAIN_BODY_INTACT_DISP_RATIO
+SPIN_INTRINSIC_MAX_UNBOUND_FRAC = 0.01
 SPIN_INTRINSIC_MAX_CA_FRACTION = 0.3
 SPIN_APPROACH_HOURS_BEFORE_CA = 24.0
 EARTH_SINK_ID_DEFAULT = 4
@@ -449,13 +452,37 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--kc-scale-ref-np",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "With --np-apophis-list and --kc-fixed: scale kc per run as "
+            "kc(np)=kc_fixed*(ref_np/np)^(1/3) so bulk cohesive strength σ_c≈kc/d "
+            "is held near the reference grain count (d∝np^(-1/3)). "
+            "Requires --kc-fixed."
+        ),
+    )
+    parser.add_argument(
         "--spin-period-fixed",
         type=float,
         default=None,
         metavar="HOURS",
         help=(
             "Fix apophis_spin_period (hours) for every run. "
-            "Mutually exclusive with --spin-period-min/--spin-period-max."
+            "Mutually exclusive with --spin-period-min/--spin-period-max and --spin-period-list."
+        ),
+    )
+    parser.add_argument(
+        "--spin-period-list",
+        nargs="+",
+        type=float,
+        default=None,
+        metavar="HOURS",
+        help=(
+            "With --np-apophis-list: run the Cartesian product of each np and each spin period "
+            "(outer loop np, inner loop spin). Mutually exclusive with --spin-period-fixed and "
+            "--spin-period-min/--spin-period-max."
         ),
     )
     # Timeframe parameters — fix for all runs or sweep as Sobol dimensions.
@@ -755,13 +782,35 @@ def validate_args(args: argparse.Namespace) -> None:
             raise ValueError("--kc-fixed is mutually exclusive with --kc-min and --kc-max")
         if args.kc_fixed < 0:
             raise ValueError("--kc-fixed must be >= 0")
+    ref_np = getattr(args, "kc_scale_ref_np", None)
+    if ref_np is not None:
+        if ref_np <= 0:
+            raise ValueError("--kc-scale-ref-np must be > 0")
+        if args.kc_fixed is None:
+            raise ValueError("--kc-scale-ref-np requires --kc-fixed")
+        if not getattr(args, "np_apophis_list", None):
+            raise ValueError("--kc-scale-ref-np requires --np-apophis-list")
+    spin_list = getattr(args, "spin_period_list", None)
     if getattr(args, "spin_period_fixed", None) is not None:
         if args.spin_period_min is not None or args.spin_period_max is not None:
             raise ValueError(
                 "--spin-period-fixed is mutually exclusive with --spin-period-min and --spin-period-max"
             )
+        if spin_list is not None:
+            raise ValueError("--spin-period-fixed is mutually exclusive with --spin-period-list")
         if args.spin_period_fixed <= 0:
             raise ValueError("--spin-period-fixed must be > 0")
+    if spin_list is not None:
+        if args.spin_period_min is not None or args.spin_period_max is not None:
+            raise ValueError(
+                "--spin-period-list is mutually exclusive with --spin-period-min and --spin-period-max"
+            )
+        if not np_list:
+            raise ValueError("--spin-period-list requires --np-apophis-list")
+        if len(spin_list) < 1:
+            raise ValueError("--spin-period-list requires at least one value")
+        if any(p <= 0 for p in spin_list):
+            raise ValueError("all --spin-period-list values must be > 0")
     _obl_az_active = (
         (args.spin_obliquity_min is not None and args.spin_obliquity_max is not None)
         or (args.spin_azimuth_min is not None and args.spin_azimuth_max is not None)
@@ -1036,16 +1085,41 @@ def apply_run_sample_to_in(in_path: Path, sample: RunSample) -> Dict[str, str]:
     return columns
 
 
-def _apply_fixed_run_sample_overrides(s: RunSample, args: argparse.Namespace) -> None:
+def _kc_for_np(args: argparse.Namespace, np_val: int) -> Optional[float]:
+    """Cohesive spring constant for a given grain count (σ_c-constant scaling optional)."""
+    if getattr(args, "kc_fixed", None) is None:
+        return None
+    ref_np = getattr(args, "kc_scale_ref_np", None)
+    if ref_np is not None:
+        return args.kc_fixed * (ref_np / np_val) ** (1.0 / 3.0)
+    return args.kc_fixed
+
+
+def _apply_fixed_run_sample_overrides(
+    s: RunSample, args: argparse.Namespace, *, np_val: Optional[int] = None
+) -> None:
     """Apply CLI fixed overrides that are not Sobol dimensions."""
     if getattr(args, "tmax_hours", None) is not None:
         s.tmax_hours = args.tmax_hours
     if getattr(args, "dtmax_hours", None) is not None:
         s.dtmax_hours = args.dtmax_hours
     if getattr(args, "kc_fixed", None) is not None:
-        s.kc_cgs = args.kc_fixed
+        n = np_val if np_val is not None else s.np_apophis
+        if n is not None:
+            s.kc_cgs = _kc_for_np(args, n)
+        else:
+            s.kc_cgs = args.kc_fixed
     if getattr(args, "spin_period_fixed", None) is not None:
         s.apophis_spin_period = args.spin_period_fixed
+
+
+def _apply_np_list_fixed_flags(s: RunSample, args: argparse.Namespace) -> None:
+    if args.use_dem_fixed is not None:
+        s.use_dem = args.use_dem_fixed == "true"
+    if args.use_shape_crop_fixed is not None:
+        s.use_shape_crop = args.use_shape_crop_fixed == "true"
+    if getattr(args, "apophis_only_fixed", None) is not None:
+        s.apophis_only = args.apophis_only_fixed == "true"
 
 
 def build_np_list_samples(args: argparse.Namespace) -> List[RunSample]:
@@ -1057,14 +1131,25 @@ def build_np_list_samples(args: argparse.Namespace) -> List[RunSample]:
     out: List[RunSample] = []
     for n in args.np_apophis_list:
         s = RunSample(np_apophis=n)
-        if args.use_dem_fixed is not None:
-            s.use_dem = args.use_dem_fixed == "true"
-        if args.use_shape_crop_fixed is not None:
-            s.use_shape_crop = args.use_shape_crop_fixed == "true"
-        if getattr(args, "apophis_only_fixed", None) is not None:
-            s.apophis_only = args.apophis_only_fixed == "true"
-        _apply_fixed_run_sample_overrides(s, args)
+        _apply_np_list_fixed_flags(s, args)
+        _apply_fixed_run_sample_overrides(s, args, np_val=n)
         out.append(s)
+    return out
+
+
+def build_np_spin_grid_samples(args: argparse.Namespace) -> List[RunSample]:
+    """Cartesian product of --np-apophis-list × --spin-period-list (np outer, spin inner)."""
+    spin_list = getattr(args, "spin_period_list", None)
+    if spin_list is None:
+        raise ValueError("build_np_spin_grid_samples requires --spin-period-list")
+    out: List[RunSample] = []
+    for n in args.np_apophis_list:
+        for p in spin_list:
+            s = RunSample(np_apophis=n, apophis_spin_period=p)
+            _apply_np_list_fixed_flags(s, args)
+            _apply_fixed_run_sample_overrides(s, args, np_val=n)
+            s.apophis_spin_period = p
+            out.append(s)
     return out
 
 
@@ -1131,6 +1216,10 @@ def sample_column_order(args: argparse.Namespace) -> List[str]:
     # np_apophis_list mode: particle count is the varying quantity, record it as a column.
     if getattr(args, "np_apophis_list", None):
         order.append("np_apophis")
+        if getattr(args, "spin_period_list", None):
+            order.append("apophis_spin_period")
+        if getattr(args, "kc_scale_ref_np", None) is not None:
+            order.append("kc_cgs")
     return order
 
 
@@ -1240,8 +1329,12 @@ def canonical_sweep_descriptor(args: argparse.Namespace) -> str:
             parts.append(f"{param}_fixed={fixed_val}")
     if getattr(args, "kc_fixed", None) is not None:
         parts.append(f"kc_fixed={args.kc_fixed}")
+    if getattr(args, "kc_scale_ref_np", None) is not None:
+        parts.append(f"kc_scale_ref_np={args.kc_scale_ref_np}")
     if getattr(args, "spin_period_fixed", None) is not None:
         parts.append(f"spin_period_fixed={args.spin_period_fixed}")
+    spin_list = getattr(args, "spin_period_list", None)
+    parts.append(f"spin_period_list={spin_list}")
     parts.append(f"vary_use_dem={args.vary_use_dem}")
     parts.append(f"vary_use_shape_crop={args.vary_use_shape_crop}")
     parts.append(f"vary_apophis_only={args.vary_apophis_only}")
@@ -1686,7 +1779,7 @@ def extract_breakup_metrics(
     disp_peak = float("nan")
     unbound_peak = float("nan")
     for key in sorted(_groups, key=lambda k: _time_of_key[k]):
-        rg_initial, disp_peak, unbound_peak, _ = _process_dem_dump_frame(
+        rg_initial, disp_peak, unbound_peak, _, _, _ = _process_dem_dump_frame(
             _groups[key], rg_initial, disp_peak, unbound_peak
         )
 
@@ -1713,22 +1806,24 @@ def _process_dem_dump_frame(
     utime: Optional[float] = None,
     spin_axis: Optional[Tuple[float, float, float]] = None,
     compute_spin: bool = True,
-) -> Tuple[Optional[float], float, float, float]:
+) -> Tuple[Optional[float], float, float, float, float, float]:
     """Incorporate one dump into breakup peaks and optionally spin period.
 
-    Returns ``(rg_initial, disp_peak, unbound_peak, spin_period_hr)``. Spin is ``nan`` when
-    ``utime`` is ``None`` or ``compute_spin`` is False. Main-body masking shares one FOF/intact
-    pass for unbound and spin when spin is computed.
+    Returns ``(rg_initial, disp_peak, unbound_peak, spin_period_hr, rg_ratio, unbound_frac)``.
+    Spin is ``nan`` when ``utime`` is ``None`` or ``compute_spin`` is False. Main-body masking
+    shares one FOF/intact pass for unbound and spin when spin is computed.
     """
     spin_period = float("nan")
+    rg_ratio = float("nan")
+    unbound_frac = float("nan")
     if len(arr) < 2:
-        return rg_initial, disp_peak, unbound_peak, spin_period
+        return rg_initial, disp_peak, unbound_peak, spin_period, rg_ratio, unbound_frac
     pos = arr[:, :3]
     mass = arr[:, 3]
     vel = arr[:, 4:7]
     m_tot = float(mass.sum())
     if m_tot <= 0.0:
-        return rg_initial, disp_peak, unbound_peak, spin_period
+        return rg_initial, disp_peak, unbound_peak, spin_period, rg_ratio, unbound_frac
 
     rg = _mass_weighted_rg(pos, mass)
     if rg_initial is None:
@@ -1747,6 +1842,7 @@ def _process_dem_dump_frame(
         if math.isnan(disp_peak) or ratio > disp_peak:
             disp_peak = ratio
     frac = unbound_mass / m_tot
+    unbound_frac = frac
     if math.isnan(unbound_peak) or frac > unbound_peak:
         unbound_peak = frac
 
@@ -1755,7 +1851,7 @@ def _process_dem_dump_frame(
             arr, utime, spin_axis=spin_axis, main_body_mask_all=mb_all
         )
 
-    return rg_initial, disp_peak, unbound_peak, spin_period
+    return rg_initial, disp_peak, unbound_peak, spin_period, rg_ratio, unbound_frac
 
 
 def _parse_spin_axis_from_setup_log(log_path: Path) -> Optional[Tuple[float, float, float]]:
@@ -1973,7 +2069,7 @@ def _spin_period_hr_bound_rubble(
         if abs(n_I_n) > 0.0 and math.isfinite(n_I_n):
             w = L_n / n_I_n
             if math.isfinite(w) and abs(w) > 0.0:
-                omega_code = w
+                omega_code = abs(w)
 
     if omega_code is None:
         # Least-squares: for each bound particle the 3 cross-product equations are
@@ -2104,6 +2200,16 @@ def _hours_to_code_time(hours: float, utime: float) -> float:
     return hours * 3600.0 / utime
 
 
+def _intrinsic_spin_dump_intact(rg_ratio: float, unbound_frac: float) -> bool:
+    """True when a dump is intact enough to contribute to intrinsic spin averaging."""
+    if not math.isfinite(rg_ratio) or not math.isfinite(unbound_frac):
+        return False
+    return (
+        rg_ratio < SPIN_INTRINSIC_INTACT_DISP_RATIO
+        and unbound_frac < SPIN_INTRINSIC_MAX_UNBOUND_FRAC
+    )
+
+
 def _spin_in_time_window(
     t: float,
     time_relation: str,
@@ -2131,6 +2237,10 @@ def _spin_in_time_window(
     if time_relation == "approach_pre_ca":
         t_approach_start = t_ca - _hours_to_code_time(SPIN_APPROACH_HOURS_BEFORE_CA, utime)
         return t_approach_start <= t < t_ca and not _sink_times_close(t, t_ca)
+    if time_relation == "intrinsic_early_absolute":
+        if utime is None or utime <= 0.0:
+            return False
+        return t < _hours_to_code_time(SPIN_INTRINSIC_MAX_HOURS, utime)
     raise ValueError(f"unknown time_relation: {time_relation!r}")
 
 
@@ -2143,7 +2253,7 @@ def _dump_in_any_spin_window(
 ) -> bool:
     """True when ``t`` can contribute to at least one spin metric (union of spin windows)."""
     if apophis_only:
-        return _spin_in_time_window(t, "all", None)
+        return _spin_in_time_window(t, "intrinsic_early_absolute", None, utime=utime)
     if t_ca is None or utime is None or utime <= 0.0:
         return False
     return (
@@ -2157,6 +2267,7 @@ def _mean_spin_from_timed_periods(
     timed_periods: List[Tuple[float, float]],
     *,
     skip_earliest_in_window: bool,
+    max_dumps: Optional[int] = None,
 ) -> float:
     if not timed_periods:
         return float("nan")
@@ -2164,9 +2275,10 @@ def _mean_spin_from_timed_periods(
         timed_periods = sorted(timed_periods, key=lambda tp: tp[0])[1:]
     if not timed_periods:
         return float("nan")
-    if len(timed_periods) > SPIN_MEAN_MAX_DUMPS:
+    dump_cap = max_dumps if max_dumps is not None else SPIN_MEAN_MAX_DUMPS
+    if len(timed_periods) > dump_cap:
         sorted_tp = sorted(timed_periods, key=lambda tp: tp[0])
-        idx = np.linspace(0, len(sorted_tp) - 1, SPIN_MEAN_MAX_DUMPS, dtype=int)
+        idx = np.linspace(0, len(sorted_tp) - 1, dump_cap, dtype=int)
         timed_periods = [sorted_tp[int(i)] for i in idx]
     periods = [p for _, p in timed_periods]
     return math.fsum(periods) / len(periods)
@@ -2189,8 +2301,6 @@ def _extract_dem_metrics_bundle(
         return float("nan"), float("nan"), float("nan"), float("nan"), float("nan")
 
     utime = _parse_utime_from_phantom_log(run_dir / "phantom.log")
-    if utime is None:
-        return float("nan"), float("nan"), float("nan"), float("nan"), float("nan")
 
     spin_axis = _parse_spin_axis_from_setup_log(run_dir / "setup.log")
 
@@ -2208,7 +2318,7 @@ def _extract_dem_metrics_bundle(
     intrinsic_periods: List[Tuple[float, float]] = []
     approach_periods: List[Tuple[float, float]] = []
     post_periods: List[Tuple[float, float]] = []
-    spin_enabled = apophis_only or t_ca is not None
+    spin_enabled = utime is not None and (apophis_only or t_ca is not None)
 
     for key in sorted(_groups, key=lambda k: _time_of_key[k]):
         t = _time_of_key[key]
@@ -2216,7 +2326,7 @@ def _extract_dem_metrics_bundle(
         do_spin = spin_enabled and _dump_in_any_spin_window(
             t, apophis_only=apophis_only, t_ca=t_ca, utime=utime
         )
-        rg_initial, disp_peak, unbound_peak, period = _process_dem_dump_frame(
+        rg_initial, disp_peak, unbound_peak, period, rg_ratio, unbound_frac = _process_dem_dump_frame(
             arr,
             rg_initial,
             disp_peak,
@@ -2228,18 +2338,22 @@ def _extract_dem_metrics_bundle(
         if len(arr) < 2 or not math.isfinite(period):
             continue
         if apophis_only:
-            if _spin_in_time_window(t, "all", None):
-                intrinsic_periods.append((t, period))
+            if _spin_in_time_window(t, "intrinsic_early_absolute", None, utime=utime):
+                if _intrinsic_spin_dump_intact(rg_ratio, unbound_frac):
+                    intrinsic_periods.append((t, period))
         else:
             if _spin_in_time_window(t, "intrinsic_early", t_ca, utime=utime):
-                intrinsic_periods.append((t, period))
+                if _intrinsic_spin_dump_intact(rg_ratio, unbound_frac):
+                    intrinsic_periods.append((t, period))
             if _spin_in_time_window(t, "approach_pre_ca", t_ca, utime=utime):
                 approach_periods.append((t, period))
             if _spin_in_time_window(t, "after_ca", t_ca):
                 post_periods.append((t, period))
 
     intrinsic_spin = _mean_spin_from_timed_periods(
-        intrinsic_periods, skip_earliest_in_window=True
+        intrinsic_periods,
+        skip_earliest_in_window=True,
+        max_dumps=SPIN_INTRINSIC_MAX_DUMPS,
     )
     approach_spin = float("nan")
     post_spin = float("nan")
@@ -2269,14 +2383,18 @@ def _extract_mean_spin_period_hr(
     """Mean bound-rubble spin period (hours) over a dump time window.
 
     ``time_relation`` is one of:
-    - ``intrinsic_early``: early plateau before tidal ramp-up (min of 24 h and 30% of way to CA).
+    - ``intrinsic_early``: early plateau before tidal ramp-up (min of ``SPIN_INTRINSIC_MAX_HOURS``
+      and 30% of way to CA), excluding the last 24 h before CA; intact dumps only.
+    - ``intrinsic_early_absolute``: first ``SPIN_INTRINSIC_MAX_HOURS`` of simulation time
+      (``apophis_only`` runs with no Earth sink); intact dumps only.
     - ``approach_pre_ca``: last ``SPIN_APPROACH_HOURS_BEFORE_CA`` strictly before closest approach.
     - ``after_ca``: dumps at or after closest approach (post-flyby tidal spin).
-    - ``all``: every dump (e.g. ``apophis_only`` runs with no Earth sink).
+    - ``all``: every dump (legacy; prefer ``intrinsic_early_absolute`` for no-Earth runs).
 
     When ``skip_earliest_in_window`` is True and at least three dumps fall in the window, the
     earliest-time dump is omitted so the mean is not dominated by immediate post-setup transients.
-    The mean uses at most ``SPIN_MEAN_MAX_DUMPS`` evenly spaced dumps in the window.
+    Intrinsic windows cap at ``SPIN_INTRINSIC_MAX_DUMPS`` evenly spaced dumps; other windows use
+    ``SPIN_MEAN_MAX_DUMPS``.
 
     ``t_ca``: if supplied, closest-approach time is not re-read from Earth/Apophis centroid files.
 
@@ -2305,13 +2423,14 @@ def _extract_mean_spin_period_hr(
 
     timed_periods: List[Tuple[float, float]] = []
     rg_initial: Optional[float] = None
+    intrinsic_relation = time_relation in ("intrinsic_early", "intrinsic_early_absolute")
     for key in sorted(_groups, key=lambda k: _time_of_key[k]):
         t = _time_of_key[key]
         arr = _groups[key]
         if len(arr) < 2:
             continue
         in_window = _spin_in_time_window(t, time_relation, t_ca, utime=utime)
-        rg_initial, _, _, period = _process_dem_dump_frame(
+        rg_initial, _, _, period, rg_ratio, unbound_frac = _process_dem_dump_frame(
             arr,
             rg_initial,
             float("nan"),
@@ -2322,11 +2441,15 @@ def _extract_mean_spin_period_hr(
         )
         if not in_window:
             continue
+        if intrinsic_relation and not _intrinsic_spin_dump_intact(rg_ratio, unbound_frac):
+            continue
         if math.isfinite(period):
             timed_periods.append((t, period))
 
     return _mean_spin_from_timed_periods(
-        timed_periods, skip_earliest_in_window=skip_earliest_in_window
+        timed_periods,
+        skip_earliest_in_window=skip_earliest_in_window,
+        max_dumps=SPIN_INTRINSIC_MAX_DUMPS if intrinsic_relation else None,
     )
 
 
@@ -2340,9 +2463,10 @@ def extract_intrinsic_spin_period_hr(
 ) -> float:
     """Mean spin period (hours) of settled rubble before tidal ramp-up.
 
-    For full solar-system runs, averages the early plateau (min of 24 h and 30% of way to CA,
-    excluding the last 24 h before CA). For ``apophis_only`` runs, averages all dumps with the
-    earliest-dump skip when three or more exist. Spin inference matches
+    For full solar-system runs, averages intact dumps in the early plateau (min of
+    ``SPIN_INTRINSIC_MAX_HOURS`` and 30% of way to CA, excluding the last 24 h before CA).
+    For ``apophis_only`` runs, averages intact dumps in the first ``SPIN_INTRINSIC_MAX_HOURS``
+    with the earliest-dump skip when three or more exist. Spin inference matches
     ``extract_post_flyby_spin_period_hr``.
     """
     if apophis_only:
@@ -2350,7 +2474,7 @@ def extract_intrinsic_spin_period_hr(
             run_dir,
             prefix,
             apophis_sink_id,
-            time_relation="all",
+            time_relation="intrinsic_early_absolute",
             skip_earliest_in_window=True,
         )
     return _extract_mean_spin_period_hr(
@@ -2572,7 +2696,14 @@ def run_one_case(
         # (11×13×14 ≈ 2002 lattice sites) so use 4000 when shape crop is on.
         # After DEM conversion npart=0 so the phantom run needs virtually nothing.
         if sample.use_dem is True:
-            maxp = 4000 if sample.use_shape_crop else 2000
+            np_val = sample.np_apophis or 500
+            if sample.use_shape_crop:
+                # OBJ mesh bbox lattice can exceed 4000 sites before cropping (e.g. np=1500
+                # uses ~16×18×19 ≈ 5472); scale with requested grain count.
+                maxp = max(4000, int(np_val * 4))
+            else:
+                # Sphere lattice overshoots np (e.g. np=1000 → 12×13×14 ≈ 2184 sites).
+                maxp = max(2000, int(np_val * 4))
             maxp_flag = [f"--maxp={maxp}"]
         else:
             maxp_flag = []
@@ -2779,8 +2910,11 @@ def main() -> int:
         output_root = Path(args.output_root).resolve() / batch_basename
 
         if getattr(args, "np_apophis_list", None) is not None:
-            # One run per particle count; Sobol sampling is not used in this mode.
-            samples = build_np_list_samples(args)
+            # One run per particle count (or np×spin grid); Sobol sampling is not used.
+            if getattr(args, "spin_period_list", None):
+                samples = build_np_spin_grid_samples(args)
+            else:
+                samples = build_np_list_samples(args)
         elif args.saltelli_n is not None:
             problem = build_salib_problem(args)
             try:
