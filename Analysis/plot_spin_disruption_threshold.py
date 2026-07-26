@@ -227,7 +227,7 @@ def main() -> None:
     )
 
     ax.set_xlabel("Spin period (hours)")
-    ax.set_ylabel("Peak dispersion ratio")
+    ax.set_ylabel("Peak size ratio")
     ax.set_yscale("log")
     ymax = max(
         np.max(disp_s0),
@@ -238,18 +238,7 @@ def main() -> None:
     ax.set_ylim(0.95, ymax * 1.5)
     ax.set_xlim(0.6, 5.2)
     ax.grid(True, which="both", alpha=0.3)
-    ax.legend(loc="upper right", framealpha=0.95, fontsize=8.5)
-
-    ax.text(
-        0.02,
-        0.03,
-        "Shaded band: danger window (1.45–2.05 h)\n"
-        r"Real Apophis ($\sim$30 h) sits far below all thresholds shown",
-        transform=ax.transAxes,
-        fontsize=8.5,
-        va="bottom",
-        bbox=dict(boxstyle="round,pad=0.35", facecolor="white", alpha=0.88),
-    )
+    leg = ax.legend(loc="upper right", framealpha=0.95, fontsize=8.5)
 
     fig.suptitle(
         "Spin-disruption threshold for Apophis DEM rubble piles\n"
@@ -258,6 +247,21 @@ def main() -> None:
         fontsize=11,
     )
     fig.tight_layout()
+    fig.canvas.draw()
+
+    leg_bbox = leg.get_window_extent().transformed(ax.transAxes.inverted())
+    ax.text(
+        leg_bbox.x1,
+        leg_bbox.y0 - 0.012,
+        "Shaded band: danger window (1.45–2.05 h)\n"
+        r"Real Apophis ($\sim$30 h) sits far below all thresholds shown",
+        transform=ax.transAxes,
+        fontsize=8,
+        ha="right",
+        va="top",
+        bbox=dict(boxstyle="round,pad=0.35", facecolor="white", alpha=0.88),
+    )
+
     fig.savefig(out, dpi=150, bbox_inches="tight")
     print(f"Wrote {out}")
 

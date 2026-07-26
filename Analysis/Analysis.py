@@ -15,7 +15,8 @@ that design has only N evaluations instead of N*(D+2) or N*(2*D+2).
 
 Recognised input parameters (varied dimensions):
   mass_input_kg, scale_vel, scale_pos, scale_r_apophis, scale_rho,
-  apophis_spin_period, apophis_spin_obliquity, apophis_spin_azimuth, np_apophis,
+  apophis_spin_period, apophis_spin_obliquity, apophis_spin_azimuth,
+  apophis_spin_torque_align_deg, kc_cgs, np_apophis,
   use_dem, use_shape_crop, apophis_only.
 
 Recognised response columns (--response / --saltelli-y-column):
@@ -88,6 +89,8 @@ INPUT_CANDIDATES: Tuple[str, ...] = (
     "apophis_spin_period",
     "apophis_spin_obliquity",
     "apophis_spin_azimuth",
+    "apophis_spin_torque_align_deg",
+    "kc_cgs",
     # Particle count (varies in --np-apophis-list sweeps).
     "np_apophis",
 )
@@ -550,6 +553,44 @@ def write_sobol_s2_csv(path: Path, names: Sequence[str], s2: np.ndarray, s2_conf
                         float(s2_conf[i, j]),
                     ]
                 )
+
+
+def compute_classic_sensitivity_rows(
+    csv_path: Path,
+    response: str,
+    *,
+    ok_only: bool = True,
+    log_response: bool = False,
+    bins: int = 10,
+    bootstrap: int = 0,
+    seed: int = 42,
+) -> Tuple[List[Dict[str, object]], int, List[str]]:
+    """Run classic sensitivity on one CSV; return (result_rows, n_rows_used, input_names)."""
+    fieldnames, rows = load_table(csv_path)
+    y, input_names, cols = rows_to_arrays(
+        rows, fieldnames, response, ok_only=ok_only, log_response=log_response
+    )
+    result_rows: List[Dict[str, object]] = []
+    for name in input_names:
+        x = cols[name]
+        eta2 = correlation_ratio_quantile(x, y, bins)
+        if bootstrap > 0:
+            _, half_width = bootstrap_eta_sq(x, y, bins, bootstrap, seed)
+            ci_cell: object = half_width if math.isfinite(half_width) else ""
+        else:
+            ci_cell = ""
+        r2p = squared_pearson(x, y)
+        r2s = squared_spearman(x, y)
+        result_rows.append(
+            {
+                "parameter": name,
+                "eta2_bins": eta2,
+                "eta2_ci95_halfwidth": ci_cell,
+                "r2_pearson": r2p,
+                "r2_spearman": r2s if HAS_SCIPY and math.isfinite(r2s) else "",
+            }
+        )
+    return result_rows, len(y), input_names
 
 
 def run_classic_analysis(args: argparse.Namespace) -> None:

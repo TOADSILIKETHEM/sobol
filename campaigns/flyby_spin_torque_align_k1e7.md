@@ -10,10 +10,12 @@ Unlike ecliptic `apophis_spin_obliquity` / `apophis_spin_azimuth`, this campaign
 - **ĥ** = unit(**r** × **v**) — direction of relative orbital angular momentum.
 - **r̂** = unit(**r**).
 - Spin axis **ŝ** = rotate **ĥ** about **r̂** by `torque_align_deg` (Rodrigues):
-  - **0°** → **ŝ = +ĥ** (spin parallel to flyby orbit angular momentum)
-  - **180°** → **ŝ = −ĥ** (opposite / retrograde about the orbit normal)
+  - **0°** → **ŝ = +ĥ** (spin AM ∥ relative orbital AM — label `aligned_near_h`)
+  - **180°** → **ŝ = −ĥ** (spin AM anti-parallel — label `opposite_near_h`)
 
-This is the natural frame for “aligned vs opposite” to the sense of the encounter orbit, not raw ecliptic angles.
+This is the natural frame for **spin–orbit** coupling (torque on the orbit-normal component), not raw ecliptic angles.
+
+**“Aligned” ≠ aligned with tidal force:** tidal stretch is mostly along **r̂**; **ĥ ⊥ r̂**, so spin along ±**ĥ** is perpendicular to the line of centres. Campaign “aligned/opposite” means ±**ĥ**, not Richardson (1998) ecliptic prograde/retrograde — for Apophis 2029 at setup, +**ĥ** ≈ south ecliptic pole (Richardson-retrograde, stable at fast *P*) and −**ĥ** ≈ north (Richardson-prograde, disruptive). See `docs/METRICS.md` § *Terminology: “+ĥ aligned” ≠ aligned with tidal force*.
 
 ## Fixed parameters
 

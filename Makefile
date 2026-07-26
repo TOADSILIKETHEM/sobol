@@ -14,7 +14,7 @@ endif
 # so the default MAXPTMASS=1000 causes phantomsetup to abort with
 # "ERROR: nptmass=1012 exceeds ptmass array dimensions of 1000".
 ifndef MAXPTMASS
-MAXPTMASS=2000
+MAXPTMASS=3000
 endif
 
 again:

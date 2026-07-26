@@ -13,6 +13,6 @@
      scale_r_apophis =       1.000    ! scaling factor for apophis radius
            scale_rho =       1.000    ! scaling factor for apophis bulk density
  apophis_spin_period =      30.000    ! spin period in hours (0 = no spin applied; DEM runs only)
-apophis_spin_obliquity =     0.000    ! obliquity of spin axis from ecliptic north (degrees)
- apophis_spin_azimuth =       0.000    ! azimuth of spin axis in ecliptic plane (degrees)
+apophis_spin_obliquity =    17.400    ! obliquity of spin axis from ecliptic north (degrees); Priority 2 ~177° Earth OBJ match
+ apophis_spin_azimuth =     332.200    ! azimuth of spin axis in ecliptic plane (degrees)
 apophis_spin_torque_align_deg =    -1.000    ! flyby torque alignment: rotate spin from +h to -h about Earth-Apophis r_hat; <0=use obl/az

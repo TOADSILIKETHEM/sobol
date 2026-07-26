@@ -8,10 +8,10 @@ Re-run the two torque-align extremes from `flyby_spin_torque_align_k1e7` (Sobol 
 
 | run_dir | Label | `apophis_spin_torque_align_deg` | Role |
 |---------|--------|----------------------------------|------|
-| `run_0001` | `aligned_near_h` | ~11.2° | Near **+ĥ** (spin ∥ relative orbit angular momentum) — **intact** |
-| `run_0002` | `opposite_near_h` | ~177.5° | Near **−ĥ** — **breakup** |
+| `run_0001` | `aligned_near_h` | ~11.2° | Near **+ĥ** (spin AM ∥ relative orbital AM) — **intact** |
+| `run_0002` | `opposite_near_h` | ~177.5° | Near **−ĥ** (spin AM anti-parallel to orbital AM) — **breakup** |
 
-Spin frame: see `CLAUDE.md` § *Spin axis: ecliptic vs torque-align* and `sobol/campaigns/flyby_spin_torque_align_k1e7.md`.
+Spin frame: `docs/METRICS.md` § *Spin axis* and § *Terminology: “+ĥ aligned” ≠ aligned with tidal force* (why near +**ĥ** is stable and near −**ĥ** breaks up at *P* ≈ 1.52 hr — not a sign error). Campaign notes: `sobol/campaigns/flyby_spin_torque_align_k1e7.md`.
 
 ## Fixed parameters
 

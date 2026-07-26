@@ -81,7 +81,7 @@ def main() -> None:
     ax_disp.axhline(1.0, color="gray", linestyle=":", linewidth=1, alpha=0.8)
     ax_disp.axvline(0, color="gray", linestyle=":", linewidth=0.8, alpha=0.5)
     ax_disp.axvline(180, color="gray", linestyle=":", linewidth=0.8, alpha=0.5)
-    ax_disp.set_ylabel("Peak dispersion ratio")
+    ax_disp.set_ylabel("Peak size ratio")
     ax_disp.set_yscale("log")
     ax_disp.set_ylim(0.98, max(disp) * 1.4)
     ax_disp.grid(True, which="both", alpha=0.3)

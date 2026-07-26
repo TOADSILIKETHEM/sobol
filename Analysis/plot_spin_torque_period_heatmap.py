@@ -186,11 +186,11 @@ def main() -> None:
         ax.legend(loc="upper right", fontsize=8, framealpha=0.9)
     ax.set_xlabel(r"Torque-align angle (deg; $0°=+\hat{h}$, $180°=-\hat{h}$)")
     ax.set_ylabel("Spin period (hours)")
-    ax.set_title(r"Peak dispersion ratio (capped at %.2f)" % disp_cap)
+    ax.set_title(r"Peak size ratio (capped at %.2f)" % disp_cap)
     ax.set_xlim(align_lim)
     ax.set_ylim(spin_lim)
     cbar1 = fig.colorbar(im1, ax=ax, pad=0.02)
-    cbar1.set_label("dispersion_ratio")
+    cbar1.set_label("size ratio")
 
     fig.suptitle(
         r"Earth flyby OBJ DEM ($n_p=500$, $k_c=3.5\times10^6$ dyne cm$^{-1}$, "
@@ -208,31 +208,35 @@ def main() -> None:
     log_disp = np.log10(np.maximum(d["disp"], 1.0))
     _, _, zi_log = _interp_field(d["align"], d["spin"], log_disp, align_lim, spin_lim)
     vmax_log = float(np.ceil(log_disp.max()))
+    # Light-at-low colormap: intact runs (log≈0) stay pale; breakup runs saturate red.
+    # magma/inferno put vmin on black, hiding markers in the slow-spin intact band.
+    log_cmap = "YlOrRd"
+    log_norm = colors.Normalize(vmin=0.0, vmax=vmax_log)
     im2 = ax2.pcolormesh(
         xi,
         yi,
         zi_log,
         shading="auto",
-        cmap="magma",
-        norm=colors.Normalize(vmin=0.0, vmax=vmax_log),
+        cmap=log_cmap,
+        norm=log_norm,
     )
     ax2.scatter(
         d["align"],
         d["spin"],
         c=log_disp,
-        s=55,
-        edgecolors="k",
-        linewidths=0.6,
-        cmap="magma",
-        norm=colors.Normalize(vmin=0.0, vmax=vmax_log),
+        s=62,
+        cmap=log_cmap,
+        norm=log_norm,
+        edgecolors="0.1",
+        linewidths=1.1,
         zorder=3,
     )
     ax2.set_xlabel(r"Torque-align angle (deg; $0°=+\hat{h}$, $180°=-\hat{h}$)")
     ax2.set_ylabel("Spin period (hours)")
-    ax2.set_title(r"$\log_{10}$(peak dispersion ratio)")
+    ax2.set_title(r"$\log_{10}$(peak size ratio)")
     ax2.set_xlim(align_lim)
     ax2.set_ylim(spin_lim)
-    fig2.colorbar(im2, ax=ax2, label=r"$\log_{10}$(dispersion_ratio)")
+    fig2.colorbar(im2, ax=ax2, label=r"$\log_{10}$(size ratio)")
     fig2.savefig(out_log, dpi=150, bbox_inches="tight")
     print(f"Wrote {out_log}")
 

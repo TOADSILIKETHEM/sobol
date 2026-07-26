@@ -79,9 +79,14 @@ def main() -> None:
         label="No Earth — apophis_only (flyby_spin_noearth_ctrl)",
     )
     ax_main.axhline(1.0, color="gray", linestyle=":", linewidth=1, alpha=0.8)
-    ax_main.set_ylabel("Peak dispersion ratio")
+    ax_main.set_ylabel("Peak size ratio")
     ax_main.legend(loc="upper right", framealpha=0.95)
-    ax_main.set_ylim(bottom=0.995)
+    spin_lo, spin_hi = float(spin_e.min()), float(spin_e.max())
+    spin_pad = 0.12 * (spin_hi - spin_lo)
+    xlim = (spin_lo - spin_pad, spin_hi + spin_pad)
+    disp_hi = float(max(disp_e.max(), disp_n.max()))
+    ax_main.set_xlim(xlim)
+    ax_main.set_ylim(0.998, disp_hi + 0.015)
     ax_main.grid(True, alpha=0.3)
 
     fig.suptitle(
@@ -95,27 +100,13 @@ def main() -> None:
         raise SystemExit("Spin periods differ between batches — cannot pair runs.")
     delta = disp_e - disp_n
     colors = np.where(delta >= 0, "#1f77b4", "#d62728")
-    ax_diff.bar(spin_e, delta, width=0.06, color=colors, alpha=0.75, edgecolor="none")
+    bar_width = 0.04 * (spin_hi - spin_lo)
+    ax_diff.bar(spin_e, delta, width=bar_width, color=colors, alpha=0.75, edgecolor="none")
     ax_diff.axhline(0.0, color="gray", linewidth=1)
     ax_diff.set_xlabel("Spin period (hours)")
-    ax_diff.set_ylabel(r"$\Delta$ dispersion\n(Earth − no Earth)")
+    ax_diff.set_ylabel(r"$\Delta$ size\n(Earth − no Earth)")
+    ax_diff.set_xlim(xlim)
     ax_diff.grid(True, alpha=0.3)
-
-    real_spin_hr = 30.0
-    for ax in (ax_main, ax_diff):
-        ax.axvline(
-            real_spin_hr,
-            color="green",
-            linestyle="-.",
-            linewidth=1.2,
-            alpha=0.7,
-            label="Real Apophis (~30 h)" if ax is ax_main else None,
-        )
-    handles, labels = ax_main.get_legend_handles_labels()
-    handles.append(
-        plt.Line2D([0], [0], color="green", linestyle="-.", linewidth=1.2, label="Real Apophis (~30 h)")
-    )
-    ax_main.legend(handles=handles, loc="upper right", framealpha=0.95)
 
     fig.tight_layout()
     fig.savefig(out, dpi=150, bbox_inches="tight")

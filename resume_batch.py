@@ -29,13 +29,17 @@ if str(_REPO) not in sys.path:
 
 from sobol.run_mass_sobol_phantom import (  # noqa: E402
     RunRecord,
+    RunSample,
     RunWorkerPayload,
     _active_scale_variations,
+    _apply_fixed_run_sample_overrides,
     _cleanup_run_dir,
     _execute_run_worker,
     _mass_bounds_active,
     _print_run_progress,
     build_parser,
+    build_np_list_samples,
+    build_np_spin_grid_samples,
     build_run_samples,
     preflight,
     sample_column_order,
@@ -88,6 +92,43 @@ def _load_records(summary_csv: Path, col_order: List[str]) -> List[RunRecord]:
     return records
 
 
+def _load_samples_for_resume(
+    samples_csv: Path, args: argparse.Namespace, n: int
+) -> List[RunSample]:
+    """Rebuild RunSample list from the batch samples CSV when possible (np_apophis_list batches)."""
+    with samples_csv.open(newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    if len(rows) != n:
+        return build_run_samples(n, args)
+
+    if getattr(args, "np_apophis_list", None) is not None:
+        if getattr(args, "spin_period_list", None):
+            return build_np_spin_grid_samples(args)
+        return build_np_list_samples(args)
+
+    if rows and "np_apophis" in rows[0] and rows[0].get("np_apophis", "").strip():
+        out: List[RunSample] = []
+        for row in rows:
+            spin_s = row.get("apophis_spin_period", "").strip()
+            s = RunSample(
+                np_apophis=int(row["np_apophis"]),
+                apophis_spin_period=float(spin_s) if spin_s else None,
+            )
+            if args.use_dem_fixed is not None:
+                s.use_dem = args.use_dem_fixed == "true"
+            if args.use_shape_crop_fixed is not None:
+                s.use_shape_crop = args.use_shape_crop_fixed == "true"
+            if getattr(args, "apophis_only_fixed", None) is not None:
+                s.apophis_only = args.apophis_only_fixed == "true"
+            _apply_fixed_run_sample_overrides(s, args, np_val=int(row["np_apophis"]))
+            if spin_s:
+                s.apophis_spin_period = float(spin_s)
+            out.append(s)
+        return out
+
+    return build_run_samples(n, args)
+
+
 def main() -> int:
     resume_parser = argparse.ArgumentParser(add_help=False)
     resume_parser.add_argument(
@@ -132,7 +173,7 @@ def main() -> int:
             file=sys.stderr,
         )
 
-    samples = build_run_samples(len(expected_ids), args)
+    samples = _load_samples_for_resume(samples_csv, args, len(expected_ids))
     col_order = sample_column_order(args)
     existing = _load_records(summary_csv, col_order)
     done_ids = _load_ok_run_ids(summary_csv)
