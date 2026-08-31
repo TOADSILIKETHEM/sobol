@@ -5,9 +5,15 @@ from __future__ import annotations
 
 import argparse
 import csv
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+
+_ANALYSIS_DIR = Path(__file__).resolve().parent
+if str(_ANALYSIS_DIR) not in sys.path:
+    sys.path.insert(0, str(_ANALYSIS_DIR))
+from csv_columns import kt_cgs_from_row
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -63,10 +69,10 @@ def load_batch(csv_path: Path, label: str = "") -> BatchData:
             intrinsic.append(float(intr) if intr else np.nan)
             post = row.get("post_flyby_spin_period_hr", "").strip()
             post_flyby.append(float(post) if post else np.nan)
-            kc_s = row.get("kc_cgs", "").strip()
-            if kc_s:
+            kc_val = kt_cgs_from_row(row)
+            if kc_val is not None:
                 has_kc = True
-                kc.append(float(kc_s))
+                kc.append(kc_val)
     order = np.argsort(np_vals)
     return BatchData(
         label=label or csv_path.parent.name,

@@ -50,6 +50,45 @@ LITERATURE_MESH_SCALE_KM = 0.205
 HORIZONS_APOPHIS_RADIUS_KM = 0.170
 LITERATURE_SCALE_R_APOPHIS = 0.409741 / 2.0 / HORIZONS_APOPHIS_RADIUS_KM
 
+SPIN_PERIOD_HR_TO_SETUP_S = 3600.0
+DEFAULT_DN_COHES_FACTOR = 0.1
+
+
+def spin_period_hr_to_setup_seconds(hours: float) -> float:
+    return float(hours) * SPIN_PERIOD_HR_TO_SETUP_S
+
+
+def ecliptic_spin_axis_unit(obliquity_deg: float, azimuth_deg: float) -> tuple[float, float, float]:
+    """Unit spin axis in ecliptic frame (replaces Fortran obl/az reader)."""
+    obl = math.radians(float(obliquity_deg))
+    az = math.radians(float(azimuth_deg))
+    nx = math.sin(obl) * math.cos(az)
+    ny = math.sin(obl) * math.sin(az)
+    nz = math.cos(obl)
+    return nx, ny, nz
+
+
+def kt_from_kc(kc: float) -> float:
+    return float(kc)
+
+
+def coh_gap_max_cgs_from_dn(
+    *,
+    dn: float,
+    np_apophis: int,
+    scale_r_apophis: float = 1.0,
+    r_apophis_km: float = HORIZONS_APOPHIS_RADIUS_KM,
+) -> float:
+    if np_apophis <= 0:
+        raise ValueError("np_apophis must be positive")
+    r_apophis_cm = r_apophis_km * scale_r_apophis * 1.0e5
+    r_grain_cm = r_apophis_cm / (np_apophis ** (1.0 / 3.0))
+    return dn * 2.0 * r_grain_cm
+
+
+def read_kt_cgs(row: dict) -> str:
+    return (row.get("kt_cgs") or row.get("kc_cgs") or "").strip()
+
 # MAXPTMASS is a compile-time array bound on the number of sink particles (config.F90).
 # The default upstream value is 1000. The close-packed lattice placement routine overshoots
 # the requested np_apophis by ~2-3% (observed: np_apophis=1000 -> 1012 actual sinks), so
@@ -152,7 +191,7 @@ _SCALE_VARIATION_SPEC: Tuple[Tuple[str, str, str, str], ...] = (
 # phantomsetup generates it (phantomsetup overwrites .in, so setup-time patching is lost).
 # (RunSample attribute == .in file key, argparse lo/hi dest stems, batch slug token)
 _IN_VARIATION_SPEC: Tuple[Tuple[str, str, str, str], ...] = (
-    ("kc_cgs",        "kc_min",    "kc_max",    "kc"),
+    ("kt_cgs",        "kt_min",    "kt_max",    "kt"),
     ("ct_dem",        "ct_min",    "ct_max",    "ct"),
     ("epsilon_n_dem", "eps_n_min", "eps_n_max", "eps"),
     ("kn_cgs",        "kn_min",    "kn_max",    "kn"),
@@ -280,7 +319,8 @@ class RunSample:
     apophis_spin_azimuth:   Optional[float] = None  # degrees in ecliptic plane
     apophis_spin_torque_align_deg: Optional[float] = None  # 0=+h, 180=-h; <0 uses obl/az
     # DEM contact params: patched into the .in file after phantomsetup; only active when isink_potential=2.
-    kc_cgs:        Optional[float] = None  # cohesive spring constant (dyne/cm); 0 = no cohesion
+    kt_cgs:        Optional[float] = None  # tensile spring constant (dyne/cm); 0 = no cohesion
+    coh_gap_max_cgs: Optional[float] = None  # max surface gap (cm) for cohesive bond; 0 = Daniel default
     ct_dem:        Optional[float] = None  # tangential damping coefficient
     epsilon_n_dem: Optional[float] = None  # normal restitution coefficient [0,1]
     kn_cgs:        Optional[float] = None  # normal spring constant (dyne/cm)
@@ -400,12 +440,12 @@ def build_parser() -> argparse.ArgumentParser:
         ("scale-pos", "scale_pos (Apophis initial position scale)"),
         ("scale-r-apophis", "scale_r_apophis (Apophis radius scale)"),
         ("scale-rho", "scale_rho (bulk density scale when mass is density-derived)"),
-        ("spin-period",    "apophis_spin_period in hours (0 = no spin; DEM runs only)"),
-        ("spin-obliquity", "apophis_spin_obliquity in degrees from ecliptic north (DEM runs only)"),
-        ("spin-azimuth",   "apophis_spin_azimuth in degrees in ecliptic plane (DEM runs only)"),
+        ("spin-period",    "apophis_spin_period in hours (0 = no spin; DEM runs only; written to .setup in seconds)"),
+        ("spin-obliquity", "apophis_spin_obliquity in degrees (DEM only; runner converts to apophis_spin_axis_* in .setup)"),
+        ("spin-azimuth",   "apophis_spin_azimuth in degrees (DEM only; runner converts to apophis_spin_axis_* in .setup)"),
         (
             "spin-torque-align",
-            "apophis_spin_torque_align_deg: 0=spin || +h, 180=|| -h (h=r×v); <0 uses obl/az (DEM only)",
+            "apophis_spin_torque_align_deg: >=0 torque-align in flyby frame (needs Earth); <0 uses apophis_spin_axis_* (DEM only)",
         ),
     ):
         parser.add_argument(
@@ -423,7 +463,7 @@ def build_parser() -> argparse.ArgumentParser:
     # DEM contact parameters — optional Sobol dimensions patched into .in after phantomsetup.
     # Only active when both min and max are set and the run uses DEM (isink_potential=2).
     for key, helpt in (
-        ("kc",    "kc_cgs (cohesive spring constant in dyne/cm; DEM only; 0=off)"),
+        ("kt",    "kt_cgs (tensile spring constant in dyne/cm; DEM only; 0=off)"),
         ("ct",    "ct_dem (tangential damping coefficient; DEM only)"),
         ("eps-n", "epsilon_n_dem (normal restitution coefficient [0,1]; DEM only)"),
         ("kn",    "kn_cgs (normal spring constant in dyne/cm; DEM only)"),
@@ -441,28 +481,64 @@ def build_parser() -> argparse.ArgumentParser:
             help=f"Upper bound for {helpt}; omit with min to leave unvaried.",
         )
     parser.add_argument(
-        "--kc-fixed",
+        "--kt-fixed",
         type=float,
         default=None,
         metavar="DYNE_CM",
         help=(
-            "Fix kc_cgs (cohesive spring constant in dyne/cm) for every DEM run. "
+            "Fix kt_cgs (tensile spring constant in dyne/cm) for every DEM run. "
             "Patched into each run's .in after phantomsetup. "
-            "Mutually exclusive with --kc-min/--kc-max."
+            "Mutually exclusive with --kt-min/--kt-max."
         ),
+    )
+    parser.add_argument(
+        "--kt-scale-ref-np",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "With --np-apophis-list and --kt-fixed: scale kt per run as "
+            "kt(np)=kt_fixed*(ref_np/np)^(1/3) so bulk cohesive strength σ_c≈kt/d "
+            "is held near the reference grain count (d∝np^(-1/3)). "
+            "Requires --kt-fixed."
+        ),
+    )
+    parser.add_argument(
+        "--dn-cohes-factor",
+        type=float,
+        default=DEFAULT_DN_COHES_FACTOR,
+        metavar="F",
+        help=(
+            "When kt_cgs>0 and --coh-gap-max-cgs is unset, set coh_gap_max_cgs = "
+            "dn × 2 × R_grain_cm (thesis default dn=0.1). DEM only."
+        ),
+    )
+    parser.add_argument(
+        "--coh-gap-max-cgs",
+        type=float,
+        default=None,
+        metavar="CM",
+        help=(
+            "Fix coh_gap_max_cgs (max surface gap in cm for cohesive bond) for every DEM run. "
+            "When unset and kt_cgs>0, derived from --dn-cohes-factor and np_apophis."
+        ),
+    )
+    parser.add_argument(
+        "--kc-fixed",
+        type=float,
+        default=None,
+        metavar="DYNE_CM",
+        help="[deprecated] alias for --kt-fixed",
     )
     parser.add_argument(
         "--kc-scale-ref-np",
         type=int,
         default=None,
         metavar="N",
-        help=(
-            "With --np-apophis-list and --kc-fixed: scale kc per run as "
-            "kc(np)=kc_fixed*(ref_np/np)^(1/3) so bulk cohesive strength σ_c≈kc/d "
-            "is held near the reference grain count (d∝np^(-1/3)). "
-            "Requires --kc-fixed."
-        ),
+        help="[deprecated] alias for --kt-scale-ref-np",
     )
+    parser.add_argument("--kc-min", type=float, default=None, help="[deprecated] alias for --kt-min")
+    parser.add_argument("--kc-max", type=float, default=None, help="[deprecated] alias for --kt-max")
     parser.add_argument(
         "--spin-period-fixed",
         type=float,
@@ -768,28 +844,35 @@ def validate_args(args: argparse.Namespace) -> None:
         hi = getattr(args, hi_attr)
         if (lo is None) ^ (hi is None):
             raise ValueError(f"{param}: set both min and max, or neither")
-        if lo is not None and hi is not None and hi <= lo:
-            raise ValueError(f"{param}: require min < max")
+        if lo is not None and hi is not None and hi < lo:
+            raise ValueError(f"{param}: require min <= max")
     for param, lo_attr, hi_attr, _ in _IN_VARIATION_SPEC:
         lo = getattr(args, lo_attr, None)
         hi = getattr(args, hi_attr, None)
         if (lo is None) ^ (hi is None):
             raise ValueError(f"{param}: set both min and max, or neither")
-        if lo is not None and hi is not None and hi <= lo:
-            raise ValueError(f"{param}: require min < max")
+        if lo is not None and hi is not None and hi < lo:
+            raise ValueError(f"{param}: require min <= max")
+    if getattr(args, "kt_fixed", None) is not None:
+        if args.kt_min is not None or args.kt_max is not None:
+            raise ValueError("--kt-fixed is mutually exclusive with --kt-min and --kt-max")
+        if args.kt_fixed < 0:
+            raise ValueError("--kt-fixed must be >= 0")
     if getattr(args, "kc_fixed", None) is not None:
+        if getattr(args, "kt_fixed", None) is not None:
+            raise ValueError("set only one of --kt-fixed and --kc-fixed")
         if args.kc_min is not None or args.kc_max is not None:
             raise ValueError("--kc-fixed is mutually exclusive with --kc-min and --kc-max")
         if args.kc_fixed < 0:
             raise ValueError("--kc-fixed must be >= 0")
-    ref_np = getattr(args, "kc_scale_ref_np", None)
+    ref_np = _resolve_kt_scale_ref_np(args)
     if ref_np is not None:
         if ref_np <= 0:
-            raise ValueError("--kc-scale-ref-np must be > 0")
-        if args.kc_fixed is None:
-            raise ValueError("--kc-scale-ref-np requires --kc-fixed")
+            raise ValueError("--kt-scale-ref-np must be > 0")
+        if _resolve_kt_fixed(args) is None:
+            raise ValueError("--kt-scale-ref-np requires --kt-fixed")
         if not getattr(args, "np_apophis_list", None):
-            raise ValueError("--kc-scale-ref-np requires --np-apophis-list")
+            raise ValueError("--kt-scale-ref-np requires --np-apophis-list")
     spin_list = getattr(args, "spin_period_list", None)
     if getattr(args, "spin_period_fixed", None) is not None:
         if args.spin_period_min is not None or args.spin_period_max is not None:
@@ -963,7 +1046,7 @@ def hours_to_phantom_time_string(h: float) -> str:
 
 
 def replace_setup_assignment(setup_text: str, key: str, value_str: str) -> str:
-    pattern = re.compile(rf"^(\s*{re.escape(key)}\s*=\s*)([^!]*)(!.*)?$", re.MULTILINE)
+    pattern = re.compile(rf"^(\s*{re.escape(key)}\s*=\s*)([^!\n]*)(!.*)?$", re.MULTILINE)
     matches = list(pattern.finditer(setup_text))
     if not matches:
         raise RuntimeError(f"Setup key {key!r} not found in .setup file")
@@ -980,7 +1063,7 @@ def replace_setup_assignment(setup_text: str, key: str, value_str: str) -> str:
 
 
 def validate_assignment(setup_text: str, key: str, expected: str) -> None:
-    pattern = re.compile(rf"^\s*{re.escape(key)}\s*=\s*([^!]*?)\s*(?:!.*)?$", re.MULTILINE)
+    pattern = re.compile(rf"^\s*{re.escape(key)}\s*=\s*([^!\n]*?)\s*(?:!.*)?$", re.MULTILINE)
     match = pattern.search(setup_text)
     if not match:
         raise RuntimeError(f"{key} missing after setup update")
@@ -1006,13 +1089,29 @@ def apply_run_sample_to_setup(
         tok = format_real_token(scale_rho_val)
         text = replace_setup_assignment(text, "scale_rho", tok)
         validate_assignment(text, "scale_rho", tok)
+
+    _skip_setup_write = frozenset({
+        "apophis_spin_obliquity",
+        "apophis_spin_azimuth",
+        "apophis_spin_torque_align_deg",
+    })
     for param, _, _, _ in _SCALE_VARIATION_SPEC:
         v = getattr(sample, param)
-        if v is not None:
-            tok = format_real_token(v)
-            text = replace_setup_assignment(text, param, tok)
-            validate_assignment(text, param, tok)
+        if v is None:
+            continue
+        if param in _skip_setup_write:
             columns[param] = f"{v:.12g}"
+            continue
+        if param == "apophis_spin_period":
+            setup_val = spin_period_hr_to_setup_seconds(v)
+            csv_val = f"{v:.12g}"
+        else:
+            setup_val = v
+            csv_val = f"{v:.12g}"
+        tok = format_real_token(setup_val)
+        text = replace_setup_assignment(text, param, tok)
+        validate_assignment(text, param, tok)
+        columns[param] = csv_val
 
     if sample.use_dem is not None:
         tok = format_logical_token(sample.use_dem)
@@ -1048,6 +1147,31 @@ def apply_run_sample_to_setup(
             validate_assignment(text, setup_key, tok)
             columns[param] = f"{h:.12g}"
 
+    torque = sample.apophis_spin_torque_align_deg
+    obl = sample.apophis_spin_obliquity
+    az = sample.apophis_spin_azimuth
+
+    if torque is not None and torque >= 0.0:
+        tok = format_real_token(torque)
+        text = replace_setup_assignment(text, "apophis_spin_torque_align_deg", tok)
+        validate_assignment(text, "apophis_spin_torque_align_deg", tok)
+        columns["apophis_spin_torque_align_deg"] = f"{torque:.12g}"
+    elif obl is not None and az is not None:
+        nx, ny, nz = ecliptic_spin_axis_unit(obl, az)
+        for key, val in (
+            ("apophis_spin_axis_x", nx),
+            ("apophis_spin_axis_y", ny),
+            ("apophis_spin_axis_z", nz),
+        ):
+            tok = format_real_token(val)
+            text = replace_setup_assignment(text, key, tok)
+            validate_assignment(text, key, tok)
+        tok = format_real_token(-1.0)
+        text = replace_setup_assignment(text, "apophis_spin_torque_align_deg", tok)
+        validate_assignment(text, "apophis_spin_torque_align_deg", tok)
+        columns.setdefault("apophis_spin_obliquity", f"{obl:.12g}")
+        columns.setdefault("apophis_spin_azimuth", f"{az:.12g}")
+
     setup_path.write_text(text, encoding="utf-8")
     return columns
 
@@ -1061,6 +1185,8 @@ def apply_run_sample_to_in(in_path: Path, sample: RunSample) -> Dict[str, str]:
     """
     columns: Dict[str, str] = {}
     active = [(p, getattr(sample, p)) for p, *_ in _IN_VARIATION_SPEC if getattr(sample, p) is not None]
+    if sample.coh_gap_max_cgs is not None:
+        active.append(("coh_gap_max_cgs", sample.coh_gap_max_cgs))
     if not active:
         return columns
 
@@ -1085,14 +1211,68 @@ def apply_run_sample_to_in(in_path: Path, sample: RunSample) -> Dict[str, str]:
     return columns
 
 
-def _kc_for_np(args: argparse.Namespace, np_val: int) -> Optional[float]:
-    """Cohesive spring constant for a given grain count (σ_c-constant scaling optional)."""
-    if getattr(args, "kc_fixed", None) is None:
+def _resolve_kt_fixed(args: argparse.Namespace) -> Optional[float]:
+    """Return fixed kt value from --kt-fixed or deprecated --kc-fixed."""
+    kt = getattr(args, "kt_fixed", None)
+    if kt is not None:
+        return kt
+    kc = getattr(args, "kc_fixed", None)
+    if kc is not None:
+        print("[WARN] --kc-fixed is deprecated; use --kt-fixed", flush=True)
+        return kc
+    return None
+
+
+def _resolve_kt_scale_ref_np(args: argparse.Namespace) -> Optional[int]:
+    ref = getattr(args, "kt_scale_ref_np", None)
+    if ref is not None:
+        return ref
+    kc_ref = getattr(args, "kc_scale_ref_np", None)
+    if kc_ref is not None:
+        print("[WARN] --kc-scale-ref-np is deprecated; use --kt-scale-ref-np", flush=True)
+        return kc_ref
+    return None
+
+
+def _normalize_kt_cli_aliases(args: argparse.Namespace) -> None:
+    """Map deprecated --kc-min/max onto --kt-min/max when kt bounds unset."""
+    if getattr(args, "kt_min", None) is None and getattr(args, "kc_min", None) is not None:
+        print("[WARN] --kc-min is deprecated; use --kt-min", flush=True)
+        args.kt_min = args.kc_min
+    if getattr(args, "kt_max", None) is None and getattr(args, "kc_max", None) is not None:
+        print("[WARN] --kc-max is deprecated; use --kt-max", flush=True)
+        args.kt_max = args.kc_max
+
+
+def _kt_for_np(args: argparse.Namespace, np_val: int) -> Optional[float]:
+    """Tensile spring constant for a given grain count (σ_c-constant scaling optional)."""
+    kt_fixed = _resolve_kt_fixed(args)
+    if kt_fixed is None:
         return None
-    ref_np = getattr(args, "kc_scale_ref_np", None)
+    ref_np = _resolve_kt_scale_ref_np(args)
     if ref_np is not None:
-        return args.kc_fixed * (ref_np / np_val) ** (1.0 / 3.0)
-    return args.kc_fixed
+        return kt_fixed * (ref_np / np_val) ** (1.0 / 3.0)
+    return kt_fixed
+
+
+def _ensure_coh_gap(s: RunSample, args: argparse.Namespace) -> None:
+    """Set coh_gap_max_cgs from CLI or dn factor when kt > 0 and gap not already set."""
+    if getattr(args, "coh_gap_max_cgs", None) is not None:
+        s.coh_gap_max_cgs = args.coh_gap_max_cgs
+        return
+    if s.coh_gap_max_cgs is not None:
+        return
+    if s.kt_cgs is None or s.kt_cgs <= 0:
+        return
+    n = s.np_apophis
+    if n is None:
+        return
+    dn = getattr(args, "dn_cohes_factor", DEFAULT_DN_COHES_FACTOR)
+    s.coh_gap_max_cgs = coh_gap_max_cgs_from_dn(
+        dn=dn,
+        np_apophis=n,
+        scale_r_apophis=s.scale_r_apophis or 1.0,
+    )
 
 
 def _apply_fixed_run_sample_overrides(
@@ -1103,12 +1283,14 @@ def _apply_fixed_run_sample_overrides(
         s.tmax_hours = args.tmax_hours
     if getattr(args, "dtmax_hours", None) is not None:
         s.dtmax_hours = args.dtmax_hours
-    if getattr(args, "kc_fixed", None) is not None:
+    kt_fixed = _resolve_kt_fixed(args)
+    if kt_fixed is not None:
         n = np_val if np_val is not None else s.np_apophis
         if n is not None:
-            s.kc_cgs = _kc_for_np(args, n)
+            s.kt_cgs = _kt_for_np(args, n)
         else:
-            s.kc_cgs = args.kc_fixed
+            s.kt_cgs = kt_fixed
+        _ensure_coh_gap(s, args)
     if getattr(args, "spin_period_fixed", None) is not None:
         s.apophis_spin_period = args.spin_period_fixed
 
@@ -1173,6 +1355,7 @@ def build_run_samples(num_samples: int, args: argparse.Namespace) -> List[RunSam
             setattr(s, param, lo + row[di] * (hi - lo))
             di += 1
         _apply_fixed_run_sample_overrides(s, args)
+        _ensure_coh_gap(s, args)
         if args.vary_use_dem:
             s.use_dem = row[di] >= 0.5
             di += 1
@@ -1218,8 +1401,9 @@ def sample_column_order(args: argparse.Namespace) -> List[str]:
         order.append("np_apophis")
         if getattr(args, "spin_period_list", None):
             order.append("apophis_spin_period")
-        if getattr(args, "kc_scale_ref_np", None) is not None:
-            order.append("kc_cgs")
+        if _resolve_kt_fixed(args) is not None:
+            order.append("kt_cgs")
+            order.append("coh_gap_max_cgs")
     return order
 
 
@@ -1327,10 +1511,12 @@ def canonical_sweep_descriptor(args: argparse.Namespace) -> str:
         fixed_val = getattr(args, param, None)
         if fixed_val is not None:
             parts.append(f"{param}_fixed={fixed_val}")
-    if getattr(args, "kc_fixed", None) is not None:
-        parts.append(f"kc_fixed={args.kc_fixed}")
-    if getattr(args, "kc_scale_ref_np", None) is not None:
-        parts.append(f"kc_scale_ref_np={args.kc_scale_ref_np}")
+    kt_fixed = _resolve_kt_fixed(args)
+    if kt_fixed is not None:
+        parts.append(f"kt_fixed={kt_fixed}")
+    ref_np = _resolve_kt_scale_ref_np(args)
+    if ref_np is not None:
+        parts.append(f"kt_scale_ref_np={ref_np}")
     if getattr(args, "spin_period_fixed", None) is not None:
         parts.append(f"spin_period_fixed={args.spin_period_fixed}")
     spin_list = getattr(args, "spin_period_list", None)
@@ -1426,11 +1612,43 @@ def build_batch_directory_basename(args: argparse.Namespace, timestamp: str) -> 
     return f"{args.prefix}_{timestamp}_{slug}"
 
 
-def run_command(cmd: Sequence[str], cwd: Path, log_path: Path) -> None:
-    with log_path.open("w", encoding="utf-8") as log_file:
+def run_command(cmd: Sequence[str], cwd: Path, log_path: Path, *, append: bool = False) -> None:
+    mode = "a" if append else "w"
+    with log_path.open(mode, encoding="utf-8") as log_file:
         proc = subprocess.run(cmd, cwd=str(cwd), stdout=log_file, stderr=subprocess.STDOUT)
     if proc.returncode != 0:
         raise RuntimeError(f"Command failed ({proc.returncode}): {' '.join(cmd)}")
+
+
+def _phantomsetup_needs_rerun(log_path: Path) -> bool:
+    """True when phantomsetup rewrote .setup and asked for a second pass."""
+    if not log_path.is_file():
+        return False
+    return "rerun phantomsetup" in log_path.read_text(encoding="utf-8", errors="replace")
+
+
+def run_phantomsetup(
+    phantomsetup_bin: Path,
+    prefix: str,
+    maxp_flag: Sequence[str],
+    run_dir: Path,
+    log_path: Path,
+) -> None:
+    """Run phantomsetup; auto-retry once when setup file was amended (DEMsync new keys)."""
+    cmd = [str(phantomsetup_bin), prefix, *maxp_flag]
+    run_command(cmd, cwd=run_dir, log_path=log_path)
+    if _phantomsetup_needs_rerun(log_path):
+        print(
+            f"[INFO] phantomsetup requested rerun after .setup amend — retrying in {run_dir}",
+            flush=True,
+        )
+        with log_path.open("a", encoding="utf-8") as log_file:
+            log_file.write("\n--- phantomsetup retry after .setup amend ---\n")
+        run_command(cmd, cwd=run_dir, log_path=log_path, append=True)
+        if _phantomsetup_needs_rerun(log_path):
+            raise RuntimeError(
+                f"phantomsetup still requests rerun after second pass; see {log_path}"
+            )
 
 
 def copy_ephemeris_txt_cache(cache_dir: Path, run_dir: Path) -> int:
@@ -2709,7 +2927,9 @@ def run_one_case(
         else:
             maxp_flag = []
         try:
-            run_command([str(phantomsetup_bin), prefix] + maxp_flag, cwd=run_dir, log_path=run_dir / "setup.log")
+            run_phantomsetup(
+                phantomsetup_bin, prefix, maxp_flag, run_dir, run_dir / "setup.log"
+            )
         except RuntimeError:
             diag = _diagnose_maxptmass_error(run_dir / "setup.log")
             raise RuntimeError(
@@ -2890,6 +3110,7 @@ def main() -> int:
     ephemeris_cache: Optional[Path] = None
 
     try:
+        _normalize_kt_cli_aliases(args)
         validate_args(args)
         if args.ephemeris_cache_dir:
             ephemeris_cache = Path(args.ephemeris_cache_dir).expanduser().resolve()

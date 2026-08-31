@@ -8,11 +8,14 @@
                epoch =  2029-04-10    ! epoch to query ephemeris, YYYY-MMM-DD HH:MM:SS.fff, blank = today
              use_dem =           F    ! use the discrete element method for sink-sink interactions
         apophis_only =           F    ! only add apophis
+      add_mars_moons =           F    ! add Phobos and Deimos as point masses
+     scale_earth_sep =       1.000    ! scale geocentric Earth-Apophis distance (1=ephemeris; apophis_only=F)
            scale_vel =       1.000    ! scaling factor for apophis velocity
            scale_pos =       1.000    ! scaling factor for apophis initial position
      scale_r_apophis =       1.000    ! scaling factor for apophis radius
            scale_rho =       1.000    ! scaling factor for apophis bulk density
- apophis_spin_period =      30.000    ! spin period in hours (0 = no spin applied; DEM runs only)
-apophis_spin_obliquity =    17.400    ! obliquity of spin axis from ecliptic north (degrees); Priority 2 ~177° Earth OBJ match
- apophis_spin_azimuth =     332.200    ! azimuth of spin axis in ecliptic plane (degrees)
-apophis_spin_torque_align_deg =    -1.000    ! flyby torque alignment: rotate spin from +h to -h about Earth-Apophis r_hat; <0=use obl/az
+ apophis_spin_period =  108000.    ! seconds (= 30 hr); runner overwrites per run
+ apophis_spin_axis_x =       0.276 ! ecliptic unit axis (no-Earth ~177° ref); runner overwrites
+ apophis_spin_axis_y =      -0.116
+ apophis_spin_axis_z =       0.954
+apophis_spin_torque_align_deg =      -1.000    ! >=0 torque-align (needs Earth); -1 = use axis vector

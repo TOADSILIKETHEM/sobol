@@ -38,7 +38,8 @@ PARAM_LABELS: Dict[str, str] = {
     "apophis_spin_obliquity": "Spin obliquity (deg)",
     "apophis_spin_azimuth": "Spin azimuth (deg)",
     "apophis_spin_torque_align_deg": "Torque-align angle (deg)",
-    "kc_cgs": r"$k_c$ (dyne/cm)",
+    "kt_cgs": r"$k_t$ (g/s$^2$/cm)",
+    "kc_cgs": r"$k_t$ (g/s$^2$/cm)",  # alias for archived CSVs
     "np_apophis": r"$n_p$",
     "use_dem": "use_dem",
     "use_shape_crop": "use_shape_crop",

@@ -17,7 +17,7 @@ COMMON=(
   --output-root sobol_mass_runs
   --prefix sobol
   --use-dem-fixed true
-  --kc-fixed 1e7
+  --kt-fixed 1e7
   --tmax-hours 108
   --dtmax-hours 0.5
   --ephemeris-cache-dir sobol
@@ -154,16 +154,22 @@ run_grid_batch_with_resume() {
 
 preflight_binaries() {
   local sym=0
+  local kt=0
   for bin in sobol/bin/phantomsetup sobol/phantomsetup; do
     if [[ -x "$bin" ]]; then
       sym=$(strings "$bin" 2>/dev/null | grep -c apophis_spin_torque_align_deg || true)
-      if [[ "${sym}" -ge 1 ]]; then
+      kt=$(strings "$bin" 2>/dev/null | grep -c 'kt_cgs' || true)
+      if [[ "${sym}" -ge 1 && "${kt}" -ge 1 ]]; then
         break
       fi
     fi
   done
   if [[ "${sym}" -lt 1 ]]; then
     err "phantomsetup lacks spin support — run: cd sobol && make setup && make"
+    exit 1
+  fi
+  if [[ "${kt}" -lt 1 ]]; then
+    err "phantomsetup lacks kt_cgs — rebuild: cd sobol && make setup && make"
     exit 1
   fi
 }
@@ -187,7 +193,7 @@ run_grid_batch_with_resume np_spin_p1_noearth_obj_kc sobol \
 run_grid_batch_with_resume np_spin_p2_noearth_obj_sigmac sobol \
   --use-shape-crop-fixed true \
   --apophis-only-fixed true \
-  --kc-scale-ref-np 500 \
+  --kt-scale-ref-np 500 \
   --np-apophis-list "${NP_GRID[@]}" \
   --spin-period-list "${SPIN_GRID[@]}"
 

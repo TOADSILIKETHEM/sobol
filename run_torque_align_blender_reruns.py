@@ -32,7 +32,8 @@ CASES: Tuple[Tuple[str, float], ...] = (
 )
 
 SPIN_PERIOD_HR = 1.52
-KC_CGS = 1e7
+KT_CGS = 1e7
+DN_COHES = 0.1
 NP_APOPHIS = 500
 # Default template uses 30 min; fine Blender re-runs use 5 min (~6× more keyframes).
 DTMAX_HOURS_FINE = 5.0 / 60.0
@@ -129,7 +130,8 @@ def main() -> int:
                 np_apophis=np_apophis,
                 apophis_spin_period=spin_period,
                 apophis_spin_torque_align_deg=align_deg,
-                kc_cgs=KC_CGS,
+                kt_cgs=KT_CGS,
+                coh_gap_max_cgs=runner.coh_gap_max_cgs_from_dn(dn=DN_COHES, np_apophis=np_apophis),
                 use_shape_crop=True if args.use_shape_crop else None,
                 dtmax_hours=args.dtmax_hours,
             )
@@ -197,7 +199,7 @@ def main() -> int:
         "\n".join(
             [
                 "Torque-align Blender re-runs (original batch runs 4 and 19).",
-                f"spin_period = {spin_period} hr, kc_cgs = {KC_CGS:g}, np_apophis = {np_apophis}",
+                f"spin_period = {spin_period} hr, kt_cgs = {KT_CGS:g}, np_apophis = {np_apophis}",
                 f"shape_crop = {args.use_shape_crop}"
                 + (f", shape_file = {shape_path.name}" if shape_path else ""),
                 f"case filter = {args.case}",

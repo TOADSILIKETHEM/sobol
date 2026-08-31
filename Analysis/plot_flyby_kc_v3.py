@@ -5,7 +5,13 @@ from __future__ import annotations
 
 import argparse
 import csv
+import sys
 from pathlib import Path
+
+_ANALYSIS_DIR = Path(__file__).resolve().parent
+if str(_ANALYSIS_DIR) not in sys.path:
+    sys.path.insert(0, str(_ANALYSIS_DIR))
+from csv_columns import kt_cgs_from_row
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -19,7 +25,10 @@ def load_batch(csv_path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         for row in csv.DictReader(f):
             if row.get("status") != "ok":
                 continue
-            kc.append(float(row["kc_cgs"]))
+            kc_val = kt_cgs_from_row(row)
+            if kc_val is None:
+                continue
+            kc.append(kc_val)
             disp.append(float(row["dispersion_ratio"]))
             ca.append(float(row["closest_approach_km"]))
     order = np.argsort(kc)

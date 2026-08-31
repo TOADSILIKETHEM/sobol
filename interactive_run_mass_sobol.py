@@ -30,7 +30,7 @@ SCALE_BOUND_DESTS: FrozenSet[str] = frozenset(
 
 # DEM contact parameters: patched into .in after phantomsetup; gated separately from setup scales.
 IN_BOUND_PAIRS: Tuple[Tuple[str, str, str], ...] = (
-    ("kc_cgs",        "kc_min",    "kc_max"),
+    ("kt_cgs",        "kt_min",    "kt_max"),
     ("ct_dem",        "ct_min",    "ct_max"),
     ("epsilon_n_dem", "eps_n_min", "eps_n_max"),
     ("kn_cgs",        "kn_min",    "kn_max"),
@@ -51,7 +51,7 @@ TIME_BOUND_DESTS: FrozenSet[str] = frozenset(
 TIME_FIXED_DESTS: FrozenSet[str] = frozenset({"tmax_hours", "dtmax_hours"})
 
 IN_PARAM_LABELS: Dict[str, str] = {
-    "kc_cgs":        "kc_cgs (cohesive spring constant dyne/cm; 0=off; DEM only)",
+    "kt_cgs":        "kt_cgs (tensile spring constant dyne/cm; 0=off; DEM only)",
     "ct_dem":        "ct_dem (tangential damping coefficient; DEM only)",
     "epsilon_n_dem": "epsilon_n_dem (normal restitution coeff [0=inelastic,1=elastic]; DEM only)",
     "kn_cgs":        "kn_cgs (normal spring constant dyne/cm; DEM only)",
@@ -67,8 +67,8 @@ SCALE_PARAM_LABELS: Dict[str, str] = {
     "scale_r_apophis": "scale_r_apophis (Apophis radius scale)",
     "scale_rho": "scale_rho (bulk density scale when mass is density-derived)",
     "apophis_spin_period":    "apophis_spin_period (spin period in hours; 0 = no spin; DEM runs only)",
-    "apophis_spin_obliquity": "apophis_spin_obliquity (spin axis obliquity from ecliptic north, degrees)",
-    "apophis_spin_azimuth":   "apophis_spin_azimuth (spin axis azimuth in ecliptic plane, degrees)",
+    "apophis_spin_obliquity": "apophis_spin_obliquity (degrees; runner converts to apophis_spin_axis_* in .setup)",
+    "apophis_spin_azimuth":   "apophis_spin_azimuth (degrees; runner converts to apophis_spin_axis_* in .setup)",
 }
 
 # dest -> section title (unknown dests fall under "Other")
@@ -99,8 +99,8 @@ DEST_TO_SECTION: Dict[str, str] = {
     "spin_obliquity_max": "Spin (optional dimension)",
     "spin_azimuth_min":   "Spin (optional dimension)",
     "spin_azimuth_max":   "Spin (optional dimension)",
-    "kc_min":    "DEM Contact (optional dimensions)",
-    "kc_max":    "DEM Contact (optional dimensions)",
+    "kt_min":    "DEM Contact (optional dimensions)",
+    "kt_max":    "DEM Contact (optional dimensions)",
     "ct_min":    "DEM Contact (optional dimensions)",
     "ct_max":    "DEM Contact (optional dimensions)",
     "eps_n_min": "DEM Contact (optional dimensions)",
@@ -257,14 +257,14 @@ INTERACTIVE_BRIEF: Dict[str, tuple[str, str]] = {
         "Upper bound for spin axis azimuth (degrees). Must be greater than min.",
         "Float in degrees, or Enter to leave azimuth unvaried.",
     ),
-    "kc_min": (
-        "Lower bound for kc_cgs (cohesive spring constant in dyne/cm; DEM only). "
+    "kt_min": (
+        "Lower bound for kt_cgs (tensile spring constant in dyne/cm; DEM only). "
         "Physically plausible range for Apophis-scale rubble: 1e5–1e9 dyne/cm. "
         "0 = no cohesion (default). Only active when run uses isink_potential=2.",
         "Float ≥ 0, or Enter to leave unvaried.",
     ),
-    "kc_max": (
-        "Upper bound for kc_cgs. Must be greater than min.",
+    "kt_max": (
+        "Upper bound for kt_cgs. Must be greater than min.",
         "Float > min, or Enter.",
     ),
     "ct_min": (

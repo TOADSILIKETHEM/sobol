@@ -16,7 +16,7 @@ that design has only N evaluations instead of N*(D+2) or N*(2*D+2).
 Recognised input parameters (varied dimensions):
   mass_input_kg, scale_vel, scale_pos, scale_r_apophis, scale_rho,
   apophis_spin_period, apophis_spin_obliquity, apophis_spin_azimuth,
-  apophis_spin_torque_align_deg, kc_cgs, np_apophis,
+  apophis_spin_torque_align_deg, kt_cgs, coh_gap_max_cgs, np_apophis,
   use_dem, use_shape_crop, apophis_only.
 
 Recognised response columns (--response / --saltelli-y-column):
@@ -90,7 +90,8 @@ INPUT_CANDIDATES: Tuple[str, ...] = (
     "apophis_spin_obliquity",
     "apophis_spin_azimuth",
     "apophis_spin_torque_align_deg",
-    "kc_cgs",
+    "kt_cgs",
+    "coh_gap_max_cgs",
     # Particle count (varies in --np-apophis-list sweeps).
     "np_apophis",
 )
@@ -422,12 +423,15 @@ def rows_to_arrays(
     col_arrays: Dict[str, np.ndarray] = {}
 
     for name in list(INPUT_CANDIDATES) + list(BOOL_INPUTS):
-        if name not in fieldnames or name == response:
+        col = name
+        if name == "kt_cgs" and name not in fieldnames and "kc_cgs" in fieldnames:
+            col = "kc_cgs"
+        if col not in fieldnames or col == response:
             continue
         vals: List[float] = []
         ok = True
         for r, _yv in kept:
-            v = _parse_numeric_cell(r.get(name, ""))
+            v = _parse_numeric_cell(r.get(col, ""))
             if v is None or not math.isfinite(v):
                 ok = False
                 break

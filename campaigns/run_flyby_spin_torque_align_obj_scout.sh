@@ -15,6 +15,12 @@ if [[ "${_torque_align_sym:-0}" -lt 1 ]]; then
   exit 1
 fi
 
+_kt_sym=$(strings sobol/phantomsetup 2>/dev/null | grep -c 'kt_cgs' || true)
+if [[ "${_kt_sym:-0}" -lt 1 ]]; then
+  echo "[ERROR] phantomsetup lacks kt_cgs — rebuild: cd sobol && make setup && make" >&2
+  exit 1
+fi
+
 DRY_RUN_ARGS=()
 if [[ "${DRY_RUN:-0}" == "1" ]]; then
   DRY_RUN_ARGS=(--dry-run)
@@ -36,7 +42,7 @@ python3 sobol/run_mass_sobol_phantom.py \
   --use-dem-fixed true \
   --np-apophis 500 \
   --use-shape-crop-fixed true \
-  --kc-fixed 1e7 \
+  --kt-fixed 1e7 \
   --spin-period-fixed 2.05 \
   --spin-torque-align-min 0 \
   --spin-torque-align-max 180 \
