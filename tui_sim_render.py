@@ -10,10 +10,11 @@ from __future__ import annotations
 
 import argparse
 import re
+import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).parent / "Analysis"))
@@ -186,3 +187,37 @@ def run_convert_stage(record: RunRecord, base_output_dir: Path) -> None:
         )
     except Exception as exc:
         raise ConvertError(f"conversion failed: {exc}") from exc
+
+
+class RenderError(RuntimeError):
+    pass
+
+
+def build_render_command(params: RenderParams) -> List[str]:
+    cmd = [
+        BLENDER_EXE, "--background", "--python", DEM_HEADLESS_RENDER, "--",
+        "--grains-dir", to_windows_path(params.grains_dir),
+        "--bodies-dir", to_windows_path(params.bodies_dir),
+        "--output-dir", to_windows_path(params.output_dir),
+        "--resolution", params.resolution,
+        "--samples", str(params.samples),
+        "--fps", str(params.fps),
+        "--camera-mode", params.camera_mode,
+    ]
+    if params.max_frames is not None:
+        cmd += ["--max-frames", str(params.max_frames)]
+    return cmd
+
+
+def run_render_stage(params: RenderParams) -> subprocess.CompletedProcess:
+    cmd = build_render_command(params)
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        # Blender's own print() output (including everything
+        # DEMGrainsBlenderEarthCam.py prints while exec()'d) goes to stdout;
+        # an uncaught Python traceback goes to stderr. A failure can land in
+        # either stream, so combine both before taking the tail.
+        combined = (result.stdout or "") + "\n" + (result.stderr or "")
+        tail = "\n".join(combined.splitlines()[-40:])
+        raise RenderError(f"blender exited {result.returncode}:\n{tail}")
+    return result

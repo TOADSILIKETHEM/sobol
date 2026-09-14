@@ -1,5 +1,6 @@
 """Tests for tui_sim_render.py (sim+render pipeline TUI)."""
 import argparse
+import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -141,3 +142,82 @@ def test_run_convert_stage_skips_when_sim_not_ok(monkeypatch):
     with pytest.raises(tsr.ConvertError, match="prepared_only"):
         tsr.run_convert_stage(record, base_output_dir=Path("/mnt/c/.../Code/DEMCSVs"))
     fake_convert.assert_not_called()
+
+
+def test_build_render_command_without_max_frames():
+    params = tsr.RenderParams(
+        grains_dir=Path("/mnt/c/DEMCSVs/batch/run_0001_grains_output"),
+        bodies_dir=Path("/mnt/c/DEMCSVs/batch/run_0001_bodies_output"),
+        output_dir=Path("/mnt/c/DEMCSVs/batch/run_0001_render"),
+        resolution="1280x720", samples=64, fps=30, camera_mode="auto",
+    )
+    cmd = tsr.build_render_command(params)
+
+    assert cmd[0] == tsr.BLENDER_EXE
+    assert cmd[1:4] == ["--background", "--python", tsr.DEM_HEADLESS_RENDER]
+    assert cmd[4] == "--"
+    assert "--grains-dir" in cmd and "C:/DEMCSVs/batch/run_0001_grains_output" in cmd
+    assert "--resolution" in cmd and "1280x720" in cmd
+    assert "--samples" in cmd and "64" in cmd
+    assert "--fps" in cmd and "30" in cmd
+    assert "--camera-mode" in cmd and "auto" in cmd
+    assert "--max-frames" not in cmd
+
+
+def test_build_render_command_with_max_frames():
+    params = tsr.RenderParams(
+        grains_dir=Path("/mnt/c/DEMCSVs/batch/run_0001_grains_output"),
+        bodies_dir=Path("/mnt/c/DEMCSVs/batch/run_0001_bodies_output"),
+        output_dir=Path("/mnt/c/DEMCSVs/batch/run_0001_render"),
+        max_frames=3,
+    )
+    cmd = tsr.build_render_command(params)
+    idx = cmd.index("--max-frames")
+    assert cmd[idx + 1] == "3"
+
+
+def test_run_render_stage_success(monkeypatch):
+    fake_result = subprocess.CompletedProcess(args=["blender"], returncode=0, stdout="ok", stderr="")
+    monkeypatch.setattr(tsr.subprocess, "run", lambda *a, **kw: fake_result)
+
+    params = tsr.RenderParams(
+        grains_dir=Path("/mnt/c/g"), bodies_dir=Path("/mnt/c/b"), output_dir=Path("/mnt/c/o"),
+    )
+    result = tsr.run_render_stage(params)
+    assert result is fake_result
+
+
+def test_run_render_stage_failure_raises_with_combined_tail(monkeypatch):
+    # Blender's own print() output goes to stdout; a Python traceback goes to
+    # stderr -- a failure can show up in either, so both must be checked.
+    stdout_text = "\n".join(f"stdout line {i}" for i in range(30))
+    stderr_text = "\n".join(f"stderr line {i}" for i in range(30))
+    fake_result = subprocess.CompletedProcess(
+        args=["blender"], returncode=1, stdout=stdout_text, stderr=stderr_text,
+    )
+    monkeypatch.setattr(tsr.subprocess, "run", lambda *a, **kw: fake_result)
+
+    params = tsr.RenderParams(
+        grains_dir=Path("/mnt/c/g"), bodies_dir=Path("/mnt/c/b"), output_dir=Path("/mnt/c/o"),
+    )
+    with pytest.raises(tsr.RenderError) as excinfo:
+        tsr.run_render_stage(params)
+    msg = str(excinfo.value)
+    assert "stderr line 29" in msg  # last lines of the combined text are kept
+    assert "stdout line 0" not in msg  # only the last ~40 combined lines survive
+
+
+def test_run_render_stage_failure_reads_stdout_only_traceback(monkeypatch):
+    # Regression case: some failures print everything to stdout with an
+    # empty stderr (e.g. exec()'d script prints its own error and returns
+    # non-zero without raising) -- stderr-only capture would show nothing.
+    fake_result = subprocess.CompletedProcess(
+        args=["blender"], returncode=1, stdout="GRAINS_DIR pattern not found", stderr="",
+    )
+    monkeypatch.setattr(tsr.subprocess, "run", lambda *a, **kw: fake_result)
+
+    params = tsr.RenderParams(
+        grains_dir=Path("/mnt/c/g"), bodies_dir=Path("/mnt/c/b"), output_dir=Path("/mnt/c/o"),
+    )
+    with pytest.raises(tsr.RenderError, match="GRAINS_DIR pattern not found"):
+        tsr.run_render_stage(params)
