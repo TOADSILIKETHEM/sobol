@@ -356,6 +356,15 @@ class SimRenderTUIApp(App[None]):
         self._pipeline_run_dir: Optional[Path] = None
         self._pipeline_prefix: str = ""
         self._pipeline_warning: str = ""
+        # This TUI runs one pipeline at a time -- @work(thread=True) defaults
+        # to exclusive=False, so without this guard a second click while a
+        # worker is in flight would start a second worker that overwrites
+        # the _pipeline_* state above out from under the first one. Named
+        # _pipeline_running (not _running) because App itself already uses a
+        # private _running attribute internally to back App.is_running --
+        # shadowing that broke the guard (it read as already-True as soon as
+        # the app's run loop started, before any click).
+        self._pipeline_running: bool = False
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -493,7 +502,14 @@ class SimRenderTUIApp(App[None]):
     def _on_quit(self) -> None:
         self.exit(None)
 
+    def _set_buttons_disabled(self, disabled: bool) -> None:
+        self.query_one("#btn-run", Button).disabled = disabled
+        self.query_one("#btn-dryrun", Button).disabled = disabled
+
     def _launch(self, dry_run: bool) -> None:
+        if self._pipeline_running:
+            self._set_status("A pipeline is already running.", error=True)
+            return
         try:
             sim_params = self._build_sim_params(dry_run)
             render_form = self._build_render_form()
@@ -501,6 +517,8 @@ class SimRenderTUIApp(App[None]):
             self._set_status(f"Error: {exc}", error=True)
             return
         warning = warn_if_high_grain_count(sim_params.sample.np_apophis) or ""
+        self._pipeline_running = True
+        self._set_buttons_disabled(True)
         self._pipeline_start = time.monotonic()
         self._pipeline_run_dir = sim_params.output_root / "run_0001"
         self._pipeline_prefix = sim_params.prefix
@@ -543,6 +561,11 @@ class SimRenderTUIApp(App[None]):
 
     def _report_result(self, result: PipelineResult) -> None:
         self._stop_progress_timer()
+        # Re-enable on every path -- including the worker-exception
+        # (stage="error") path -- so a failed run never leaves the app stuck
+        # unable to launch another one.
+        self._pipeline_running = False
+        self._set_buttons_disabled(False)
         elapsed = (
             time.monotonic() - self._pipeline_start if self._pipeline_start is not None else 0.0
         )

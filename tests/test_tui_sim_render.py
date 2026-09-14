@@ -1,8 +1,10 @@
 """Tests for tui_sim_render.py (sim+render pipeline TUI)."""
 import argparse
 import asyncio
+import re
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -369,7 +371,9 @@ def test_warn_if_high_grain_count_above_threshold():
 # transient string does, so this reliably detects "worker has landed" without
 # depending on timing.
 
-async def _click_and_wait_for_settled_status(app, button_id: str, timeout_s: float = 5.0) -> str:
+async def _click_and_wait_for_settled_status(
+    app, button_id: str, timeout_s: float = 5.0
+) -> tuple[str, bool]:
     async with app.run_test() as pilot:
         await pilot.click(button_id)
         status = app.query_one("#status", tsr.Static)
@@ -425,3 +429,144 @@ def test_worker_exception_reported_without_crashing_app(monkeypatch):
     assert "FileNotFoundError" in text
     assert "sobol.setup not found" in text
     assert still_running is True
+
+
+def test_second_launch_while_running_does_not_start_second_worker(monkeypatch):
+    # Review fix round 1, Important #1: a second click while a pipeline is
+    # in flight must not start a second @work(thread=True) worker (which
+    # defaults to exclusive=False) -- that would stomp the first run's
+    # _pipeline_* state. run_sim_stage blocks on a threading.Event so the
+    # test controls exactly when the first (and only) worker completes.
+    release_event = threading.Event()
+    call_count = {"n": 0}
+
+    def blocking_run_sim_stage(params):
+        call_count["n"] += 1
+        assert release_event.wait(timeout=5.0), "test event was never released"
+        return tsr.RunRecord(
+            run_id=1, mass_input_kg=float("nan"), run_dir="sobol_mass_runs/batch/run_0001",
+            status="prepared_only", closest_approach_km=float("nan"),
+            closest_approach_au=float("nan"), error="",
+        )
+
+    monkeypatch.setattr(tsr, "run_sim_stage", blocking_run_sim_stage)
+    monkeypatch.setattr(tsr, "check_blender_exe", lambda *a, **kw: None)
+
+    async def _scenario():
+        app = tsr.SimRenderTUIApp()
+        async with app.run_test() as pilot:
+            await pilot.click("#btn-dryrun")
+            await pilot.pause(0.2)  # let the worker thread start and block
+
+            run_btn = app.query_one("#btn-run", tsr.Button)
+            dryrun_btn = app.query_one("#btn-dryrun", tsr.Button)
+            assert run_btn.disabled is True
+            assert dryrun_btn.disabled is True
+
+            # Second click while the first pipeline is still running. The
+            # button is disabled, so Textual itself swallows this click (no
+            # Pressed message) -- that is the primary defense. Status stays
+            # whatever the first launch already set.
+            await pilot.click("#btn-dryrun")
+            await pilot.pause(0.2)
+            status = app.query_one("#status", tsr.Static)
+            text_after_disabled_click = str(status.content)
+
+            # Belt-and-braces: call _launch() directly (bypassing button
+            # state) the way a race between the click event queue and a
+            # fast-landing worker could in principle re-enter it -- the
+            # _pipeline_running guard inside _launch() must still refuse a
+            # second run and say so in the status bar.
+            app._launch(dry_run=True)
+            text_from_direct_relaunch = str(status.content)
+
+            release_event.set()  # let the (only) worker finish
+
+            elapsed = 0.0
+            step = 0.1
+            while elapsed < 5.0 and run_btn.disabled:
+                await pilot.pause(step)
+                elapsed += step
+
+            final_text = str(status.content)
+            run_disabled_after = run_btn.disabled
+            dryrun_disabled_after = dryrun_btn.disabled
+        return (
+            text_after_disabled_click, text_from_direct_relaunch, final_text,
+            run_disabled_after, dryrun_disabled_after,
+        )
+
+    (
+        text_after_disabled_click, text_from_direct_relaunch, final_text,
+        run_disabled_after, dryrun_disabled_after,
+    ) = asyncio.run(_scenario())
+
+    assert text_after_disabled_click.startswith("Dry run")  # disabled click was a no-op
+    assert "already running" in text_from_direct_relaunch.lower()
+    assert call_count["n"] == 1  # neither second attempt started a second worker
+    assert "Dry run complete" in final_text
+    assert run_disabled_after is False
+    assert dryrun_disabled_after is False
+
+
+# --- _build_sim_params coverage (review fix round 1, Important #2) -----
+
+def test_build_sim_params_output_root_shape():
+    async def _scenario():
+        app = tsr.SimRenderTUIApp()
+        async with app.run_test():
+            # prefix="sobol", batch_label="sim_render" are the form defaults.
+            return app._build_sim_params(False)
+
+    params = asyncio.run(_scenario())
+
+    assert params.output_root.parent == Path("sobol_mass_runs").resolve()
+    assert re.match(r"^sobol_\d{8}_\d{6}_sim_render$", params.output_root.name), (
+        params.output_root.name
+    )
+
+
+def test_blank_batch_label_shows_error_and_never_starts_worker(monkeypatch):
+    run_mock = MagicMock()
+    monkeypatch.setattr(tsr, "run_sim_stage", run_mock)
+    monkeypatch.setattr(tsr, "check_blender_exe", lambda *a, **kw: None)
+
+    async def _scenario():
+        app = tsr.SimRenderTUIApp()
+        async with app.run_test() as pilot:
+            app.query_one("#batch-label", tsr.Input).value = ""
+            await pilot.click("#btn-dryrun")
+            await pilot.pause(0.2)
+            status = app.query_one("#status", tsr.Static)
+            return str(status.content)
+
+    text = asyncio.run(_scenario())
+
+    assert text.startswith("Error:")
+    run_mock.assert_not_called()
+
+
+def test_build_sim_params_shape_file_set():
+    async def _scenario():
+        app = tsr.SimRenderTUIApp()
+        async with app.run_test():
+            app.query_one("#shape-file", tsr.Input).value = "/mnt/c/shapes/apophis.obj"
+            return app._build_sim_params(False)
+
+    params = asyncio.run(_scenario())
+
+    assert params.shape_file == "/mnt/c/shapes/apophis.obj"
+    assert params.sample.use_shape_crop is True
+
+
+def test_build_sim_params_shape_file_blank():
+    async def _scenario():
+        app = tsr.SimRenderTUIApp()
+        async with app.run_test():
+            # shape-file Input defaults to "" -- left untouched here.
+            return app._build_sim_params(False)
+
+    params = asyncio.run(_scenario())
+
+    assert params.shape_file is None
+    assert params.sample.use_shape_crop is None
