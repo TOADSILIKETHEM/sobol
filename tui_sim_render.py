@@ -73,6 +73,14 @@ def to_windows_path(p: Path) -> str:
 DEM_HEADLESS_RENDER = to_windows_path(_REPO_WIN_CODE / "BlenderConvert" / "DEMHeadlessRender.py")
 
 
+def check_blender_exe(path: str = BLENDER_EXE) -> None:
+    if not Path(path).is_file():
+        raise FileNotFoundError(
+            f"blender.exe not found at {path} -- confirm the Blender 5.2.1 LTS "
+            "install path (see CLAUDE.md) or update BLENDER_EXE in tui_sim_render.py."
+        )
+
+
 @dataclass
 class SimParams:
     """Fixed-value inputs for one PHANTOM run (no Sobol sampling)."""

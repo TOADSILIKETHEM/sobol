@@ -329,3 +329,15 @@ def test_run_pipeline_success_message_counts_rendered_frames(monkeypatch, tmp_pa
 
     output_dir = base_output_dir / "batch" / "run_0001_render"
     assert result.message == f"rendered 2 frame(s) to {output_dir}"
+
+
+def test_check_blender_exe_raises_when_missing(tmp_path):
+    missing = tmp_path / "does_not_exist" / "blender.exe"
+    with pytest.raises(FileNotFoundError, match=str(missing)):
+        tsr.check_blender_exe(str(missing))
+
+
+def test_check_blender_exe_passes_when_present(tmp_path):
+    fake_exe = tmp_path / "blender.exe"
+    fake_exe.write_text("not a real binary, just needs to exist")
+    tsr.check_blender_exe(str(fake_exe))  # must not raise
