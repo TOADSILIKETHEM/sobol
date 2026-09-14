@@ -221,3 +221,111 @@ def test_run_render_stage_failure_reads_stdout_only_traceback(monkeypatch):
     )
     with pytest.raises(tsr.RenderError, match="GRAINS_DIR pattern not found"):
         tsr.run_render_stage(params)
+
+
+def _ok_record(run_dir="sobol_mass_runs/batch/run_0001"):
+    return tsr.RunRecord(
+        run_id=1, mass_input_kg=float("nan"), run_dir=run_dir, status="ok",
+        closest_approach_km=1.0, closest_approach_au=0.01, error="",
+    )
+
+
+def test_run_pipeline_stops_after_failed_sim(monkeypatch):
+    bad_record = tsr.RunRecord(
+        run_id=1, mass_input_kg=float("nan"), run_dir="sobol_mass_runs/batch/run_0001",
+        status="phantomsetup_failed", closest_approach_km=float("nan"),
+        closest_approach_au=float("nan"), error="phantomsetup exited 1",
+    )
+    monkeypatch.setattr(tsr, "run_sim_stage", lambda params: bad_record)
+    convert_mock = MagicMock()
+    render_mock = MagicMock()
+    monkeypatch.setattr(tsr, "run_convert_stage", convert_mock)
+    monkeypatch.setattr(tsr, "run_render_stage", render_mock)
+
+    result = tsr.run_pipeline(tsr.SimParams(), tsr.RenderFormValues(), Path("/mnt/c/.../DEMCSVs"))
+
+    assert result.stage == "sim"
+    assert result.ok is False
+    assert "phantomsetup exited 1" in result.message
+    convert_mock.assert_not_called()
+    render_mock.assert_not_called()
+
+
+def test_run_pipeline_stops_after_failed_convert(monkeypatch):
+    monkeypatch.setattr(tsr, "run_sim_stage", lambda params: _ok_record())
+
+    def boom_convert(record, base_output_dir):
+        raise tsr.ConvertError("conversion failed: bad dump")
+    monkeypatch.setattr(tsr, "run_convert_stage", boom_convert)
+    render_mock = MagicMock()
+    monkeypatch.setattr(tsr, "run_render_stage", render_mock)
+
+    result = tsr.run_pipeline(tsr.SimParams(), tsr.RenderFormValues(), Path("/mnt/c/.../DEMCSVs"))
+
+    assert result.stage == "convert"
+    assert result.ok is False
+    assert "bad dump" in result.message
+    render_mock.assert_not_called()
+
+
+def test_run_pipeline_stops_after_failed_render(monkeypatch):
+    monkeypatch.setattr(tsr, "run_sim_stage", lambda params: _ok_record())
+    monkeypatch.setattr(tsr, "run_convert_stage", lambda record, base_output_dir: None)
+
+    def boom_render(params):
+        raise tsr.RenderError("blender exited 1:\nsome error")
+    monkeypatch.setattr(tsr, "run_render_stage", boom_render)
+
+    result = tsr.run_pipeline(tsr.SimParams(), tsr.RenderFormValues(), Path("/mnt/c/.../DEMCSVs"))
+
+    assert result.stage == "render"
+    assert result.ok is False
+    assert "some error" in result.message
+
+
+def test_run_pipeline_full_success(monkeypatch):
+    record = _ok_record()
+    monkeypatch.setattr(tsr, "run_sim_stage", lambda params: record)
+    monkeypatch.setattr(tsr, "run_convert_stage", lambda rec, base_output_dir: None)
+
+    captured = {}
+    def fake_render(params):
+        captured["params"] = params
+        return subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+    monkeypatch.setattr(tsr, "run_render_stage", fake_render)
+
+    sim_params = tsr.SimParams(output_root=Path("sobol_mass_runs/batch"))
+    render_form = tsr.RenderFormValues(resolution="640x360", samples=8, camera_mode="grain_only")
+    result = tsr.run_pipeline(sim_params, render_form, Path("/mnt/c/.../DEMCSVs"))
+
+    assert result.stage == "done"
+    assert result.ok is True
+    rp = captured["params"]
+    assert rp.grains_dir == Path("/mnt/c/.../DEMCSVs") / "batch" / "run_0001_grains_output"
+    assert rp.bodies_dir == Path("/mnt/c/.../DEMCSVs") / "batch" / "run_0001_bodies_output"
+    assert rp.output_dir == Path("/mnt/c/.../DEMCSVs") / "batch" / "run_0001_render"
+    assert rp.resolution == "640x360"
+    assert rp.samples == 8
+    assert rp.camera_mode == "grain_only"
+
+
+def test_run_pipeline_success_message_counts_rendered_frames(monkeypatch, tmp_path):
+    # Ruling: run_pipeline's success message counts rendered PNGs in
+    # output_dir rather than a fixed "rendered to <dir>" string.
+    record = _ok_record()
+    monkeypatch.setattr(tsr, "run_sim_stage", lambda params: record)
+    monkeypatch.setattr(tsr, "run_convert_stage", lambda rec, base_output_dir: None)
+
+    def fake_render(params):
+        params.output_dir.mkdir(parents=True, exist_ok=True)
+        (params.output_dir / "frame_0001.png").write_bytes(b"")
+        (params.output_dir / "frame_0002.png").write_bytes(b"")
+        return subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+    monkeypatch.setattr(tsr, "run_render_stage", fake_render)
+
+    base_output_dir = tmp_path / "DEMCSVs"
+    sim_params = tsr.SimParams(output_root=Path("sobol_mass_runs/batch"))
+    result = tsr.run_pipeline(sim_params, tsr.RenderFormValues(), base_output_dir)
+
+    output_dir = base_output_dir / "batch" / "run_0001_render"
+    assert result.message == f"rendered 2 frame(s) to {output_dir}"

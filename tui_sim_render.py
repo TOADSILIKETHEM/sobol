@@ -221,3 +221,44 @@ def run_render_stage(params: RenderParams) -> subprocess.CompletedProcess:
         tail = "\n".join(combined.splitlines()[-40:])
         raise RenderError(f"blender exited {result.returncode}:\n{tail}")
     return result
+
+
+def run_pipeline(sim_params: SimParams, render_form: RenderFormValues, base_output_dir: Path) -> PipelineResult:
+    """Sim -> convert -> render, stopping at the first failed stage."""
+    record = run_sim_stage(sim_params)
+    if record.status != "ok":
+        return PipelineResult(
+            stage="sim", ok=False,
+            message=record.error or f"sim ended with status={record.status!r}",
+            record=record,
+        )
+
+    try:
+        run_convert_stage(record, base_output_dir)
+    except ConvertError as exc:
+        return PipelineResult(stage="convert", ok=False, message=str(exc), record=record)
+
+    run_dir = Path(record.run_dir)
+    grains_dir, bodies_dir = _grains_and_bodies_dirs(run_dir, base_output_dir, sim_params.output_root)
+    output_dir = _render_output_dir(run_dir, base_output_dir, sim_params.output_root)
+    render_params = RenderParams(
+        grains_dir=grains_dir,
+        bodies_dir=bodies_dir,
+        output_dir=output_dir,
+        resolution=render_form.resolution,
+        samples=render_form.samples,
+        fps=render_form.fps,
+        max_frames=render_form.max_frames,
+        camera_mode=render_form.camera_mode,
+    )
+    try:
+        run_render_stage(render_params)
+    except RenderError as exc:
+        return PipelineResult(stage="render", ok=False, message=str(exc), record=record)
+
+    n_frames = len(list(output_dir.glob("frame_*.png")))
+    return PipelineResult(
+        stage="done", ok=True,
+        message=f"rendered {n_frames} frame(s) to {output_dir}",
+        record=record,
+    )
