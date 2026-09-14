@@ -1,6 +1,8 @@
 """Tests for tui_sim_render.py (sim+render pipeline TUI)."""
+import argparse
 import sys
 from pathlib import Path
+from unittest.mock import MagicMock
 
 # Run from sobol/ so the module is importable, same convention as
 # sobol/tests/test_metric_fixes.py.
@@ -36,3 +38,34 @@ def test_render_form_values_defaults():
     assert r.fps == 24
     assert r.max_frames is None
     assert r.camera_mode == "auto"
+
+
+def test_run_sim_stage_forwards_params(monkeypatch):
+    fake_paths = (Path("base.setup"), Path("base.in"), Path("phantomsetup"), Path("phantom"))
+    fake_preflight = MagicMock(return_value=fake_paths)
+    fake_record = tsr.RunRecord(
+        run_id=1, mass_input_kg=float("nan"), run_dir="sobol_mass_runs/run_0001",
+        status="ok", closest_approach_km=1234.5, closest_approach_au=0.01,
+        error="",
+    )
+    fake_run_one_case = MagicMock(return_value=fake_record)
+    monkeypatch.setattr(tsr, "preflight", fake_preflight)
+    monkeypatch.setattr(tsr, "run_one_case", fake_run_one_case)
+
+    params = tsr.SimParams(prefix="sobol", earth_sink_id=4, apophis_sink_id=11)
+    result = tsr.run_sim_stage(params)
+
+    assert result is fake_record
+    fake_preflight.assert_called_once()
+    preflight_args = fake_preflight.call_args[0][0]
+    assert isinstance(preflight_args, argparse.Namespace)
+    assert preflight_args.prefix == "sobol"
+    assert preflight_args.dry_run is False
+
+    fake_run_one_case.assert_called_once()
+    _, kwargs = fake_run_one_case.call_args
+    assert kwargs["run_id"] == 1
+    assert kwargs["sample"] is params.sample
+    assert kwargs["earth_sink_id"] == 4
+    assert kwargs["apophis_sink_id"] == 11
+    assert kwargs["dry_run"] is False

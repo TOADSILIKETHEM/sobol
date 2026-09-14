@@ -8,6 +8,7 @@ Launch:
 """
 from __future__ import annotations
 
+import argparse
 import re
 import sys
 from dataclasses import dataclass, field
@@ -22,6 +23,8 @@ from run_mass_sobol_phantom import (  # noqa: E402
     EARTH_SINK_ID_DEFAULT,
     APOPHIS_SINK_ID_DEFAULT,
     DEFAULT_DN_COHES_FACTOR,
+    preflight,
+    run_one_case,
 )
 
 # Windows-side Code repo root, reached over the WSL /mnt/c/ interop mount —
@@ -110,3 +113,32 @@ class PipelineResult:
     ok: bool
     message: str
     record: Optional[RunRecord] = None
+
+
+def run_sim_stage(params: SimParams) -> RunRecord:
+    """Run one PHANTOM case from params.sample. Blocking — call from a worker thread."""
+    base_setup, base_input, phantomsetup_bin, phantom_bin = preflight(
+        argparse.Namespace(
+            prefix=params.prefix,
+            phantom_dir=str(params.phantom_dir),
+            dry_run=params.dry_run,
+        ),
+        params.base_dir,
+        params.output_root,
+    )
+    return run_one_case(
+        run_id=1,
+        sample=params.sample,
+        base_setup=base_setup,
+        base_input=base_input,
+        output_root=params.output_root,
+        prefix=params.prefix,
+        phantomsetup_bin=phantomsetup_bin,
+        phantom_bin=phantom_bin,
+        ref_mass_kg=None,
+        dry_run=params.dry_run,
+        earth_sink_id=params.earth_sink_id,
+        apophis_sink_id=params.apophis_sink_id,
+        ephemeris_cache_dir=params.ephemeris_cache_dir,
+        shape_file=params.shape_file,
+    )
