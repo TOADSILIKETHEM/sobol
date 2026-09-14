@@ -1,5 +1,6 @@
 """Tests for tui_sim_render.py (sim+render pipeline TUI)."""
 import argparse
+import asyncio
 import subprocess
 import sys
 from pathlib import Path
@@ -341,3 +342,86 @@ def test_check_blender_exe_passes_when_present(tmp_path):
     fake_exe = tmp_path / "blender.exe"
     fake_exe.write_text("not a real binary, just needs to exist")
     tsr.check_blender_exe(str(fake_exe))  # must not raise
+
+
+def test_warn_if_high_grain_count_below_threshold():
+    assert tsr.warn_if_high_grain_count(500) is None
+    assert tsr.warn_if_high_grain_count(2000) is None  # boundary is inclusive
+
+
+def test_warn_if_high_grain_count_above_threshold():
+    msg = tsr.warn_if_high_grain_count(5000)
+    assert msg is not None
+    assert "5000" in msg
+    assert "2000" in msg
+
+
+# --- Textual pilot tests -----------------------------------------------
+#
+# No pytest-asyncio in this environment: each test below is a normal sync
+# function that runs its own async scenario via asyncio.run(). The worker
+# started by @work(thread=True) lands its result via call_from_thread from a
+# background thread, so a single fixed pilot.pause() is flaky -- instead poll
+# the status text in a bounded loop (up to ~5s) until it stops being one of
+# the known *transient* strings _launch()/_tick_progress() write ("Dry
+# run...", "Running..." with or without the live-progress suffix). The final
+# report from _report_result() always starts with "[<n>s] ", which neither
+# transient string does, so this reliably detects "worker has landed" without
+# depending on timing.
+
+async def _click_and_wait_for_settled_status(app, button_id: str, timeout_s: float = 5.0) -> str:
+    async with app.run_test() as pilot:
+        await pilot.click(button_id)
+        status = app.query_one("#status", tsr.Static)
+        text = str(status.content)
+        elapsed = 0.0
+        step = 0.1
+        while elapsed < timeout_s and (text.startswith("Dry run") or text.startswith("Running")):
+            await pilot.pause(step)
+            elapsed += step
+            text = str(status.content)
+        still_running = app.is_running
+    return text, still_running
+
+
+def test_dry_run_stops_before_convert_and_render(monkeypatch):
+    dry_run_record = tsr.RunRecord(
+        run_id=1, mass_input_kg=float("nan"), run_dir="sobol_mass_runs/batch/run_0001",
+        status="prepared_only", closest_approach_km=float("nan"),
+        closest_approach_au=float("nan"), error="",
+    )
+    monkeypatch.setattr(tsr, "run_sim_stage", lambda params: dry_run_record)
+    convert_mock = MagicMock()
+    render_mock = MagicMock()
+    monkeypatch.setattr(tsr, "run_convert_stage", convert_mock)
+    monkeypatch.setattr(tsr, "run_render_stage", render_mock)
+    monkeypatch.setattr(tsr, "check_blender_exe", lambda *a, **kw: None)
+
+    app = tsr.SimRenderTUIApp()
+    text, still_running = asyncio.run(_click_and_wait_for_settled_status(app, "#btn-dryrun"))
+
+    assert "Dry run complete" in text
+    assert "sobol_mass_runs/batch/run_0001" in text
+    assert "nothing to convert/render" in text
+    assert still_running is True
+    convert_mock.assert_not_called()
+    render_mock.assert_not_called()
+
+
+def test_worker_exception_reported_without_crashing_app(monkeypatch):
+    # Ruling 5: an uncaught exception inside run_pipeline() (e.g. preflight()
+    # raising FileNotFoundError for a missing sobol.setup) must be caught by
+    # the worker and reported, not crash the app.
+    def boom(params):
+        raise FileNotFoundError("sobol.setup not found")
+
+    monkeypatch.setattr(tsr, "run_sim_stage", boom)
+    monkeypatch.setattr(tsr, "check_blender_exe", lambda *a, **kw: None)
+
+    app = tsr.SimRenderTUIApp()
+    text, still_running = asyncio.run(_click_and_wait_for_settled_status(app, "#btn-dryrun"))
+
+    assert "Failed at error" in text
+    assert "FileNotFoundError" in text
+    assert "sobol.setup not found" in text
+    assert still_running is True
