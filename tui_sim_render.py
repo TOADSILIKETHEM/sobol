@@ -9,6 +9,7 @@ Launch:
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -31,6 +32,7 @@ from run_mass_sobol_phantom import (  # noqa: E402
     preflight,
     run_one_case,
     sanitize_batch_label,
+    _DEFAULT_PHANTOM_DIR as _RMS_DEFAULT_PHANTOM_DIR,
 )
 from run_demtocsv_batch import (  # noqa: E402
     run_dem_dump_convert,
@@ -60,6 +62,7 @@ _REPO_WIN_CODE = Path(
 BLENDER_EXE = "/mnt/c/Program Files/Blender Foundation/Blender 5.2/blender.exe"
 
 _MNT_DRIVE_RE = re.compile(r"^/mnt/([a-zA-Z])(/.*)?$")
+_RESOLUTION_RE = re.compile(r"^(\d+)x(\d+)$")
 
 
 def to_windows_path(p: Path) -> str:
@@ -98,14 +101,42 @@ def check_blender_exe(path: str = BLENDER_EXE) -> None:
         )
 
 
+# Form-default helpers (review fix, Important #1). Computed via __file__ so
+# they are correct regardless of the directory this script is launched from
+# -- "python3 sobol/tui_sim_render.py" from /home/mboyle/Honours previously
+# resolved base_dir to "." (Honours, not sobol), where sobol.setup/sobol.in
+# do not live; and "python3 tui_sim_render.py" from sobol/ previously landed
+# output under sobol/sobol_mass_runs instead of Honours/sobol_mass_runs.
+
+def _default_base_dir() -> Path:
+    """sobol.setup / sobol.in live next to this script -- the sobol/ dir."""
+    return Path(__file__).resolve().parent
+
+
+def _default_phantom_dir() -> str:
+    """Mirrors run_mass_sobol_phantom.py's own --phantom-dir CLI default
+    expression (that module's argparse setup, `default=os.environ.get(
+    "PHANTOM_DIR", str(_DEFAULT_PHANTOM_DIR))`): the PHANTOM_DIR env var if
+    set, else that module's own _DEFAULT_PHANTOM_DIR (its own directory,
+    which happens to be this same sobol/ dir since both scripts live there).
+    """
+    return os.environ.get("PHANTOM_DIR", str(_RMS_DEFAULT_PHANTOM_DIR))
+
+
+def _default_output_root() -> Path:
+    """Parent of sobol/ (i.e. Honours/) -- so runs land in
+    Honours/sobol_mass_runs regardless of the launch cwd."""
+    return Path(__file__).resolve().parent.parent / "sobol_mass_runs"
+
+
 @dataclass
 class SimParams:
     """Fixed-value inputs for one PHANTOM run (no Sobol sampling)."""
 
     prefix: str = "sobol"
-    base_dir: Path = field(default_factory=lambda: Path("."))
-    phantom_dir: Path = field(default_factory=lambda: Path("."))
-    output_root: Path = field(default_factory=lambda: Path("sobol_mass_runs"))
+    base_dir: Path = field(default_factory=_default_base_dir)
+    phantom_dir: Path = field(default_factory=lambda: Path(_default_phantom_dir()))
+    output_root: Path = field(default_factory=_default_output_root)
     ephemeris_cache_dir: Optional[Path] = None
     dry_run: bool = False
     earth_sink_id: int = EARTH_SINK_ID_DEFAULT
@@ -266,6 +297,23 @@ def run_pipeline(sim_params: SimParams, render_form: RenderFormValues, base_outp
     run_dir = Path(record.run_dir)
     grains_dir, bodies_dir = _grains_and_bodies_dirs(run_dir, base_output_dir, sim_params.output_root)
     output_dir = _render_output_dir(run_dir, base_output_dir, sim_params.output_root)
+
+    # DEMDumpConvert.py never raises on a bad dump or an empty run -- it
+    # prints and carries on -- so run_convert_stage() "succeeding" is not
+    # proof any frame was actually converted. Catch that here rather than
+    # let Blender fail minutes/hours later on "no grain npz files found".
+    n_npz = len(list(grains_dir.glob("*.npz")))
+    if n_npz == 0:
+        return PipelineResult(
+            stage="convert", ok=False,
+            message=(
+                f"no grain npz files found in {grains_dir} -- DEMDumpConvert.py "
+                "ran without raising but converted nothing; check that the run "
+                f"produced dumps matching its hardcoded \"sobol\" prefix "
+                "(sobol_[0-9]*) with enough DEM grains"
+            ),
+            record=record,
+        )
     render_params = RenderParams(
         grains_dir=grains_dir,
         bodies_dir=bodies_dir,
@@ -284,7 +332,7 @@ def run_pipeline(sim_params: SimParams, render_form: RenderFormValues, base_outp
     n_frames = len(list(output_dir.glob("frame_*.png")))
     return PipelineResult(
         stage="done", ok=True,
-        message=f"rendered {n_frames} frame(s) to {output_dir}",
+        message=f"converted {n_npz} frame(s); rendered {n_frames} frame(s) to {output_dir}",
         record=record,
     )
 
@@ -375,9 +423,11 @@ class SimRenderTUIApp(App[None]):
                 "batch_label", Input("sim_render", id="batch-label"),
                 "batch dir suffix",
             )
-            yield _Row("base_dir", Input(".", id="base-dir"), "dir")
-            yield _Row("phantom_dir", Input(".", id="phantom-dir"), "dir")
-            yield _Row("output_root", Input("sobol_mass_runs", id="output-root"), "parent dir")
+            yield _Row("base_dir", Input(str(_default_base_dir()), id="base-dir"), "dir")
+            yield _Row("phantom_dir", Input(_default_phantom_dir(), id="phantom-dir"), "dir")
+            yield _Row(
+                "output_root", Input(str(_default_output_root()), id="output-root"), "parent dir",
+            )
             yield _Row(
                 "ephemeris_cache_dir",
                 Input("", id="eph-cache", placeholder="(none — skips Horizons download)"),
@@ -388,7 +438,9 @@ class SimRenderTUIApp(App[None]):
             yield _Row("np_apophis", Input("500", id="np-apophis"), "int")
             yield _Row("spin_period (hr)", Input("", id="spin-period", placeholder="(template default)"), "hr")
             yield _Row("spin_torque_align (deg)", Input("", id="spin-torque-align", placeholder="0-180"), "deg")
-            yield _Row("kt_cgs", Input("0", id="kt-cgs"), "dyne/cm")
+            yield _Row(
+                "kt_cgs", Input("", id="kt-cgs", placeholder="(template default)"), "dyne/cm",
+            )
             yield _Row("dn_cohes_factor", Input(str(DEFAULT_DN_COHES_FACTOR), id="dn-cohes-factor"), "float")
             yield _Row("tmax (hr)", Input("", id="tmax-hours", placeholder="(template default)"), "hr")
             yield _Row("dtmax (hr)", Input("", id="dtmax-hours", placeholder="(template default)"), "hr")
@@ -407,7 +459,10 @@ class SimRenderTUIApp(App[None]):
             yield _Row("max_frames", Input("", id="max-frames", placeholder="(all frames)"), "int, optional")
             yield _Row(
                 "camera_mode",
-                Select([("auto", "auto"), ("grain_only", "grain_only")], value="auto", id="camera-mode"),
+                Select(
+                    [("auto", "auto"), ("grain_only", "grain_only")],
+                    value="auto", id="camera-mode", allow_blank=False,
+                ),
             )
 
         with Horizontal(id="bar"):
@@ -435,9 +490,11 @@ class SimRenderTUIApp(App[None]):
     def _build_sim_params(self, dry_run: bool) -> SimParams:
         np_apophis = int(self._iv("np-apophis"))
         dn = float(self._iv("dn-cohes-factor") or DEFAULT_DN_COHES_FACTOR)
-        kt_cgs = float(self._iv("kt-cgs") or "0")
+        kt_cgs_raw = self._iv("kt-cgs")
+        kt_cgs = float(kt_cgs_raw) if kt_cgs_raw else None
         coh_gap_max_cgs = (
-            coh_gap_max_cgs_from_dn(dn=dn, np_apophis=np_apophis) if kt_cgs > 0 else None
+            coh_gap_max_cgs_from_dn(dn=dn, np_apophis=np_apophis)
+            if kt_cgs is not None and kt_cgs > 0 else None
         )
         shape_file_raw = self._iv("shape-file")
         sample = RunSample(
@@ -480,13 +537,31 @@ class SimRenderTUIApp(App[None]):
         )
 
     def _build_render_form(self) -> RenderFormValues:
+        # Validated eagerly (review fix, Minor #4) so a typo is caught in the
+        # status bar immediately rather than surfacing as a Blender failure
+        # possibly hours later once sim + convert have already run.
+        resolution = self._iv("resolution")
+        m = _RESOLUTION_RE.match(resolution)
+        if not m or int(m.group(1)) <= 0 or int(m.group(2)) <= 0:
+            raise ValueError(
+                f"resolution must look like WIDTHxHEIGHT with both > 0 (got {resolution!r})"
+            )
+        samples = int(self._iv("samples"))
+        if samples <= 0:
+            raise ValueError(f"samples must be > 0 (got {samples})")
+        fps = int(self._iv("fps"))
+        if fps <= 0:
+            raise ValueError(f"fps must be > 0 (got {fps})")
         max_frames_raw = self._iv("max-frames")
+        max_frames = int(max_frames_raw) if max_frames_raw else None
+        if max_frames is not None and max_frames <= 0:
+            raise ValueError(f"max_frames must be > 0 when set (got {max_frames})")
         camera_mode = self.query_one("#camera-mode", Select).value
         return RenderFormValues(
-            resolution=self._iv("resolution"),
-            samples=int(self._iv("samples")),
-            fps=int(self._iv("fps")),
-            max_frames=int(max_frames_raw) if max_frames_raw else None,
+            resolution=resolution,
+            samples=samples,
+            fps=fps,
+            max_frames=max_frames,
             camera_mode=str(camera_mode),
         )
 

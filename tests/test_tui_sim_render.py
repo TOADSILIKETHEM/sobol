@@ -271,25 +271,66 @@ def test_run_pipeline_stops_after_failed_convert(monkeypatch):
     render_mock.assert_not_called()
 
 
-def test_run_pipeline_stops_after_failed_render(monkeypatch):
+def _write_fake_npz(grains_dir: Path, n: int = 1) -> None:
+    grains_dir.mkdir(parents=True, exist_ok=True)
+    for i in range(n):
+        (grains_dir / f"sobol_{i:05d}.npz").write_bytes(b"")
+
+
+def test_run_pipeline_stops_after_failed_render(monkeypatch, tmp_path):
     monkeypatch.setattr(tsr, "run_sim_stage", lambda params: _ok_record())
-    monkeypatch.setattr(tsr, "run_convert_stage", lambda record, base_output_dir: None)
+
+    base_output_dir = tmp_path / "DEMCSVs"
+    grains_dir = base_output_dir / "batch" / "run_0001_grains_output"
+
+    def fake_convert(record, base_output_dir):
+        _write_fake_npz(grains_dir, 1)
+    monkeypatch.setattr(tsr, "run_convert_stage", fake_convert)
 
     def boom_render(params):
         raise tsr.RenderError("blender exited 1:\nsome error")
     monkeypatch.setattr(tsr, "run_render_stage", boom_render)
 
-    result = tsr.run_pipeline(tsr.SimParams(), tsr.RenderFormValues(), Path("/mnt/c/.../DEMCSVs"))
+    sim_params = tsr.SimParams(output_root=Path("sobol_mass_runs/batch"))
+    result = tsr.run_pipeline(sim_params, tsr.RenderFormValues(), base_output_dir)
 
     assert result.stage == "render"
     assert result.ok is False
     assert "some error" in result.message
 
 
-def test_run_pipeline_full_success(monkeypatch):
+def test_run_pipeline_convert_succeeds_but_no_npz_fails_before_render(monkeypatch, tmp_path):
+    # DEMDumpConvert.py never raises -- with no dumps, or a dump that throws,
+    # it prints and carries on, so run_convert_stage() "succeeding" with zero
+    # npz files must itself be treated as a convert failure, and render must
+    # never start.
+    monkeypatch.setattr(tsr, "run_sim_stage", lambda params: _ok_record())
+    monkeypatch.setattr(tsr, "run_convert_stage", lambda record, base_output_dir: None)
+    render_mock = MagicMock()
+    monkeypatch.setattr(tsr, "run_render_stage", render_mock)
+
+    base_output_dir = tmp_path / "DEMCSVs"
+    sim_params = tsr.SimParams(output_root=Path("sobol_mass_runs/batch"))
+    result = tsr.run_pipeline(sim_params, tsr.RenderFormValues(), base_output_dir)
+
+    grains_dir = base_output_dir / "batch" / "run_0001_grains_output"
+    assert result.stage == "convert"
+    assert result.ok is False
+    assert str(grains_dir) in result.message
+    assert "sobol" in result.message  # names the converter's hardcoded prefix
+    render_mock.assert_not_called()
+
+
+def test_run_pipeline_full_success(monkeypatch, tmp_path):
     record = _ok_record()
     monkeypatch.setattr(tsr, "run_sim_stage", lambda params: record)
-    monkeypatch.setattr(tsr, "run_convert_stage", lambda rec, base_output_dir: None)
+
+    base_output_dir = tmp_path / "DEMCSVs"
+    grains_dir = base_output_dir / "batch" / "run_0001_grains_output"
+
+    def fake_convert(rec, base_output_dir):
+        _write_fake_npz(grains_dir, 1)
+    monkeypatch.setattr(tsr, "run_convert_stage", fake_convert)
 
     captured = {}
     def fake_render(params):
@@ -299,14 +340,14 @@ def test_run_pipeline_full_success(monkeypatch):
 
     sim_params = tsr.SimParams(output_root=Path("sobol_mass_runs/batch"))
     render_form = tsr.RenderFormValues(resolution="640x360", samples=8, camera_mode="grain_only")
-    result = tsr.run_pipeline(sim_params, render_form, Path("/mnt/c/.../DEMCSVs"))
+    result = tsr.run_pipeline(sim_params, render_form, base_output_dir)
 
     assert result.stage == "done"
     assert result.ok is True
     rp = captured["params"]
-    assert rp.grains_dir == Path("/mnt/c/.../DEMCSVs") / "batch" / "run_0001_grains_output"
-    assert rp.bodies_dir == Path("/mnt/c/.../DEMCSVs") / "batch" / "run_0001_bodies_output"
-    assert rp.output_dir == Path("/mnt/c/.../DEMCSVs") / "batch" / "run_0001_render"
+    assert rp.grains_dir == base_output_dir / "batch" / "run_0001_grains_output"
+    assert rp.bodies_dir == base_output_dir / "batch" / "run_0001_bodies_output"
+    assert rp.output_dir == base_output_dir / "batch" / "run_0001_render"
     assert rp.resolution == "640x360"
     assert rp.samples == 8
     assert rp.camera_mode == "grain_only"
@@ -314,10 +355,17 @@ def test_run_pipeline_full_success(monkeypatch):
 
 def test_run_pipeline_success_message_counts_rendered_frames(monkeypatch, tmp_path):
     # Ruling: run_pipeline's success message counts rendered PNGs in
-    # output_dir rather than a fixed "rendered to <dir>" string.
+    # output_dir rather than a fixed "rendered to <dir>" string, and now also
+    # the converted npz count (finding 2).
     record = _ok_record()
     monkeypatch.setattr(tsr, "run_sim_stage", lambda params: record)
-    monkeypatch.setattr(tsr, "run_convert_stage", lambda rec, base_output_dir: None)
+
+    base_output_dir = tmp_path / "DEMCSVs"
+    grains_dir = base_output_dir / "batch" / "run_0001_grains_output"
+
+    def fake_convert(rec, base_output_dir):
+        _write_fake_npz(grains_dir, 3)
+    monkeypatch.setattr(tsr, "run_convert_stage", fake_convert)
 
     def fake_render(params):
         params.output_dir.mkdir(parents=True, exist_ok=True)
@@ -326,12 +374,11 @@ def test_run_pipeline_success_message_counts_rendered_frames(monkeypatch, tmp_pa
         return subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
     monkeypatch.setattr(tsr, "run_render_stage", fake_render)
 
-    base_output_dir = tmp_path / "DEMCSVs"
     sim_params = tsr.SimParams(output_root=Path("sobol_mass_runs/batch"))
     result = tsr.run_pipeline(sim_params, tsr.RenderFormValues(), base_output_dir)
 
     output_dir = base_output_dir / "batch" / "run_0001_render"
-    assert result.message == f"rendered 2 frame(s) to {output_dir}"
+    assert result.message == f"converted 3 frame(s); rendered 2 frame(s) to {output_dir}"
 
 
 def test_check_blender_exe_raises_when_missing(tmp_path):
@@ -520,7 +567,10 @@ def test_build_sim_params_output_root_shape():
 
     params = asyncio.run(_scenario())
 
-    assert params.output_root.parent == Path("sobol_mass_runs").resolve()
+    # Was Path("sobol_mass_runs").resolve() (cwd-dependent) before finding 1's
+    # fix -- the form's output-root Input now defaults to the absolute,
+    # cwd-independent Honours/sobol_mass_runs path.
+    assert params.output_root.parent == tsr._default_output_root()
     assert re.match(r"^sobol_\d{8}_\d{6}_sim_render$", params.output_root.name), (
         params.output_root.name
     )
@@ -570,3 +620,216 @@ def test_build_sim_params_shape_file_blank():
 
     assert params.shape_file is None
     assert params.sample.use_shape_crop is None
+
+
+# --- Finding 1: path defaults must not depend on launch cwd ------------
+
+def test_default_base_dir_is_module_directory():
+    assert tsr._default_base_dir() == Path(tsr.__file__).resolve().parent
+
+
+def test_default_base_dir_unaffected_by_cwd(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    assert tsr._default_base_dir().is_absolute()
+    assert tsr._default_base_dir() == Path(tsr.__file__).resolve().parent
+
+
+def test_default_phantom_dir_matches_run_mass_sobol_phantom_default(monkeypatch):
+    monkeypatch.delenv("PHANTOM_DIR", raising=False)
+    from run_mass_sobol_phantom import _DEFAULT_PHANTOM_DIR as rms_default
+    assert tsr._default_phantom_dir() == str(rms_default)
+    assert Path(tsr._default_phantom_dir()).is_absolute()
+
+
+def test_default_phantom_dir_honors_env_var(monkeypatch):
+    monkeypatch.setenv("PHANTOM_DIR", "/custom/phantom/install")
+    assert tsr._default_phantom_dir() == "/custom/phantom/install"
+
+
+def test_default_output_root_is_sibling_of_sobol_dir(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    out = tsr._default_output_root()
+    assert out.is_absolute()
+    assert out.name == "sobol_mass_runs"
+    assert out.parent == Path(tsr.__file__).resolve().parent.parent
+
+
+def test_sim_params_path_defaults_are_absolute_and_match_helpers():
+    p = tsr.SimParams()
+    assert p.base_dir == tsr._default_base_dir()
+    assert str(p.phantom_dir) == tsr._default_phantom_dir()
+    assert p.output_root == tsr._default_output_root()
+
+
+def test_form_path_inputs_default_to_absolute_paths():
+    async def _scenario():
+        app = tsr.SimRenderTUIApp()
+        async with app.run_test():
+            return (
+                app.query_one("#base-dir", tsr.Input).value,
+                app.query_one("#phantom-dir", tsr.Input).value,
+                app.query_one("#output-root", tsr.Input).value,
+            )
+
+    base_dir_val, phantom_dir_val, output_root_val = asyncio.run(_scenario())
+
+    assert Path(base_dir_val).is_absolute()
+    assert Path(phantom_dir_val).is_absolute()
+    assert Path(output_root_val).is_absolute()
+    assert output_root_val == str(tsr._default_output_root())
+
+
+# --- Finding 3: camera-mode Select must not allow a blank selection -----
+
+def test_camera_mode_select_disallows_blank():
+    # Textual 8.2.6's Select has no public allow_blank reader -- only the
+    # constructor kwarg and the private _allow_blank it's stored in.
+    async def _scenario():
+        app = tsr.SimRenderTUIApp()
+        async with app.run_test():
+            select = app.query_one("#camera-mode", tsr.Select)
+            return select._allow_blank, select.value
+
+    allow_blank, value = asyncio.run(_scenario())
+    assert allow_blank is False
+    assert value != tsr.Select.BLANK
+
+
+# --- Finding 4: render form values are validated eagerly ----------------
+
+def test_build_render_form_rejects_malformed_resolution():
+    async def _scenario():
+        app = tsr.SimRenderTUIApp()
+        async with app.run_test():
+            app.query_one("#resolution", tsr.Input).value = "not-a-resolution"
+            with pytest.raises(ValueError):
+                app._build_render_form()
+
+    asyncio.run(_scenario())
+
+
+def test_build_render_form_rejects_zero_dimension_resolution():
+    async def _scenario():
+        app = tsr.SimRenderTUIApp()
+        async with app.run_test():
+            app.query_one("#resolution", tsr.Input).value = "0x1080"
+            with pytest.raises(ValueError):
+                app._build_render_form()
+
+    asyncio.run(_scenario())
+
+
+def test_build_render_form_rejects_nonpositive_samples():
+    async def _scenario():
+        app = tsr.SimRenderTUIApp()
+        async with app.run_test():
+            app.query_one("#samples", tsr.Input).value = "0"
+            with pytest.raises(ValueError):
+                app._build_render_form()
+
+    asyncio.run(_scenario())
+
+
+def test_build_render_form_rejects_nonpositive_fps():
+    async def _scenario():
+        app = tsr.SimRenderTUIApp()
+        async with app.run_test():
+            app.query_one("#fps", tsr.Input).value = "-1"
+            with pytest.raises(ValueError):
+                app._build_render_form()
+
+    asyncio.run(_scenario())
+
+
+def test_build_render_form_rejects_nonpositive_max_frames():
+    async def _scenario():
+        app = tsr.SimRenderTUIApp()
+        async with app.run_test():
+            app.query_one("#max-frames", tsr.Input).value = "0"
+            with pytest.raises(ValueError):
+                app._build_render_form()
+
+    asyncio.run(_scenario())
+
+
+def test_build_render_form_accepts_valid_values():
+    async def _scenario():
+        app = tsr.SimRenderTUIApp()
+        async with app.run_test():
+            return app._build_render_form()
+
+    form = asyncio.run(_scenario())
+    assert form.resolution == "1920x1080"
+
+
+def test_bad_resolution_shows_error_and_never_starts_worker(monkeypatch):
+    run_mock = MagicMock()
+    monkeypatch.setattr(tsr, "run_sim_stage", run_mock)
+    monkeypatch.setattr(tsr, "check_blender_exe", lambda *a, **kw: None)
+
+    async def _scenario():
+        app = tsr.SimRenderTUIApp()
+        async with app.run_test() as pilot:
+            app.query_one("#resolution", tsr.Input).value = "bogus"
+            await pilot.click("#btn-dryrun")
+            await pilot.pause(0.2)
+            status = app.query_one("#status", tsr.Static)
+            return str(status.content)
+
+    text = asyncio.run(_scenario())
+
+    assert text.startswith("Error:")
+    run_mock.assert_not_called()
+
+
+# --- Finding 5: kt_cgs blank means "template default", not 0 ------------
+
+def test_kt_cgs_input_defaults_to_blank_with_template_placeholder():
+    async def _scenario():
+        app = tsr.SimRenderTUIApp()
+        async with app.run_test():
+            inp = app.query_one("#kt-cgs", tsr.Input)
+            return inp.value, inp.placeholder
+
+    value, placeholder = asyncio.run(_scenario())
+
+    assert value == ""
+    assert placeholder == "(template default)"
+
+
+def test_build_sim_params_kt_cgs_blank_maps_to_none():
+    async def _scenario():
+        app = tsr.SimRenderTUIApp()
+        async with app.run_test():
+            return app._build_sim_params(False)
+
+    params = asyncio.run(_scenario())
+
+    assert params.sample.kt_cgs is None
+    assert params.sample.coh_gap_max_cgs is None
+
+
+def test_build_sim_params_kt_cgs_positive_computes_coh_gap_max():
+    async def _scenario():
+        app = tsr.SimRenderTUIApp()
+        async with app.run_test():
+            app.query_one("#kt-cgs", tsr.Input).value = "1e7"
+            return app._build_sim_params(False)
+
+    params = asyncio.run(_scenario())
+
+    assert params.sample.kt_cgs == 1e7
+    assert params.sample.coh_gap_max_cgs is not None
+
+
+def test_build_sim_params_kt_cgs_zero_does_not_compute_coh_gap_max():
+    async def _scenario():
+        app = tsr.SimRenderTUIApp()
+        async with app.run_test():
+            app.query_one("#kt-cgs", tsr.Input).value = "0"
+            return app._build_sim_params(False)
+
+    params = asyncio.run(_scenario())
+
+    assert params.sample.kt_cgs == 0.0
+    assert params.sample.coh_gap_max_cgs is None
