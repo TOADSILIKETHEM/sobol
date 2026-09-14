@@ -4,6 +4,8 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+
 # Run from sobol/ so the module is importable, same convention as
 # sobol/tests/test_metric_fixes.py.
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -69,3 +71,73 @@ def test_run_sim_stage_forwards_params(monkeypatch):
     assert kwargs["earth_sink_id"] == 4
     assert kwargs["apophis_sink_id"] == 11
     assert kwargs["dry_run"] is False
+
+
+def test_grains_and_bodies_dirs():
+    run_dir = Path("/mnt/c/.../sobol_mass_runs/sobol_20260914_120000_batch/run_0001")
+    base_output_dir = Path("/mnt/c/.../Code/DEMCSVs")
+    output_root = Path("/mnt/c/.../sobol_mass_runs/sobol_20260914_120000_batch")
+
+    grains_dir, bodies_dir = tsr._grains_and_bodies_dirs(run_dir, base_output_dir, output_root)
+
+    assert grains_dir == base_output_dir / "sobol_20260914_120000_batch" / "run_0001_grains_output"
+    assert bodies_dir == base_output_dir / "sobol_20260914_120000_batch" / "run_0001_bodies_output"
+
+
+def test_render_output_dir():
+    run_dir = Path("/mnt/c/.../sobol_mass_runs/sobol_20260914_120000_batch/run_0001")
+    base_output_dir = Path("/mnt/c/.../Code/DEMCSVs")
+    output_root = Path("/mnt/c/.../sobol_mass_runs/sobol_20260914_120000_batch")
+
+    out_dir = tsr._render_output_dir(run_dir, base_output_dir, output_root)
+
+    assert out_dir == base_output_dir / "sobol_20260914_120000_batch" / "run_0001_render"
+
+
+def test_run_convert_stage_calls_converter(monkeypatch):
+    fake_convert = MagicMock()
+    fake_min_grains = MagicMock(return_value=450)
+    monkeypatch.setattr(tsr, "run_dem_dump_convert", fake_convert)
+    monkeypatch.setattr(tsr, "_min_dem_grains_from_setup", fake_min_grains)
+
+    record = tsr.RunRecord(
+        run_id=1, mass_input_kg=float("nan"), run_dir="sobol_mass_runs/batch/run_0001",
+        status="ok", closest_approach_km=1.0, closest_approach_au=0.01, error="",
+    )
+    tsr.run_convert_stage(record, base_output_dir=Path("/mnt/c/.../Code/DEMCSVs"))
+
+    fake_min_grains.assert_called_once_with(Path("sobol_mass_runs/batch/run_0001"))
+    fake_convert.assert_called_once_with(
+        input_dir=Path("sobol_mass_runs/batch/run_0001"),
+        dump_convert_path=tsr.DEFAULT_DEM_DUMP_CONVERT,
+        base_output_dir=Path("/mnt/c/.../Code/DEMCSVs"),
+        min_dem_grains=450,
+    )
+
+
+def test_run_convert_stage_wraps_converter_exception(monkeypatch):
+    def boom(**kwargs):
+        raise ValueError("bad dump")
+    monkeypatch.setattr(tsr, "run_dem_dump_convert", boom)
+    monkeypatch.setattr(tsr, "_min_dem_grains_from_setup", lambda run_dir: None)
+
+    record = tsr.RunRecord(
+        run_id=1, mass_input_kg=float("nan"), run_dir="sobol_mass_runs/batch/run_0001",
+        status="ok", closest_approach_km=1.0, closest_approach_au=0.01, error="",
+    )
+    with pytest.raises(tsr.ConvertError, match="bad dump"):
+        tsr.run_convert_stage(record, base_output_dir=Path("/mnt/c/.../Code/DEMCSVs"))
+
+
+def test_run_convert_stage_skips_when_sim_not_ok(monkeypatch):
+    fake_convert = MagicMock()
+    monkeypatch.setattr(tsr, "run_dem_dump_convert", fake_convert)
+
+    record = tsr.RunRecord(
+        run_id=1, mass_input_kg=float("nan"), run_dir="sobol_mass_runs/batch/run_0001",
+        status="prepared_only", closest_approach_km=float("nan"),
+        closest_approach_au=float("nan"), error="",
+    )
+    with pytest.raises(tsr.ConvertError, match="prepared_only"):
+        tsr.run_convert_stage(record, base_output_dir=Path("/mnt/c/.../Code/DEMCSVs"))
+    fake_convert.assert_not_called()

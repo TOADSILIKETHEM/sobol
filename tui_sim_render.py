@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent / "Analysis"))
 
 from run_mass_sobol_phantom import (  # noqa: E402
     RunSample,
@@ -25,6 +26,11 @@ from run_mass_sobol_phantom import (  # noqa: E402
     DEFAULT_DN_COHES_FACTOR,
     preflight,
     run_one_case,
+)
+from run_demtocsv_batch import (  # noqa: E402
+    run_dem_dump_convert,
+    DEFAULT_DEM_DUMP_CONVERT,
+    _min_dem_grains_from_setup,
 )
 
 # Windows-side Code repo root, reached over the WSL /mnt/c/ interop mount —
@@ -142,3 +148,41 @@ def run_sim_stage(params: SimParams) -> RunRecord:
         ephemeris_cache_dir=params.ephemeris_cache_dir,
         shape_file=params.shape_file,
     )
+
+
+class ConvertError(RuntimeError):
+    pass
+
+
+def _grains_and_bodies_dirs(run_dir: Path, base_output_dir: Path, output_root: Path):
+    """DEMDumpConvert.py's own naming rule (CSVconvert/DEMDumpConvert.py:19-22):
+    <sim_name> = INPUT_DIR's parent name, <run_name> = INPUT_DIR's own name.
+    """
+    sim_name = output_root.name
+    run_name = run_dir.name
+    grains_dir = base_output_dir / sim_name / f"{run_name}_grains_output"
+    bodies_dir = base_output_dir / sim_name / f"{run_name}_bodies_output"
+    return grains_dir, bodies_dir
+
+
+def _render_output_dir(run_dir: Path, base_output_dir: Path, output_root: Path) -> Path:
+    sim_name = output_root.name
+    run_name = run_dir.name
+    return base_output_dir / sim_name / f"{run_name}_render"
+
+
+def run_convert_stage(record: RunRecord, base_output_dir: Path) -> None:
+    """Convert one run's dumps to bodies CSV + grains npz. Raises ConvertError on any failure."""
+    if record.status != "ok":
+        raise ConvertError(f"sim did not complete (status={record.status!r}); skipping convert")
+    run_dir = Path(record.run_dir)
+    min_grains = _min_dem_grains_from_setup(run_dir)
+    try:
+        run_dem_dump_convert(
+            input_dir=run_dir,
+            dump_convert_path=DEFAULT_DEM_DUMP_CONVERT,
+            base_output_dir=base_output_dir,
+            min_dem_grains=min_grains,
+        )
+    except Exception as exc:
+        raise ConvertError(f"conversion failed: {exc}") from exc
