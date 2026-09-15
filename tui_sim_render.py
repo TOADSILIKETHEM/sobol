@@ -335,7 +335,7 @@ def build_render_command(params: RenderParams) -> List[str]:
 def run_render_stage(params: RenderParams) -> subprocess.CompletedProcess:
     cmd = build_render_command(params)
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = subprocess.run(cmd, capture_output=True, text=True, errors="replace")
     except OSError as exc:
         raise RenderError(f"could not start {cmd[0]}: {exc}") from exc
     if result.returncode != 0:
@@ -383,8 +383,12 @@ def build_instance_grains_preprocess_command(ctx: PathContext, output_dir: Path)
 def build_instance_static_preprocess_command(ctx: PathContext, output_dir: Path) -> List[str]:
     # viz_preprocess_lite.py needs mathutils.bvhtree -> Blender's Python.
     # One static cloud regardless of frame count, so no --max-frames.
+    # --python-exit-code 1 makes an uncaught exception inside the script
+    # exit non-zero -- without it, blender --background --python exits 0
+    # even after a traceback, so run_preprocess_stage() would only ever see
+    # "wrote no manifest" and never the real error.
     return [
-        BLENDER_EXE, "--background", "--python",
+        BLENDER_EXE, "--background", "--python-exit-code", "1", "--python",
         to_windows_path(_REPO_WIN_CODE / "viz" / "viz_preprocess_lite.py"), "--",
         "--grains-dir", to_windows_path(ctx.grains_dir),
         "--bodies-dir", to_windows_path(ctx.bodies_dir),
@@ -397,14 +401,22 @@ def build_instance_static_preprocess_command(ctx: PathContext, output_dir: Path)
 def run_preprocess_stage(cmd: List[str], output_dir: Path) -> Path:
     """Run one preprocess subprocess from the Windows repo root; return its manifest path."""
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(_REPO_WIN_CODE))
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, errors="replace", cwd=str(_REPO_WIN_CODE),
+        )
     except OSError as exc:
         raise PreprocessError(f"could not start {cmd[0]}: {exc}") from exc
     if result.returncode != 0:
         raise PreprocessError(f"exited {result.returncode}:\n{_output_tail(result)}")
     manifest = output_dir / "manifest.json"
     if not manifest.is_file():
-        raise PreprocessError(f"preprocess wrote no manifest at {output_dir}")
+        # blender --background --python exits 0 even after an uncaught
+        # exception unless --python-exit-code is set (see
+        # build_instance_static_preprocess_command) -- for scripts that
+        # don't set it, or that exit 0 for some other reason without
+        # writing a manifest, surface the captured output here rather than
+        # silently discarding the traceback.
+        raise PreprocessError(f"wrote no manifest at {output_dir}:\n{_output_tail(result)}")
     return manifest
 
 
@@ -496,7 +508,16 @@ def run_render_path(spec: RenderPath, ctx: PathContext, on_stage=None, index: in
 def format_path_result(r: PathResult) -> str:
     if r.ok:
         return f"{r.name}: ok, {r.message}"
-    return f"{r.name}: failed at {r.stage}: {r.message}"
+    # r.message can carry a multi-line traceback tail (see run_preprocess_stage /
+    # PreprocessError) -- keep that in full for the caller (e.g. PathResult.message,
+    # shown per-path), but compact it to one line here so a multi-path summary
+    # (run_pipeline's "; ".join(...)) doesn't let one failure's traceback swallow
+    # the other paths' results.
+    lines = [line for line in r.message.splitlines() if line.strip()]
+    first = lines[0] if lines else r.message
+    if len(lines) > 1:
+        return f"{r.name}: failed at {r.stage}: {first} … {lines[-1]}"
+    return f"{r.name}: failed at {r.stage}: {first}"
 
 
 def count_matching(directory: Optional[Path], pattern: str) -> int:
@@ -917,6 +938,10 @@ class SimRenderTUIApp(App[None]):
             n_points = int(self._iv("n-points"))
             if n_points <= 0:
                 raise ValueError(f"n_points must be > 0 (got {n_points})")
+            if not from_windows_path(placeholder_obj).is_absolute():
+                raise ValueError(
+                    f"placeholder_obj must be an absolute path (got {placeholder_obj!r})"
+                )
             if not placeholder_obj or not from_windows_path(placeholder_obj).is_file():
                 raise ValueError(f"placeholder_obj not found: {placeholder_obj!r}")
         if {"composite", "instance_grains"} & set(paths) and not Path(WIN_VENV_PYTHON).is_file():

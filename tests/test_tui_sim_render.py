@@ -1137,11 +1137,11 @@ def test_instance_static_preprocess_command():
         ctx, ctx.batch_dir / "run_0001_viz_instance_static"
     )
     assert cmd[0] == tsr.BLENDER_EXE
-    assert cmd[1:4] == [
-        "--background", "--python",
+    assert cmd[1:6] == [
+        "--background", "--python-exit-code", "1", "--python",
         tsr.to_windows_path(tsr._REPO_WIN_CODE / "viz" / "viz_preprocess_lite.py"),
     ]
-    assert cmd[4] == "--"
+    assert cmd[6] == "--"
     assert cmd[cmd.index("--shape-obj") + 1] == "C:/shapes/a.obj"
     assert cmd[cmd.index("--n-points") + 1] == "5000"
     assert cmd[cmd.index("--output-dir") + 1] == "C:/DEMCSVs/batch/run_0001_viz_instance_static"
@@ -1190,9 +1190,13 @@ def test_run_preprocess_stage_failure_raises_with_tail(monkeypatch, tmp_path):
 
 
 def test_run_preprocess_stage_exit_0_without_manifest_raises(monkeypatch, tmp_path):
-    monkeypatch.setattr(tsr.subprocess, "run", lambda *a, **kw: _ok_completed())
-    with pytest.raises(tsr.PreprocessError, match="preprocess wrote no manifest at"):
+    fake = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout="Traceback ... boom", stderr="",
+    )
+    monkeypatch.setattr(tsr.subprocess, "run", lambda *a, **kw: fake)
+    with pytest.raises(tsr.PreprocessError, match="wrote no manifest at") as excinfo:
         tsr.run_preprocess_stage(["python.exe"], tmp_path / "viz")
+    assert "Traceback ... boom" in str(excinfo.value)
 
 
 def test_run_preprocess_stage_returns_manifest(monkeypatch, tmp_path):
@@ -1222,6 +1226,32 @@ def test_run_render_stage_spawn_oserror_raises_render_error(monkeypatch):
     )
     with pytest.raises(tsr.RenderError, match="could not start"):
         tsr.run_render_stage(params)
+
+
+def test_run_preprocess_stage_passes_errors_replace(monkeypatch, tmp_path):
+    out = tmp_path / "viz"
+    out.mkdir()
+    (out / "manifest.json").write_text("{}")
+    captured = {}
+    def fake_run(cmd, **kw):
+        captured.update(kw)
+        return _ok_completed()
+    monkeypatch.setattr(tsr.subprocess, "run", fake_run)
+    tsr.run_preprocess_stage(["python.exe"], out)
+    assert captured["errors"] == "replace"
+
+
+def test_run_render_stage_passes_errors_replace(monkeypatch):
+    captured = {}
+    def fake_run(cmd, **kw):
+        captured.update(kw)
+        return _ok_completed()
+    monkeypatch.setattr(tsr.subprocess, "run", fake_run)
+    params = tsr.RenderParams(
+        grains_dir=Path("/mnt/c/g"), bodies_dir=Path("/mnt/c/b"), output_dir=Path("/mnt/c/o"),
+    )
+    tsr.run_render_stage(params)
+    assert captured["errors"] == "replace"
 
 
 def _pipeline_setup(monkeypatch, tmp_path, n_npz=2):
@@ -1356,11 +1386,40 @@ def test_run_pipeline_stage_callbacks_per_path(monkeypatch, tmp_path):
     assert stages[4][1]["output_dir"] == base / "batch" / "run_0001_render_composite"
 
 
+def test_run_pipeline_summary_is_single_line_with_multiline_failure(monkeypatch, tmp_path):
+    base, sim_params = _pipeline_setup(monkeypatch, tmp_path)
+
+    def fake_pre(cmd, output_dir):
+        raise tsr.PreprocessError("exited 1:\n" + "\n".join(f"l{i}" for i in range(40)))
+    monkeypatch.setattr(tsr, "run_preprocess_stage", fake_pre)
+
+    def fake_render(params):
+        _write_fake_pngs(params.output_dir, 1)
+        return _ok_completed()
+    monkeypatch.setattr(tsr, "run_render_stage", fake_render)
+
+    form = tsr.RenderFormValues(paths=("per_sphere", "composite"))
+    result = tsr.run_pipeline(sim_params, form, base)
+
+    assert "\n" not in result.message
+    assert "composite: failed at preprocess: exited 1: … l39" in result.message
+    assert "per_sphere: ok" in result.message
+    assert "l0" in result.paths[1].message
+
+
 def test_format_path_result():
     ok = tsr.PathResult(name="composite", ok=True, stage="done", message="3 frame(s) in 5s to X")
     bad = tsr.PathResult(name="instance_static", ok=False, stage="preprocess", message="boom")
     assert tsr.format_path_result(ok) == "composite: ok, 3 frame(s) in 5s to X"
     assert tsr.format_path_result(bad) == "instance_static: failed at preprocess: boom"
+
+
+def test_format_path_result_shortens_multiline_failure():
+    bad = tsr.PathResult(
+        name="composite", ok=False, stage="preprocess",
+        message="exited 1:\nline a\n\nline b\n",
+    )
+    assert tsr.format_path_result(bad) == "composite: failed at preprocess: exited 1: … line b"
 
 
 def test_format_live_progress_preprocess_with_label():
@@ -1480,6 +1539,16 @@ def test_instance_static_valid(tmp_path):
     assert form.paths == ("instance_static",)
     assert form.placeholder_obj == str(obj)
     assert form.n_points == 5000
+
+
+def test_instance_static_relative_obj_is_error():
+    def setup(app):
+        _tick(app, "instance_static")
+        app.query_one("#placeholder-obj", tsr.Input).value = "shapes/a.obj"
+
+    err = _render_form_or_error(setup)
+    assert isinstance(err, ValueError)
+    assert "absolute" in str(err)
 
 
 def test_unticked_path_fields_are_not_validated():
