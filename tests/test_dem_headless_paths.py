@@ -211,3 +211,80 @@ def test_blender_composite_renders_each_envelope_frame():
     assert len(records) == 4
     for i, rec in enumerate(records):
         assert np.allclose(rec["mean"], expected[i], atol=1e-3), (i, rec, expected[i])
+
+
+@pytest.mark.skipif(not BLENDER_EXE.is_file(), reason="blender.exe not installed")
+@pytest.mark.skipif(not WIN_TEMP.is_dir(), reason="Windows Temp not mounted")
+def test_blender_instance_grains_uses_per_grain_radius_and_moves():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "viz_preprocess_grains_instance", CODE / "viz" / "viz_preprocess_grains_instance.py"
+    )
+    vgi = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(vgi)
+
+    viz_dir = WIN_TEMP / "dhr_instance_grains_viz"
+    if viz_dir.exists():
+        import shutil
+        shutil.rmtree(viz_dir)
+    vgi.build_grains_instance(
+        FIXTURE_RUN / "run_0001_grains_output",
+        FIXTURE_RUN / "run_0001_bodies_output",
+        viz_dir,
+        max_frames=2,
+    )
+    p0 = np.load(viz_dir / "points" / "00000.npz")
+    p1 = np.load(viz_dir / "points" / "00001.npz")
+
+    result, records, out_dir = run_recorded_render(
+        "instance_grains", "DEM_InstancePoints",
+        ["--viz-path", "instance", "--manifest", f"{WIN_TEMP_WIN}/dhr_instance_grains_viz/manifest.json",
+         "--max-frames", "2"],
+    )
+    combined = (result.stdout or "") + (result.stderr or "")
+    assert result.returncode == 0, combined[-3000:]
+    assert len(list(out_dir.glob("frame_*.png"))) == 2
+    assert len(records) == 2
+    assert records[0]["n"] == len(p0["pos"])
+    assert records[0]["radius_sum"] == pytest.approx(float(p0["radius"].sum()), rel=1e-4)
+    assert np.allclose(records[0]["mean"], p0["pos"].mean(axis=0), atol=1e-3)
+    assert np.allclose(records[1]["mean"], p1["pos"].mean(axis=0), atol=1e-3)
+
+
+@pytest.mark.skipif(not BLENDER_EXE.is_file(), reason="blender.exe not installed")
+@pytest.mark.skipif(not WIN_TEMP.is_dir(), reason="Windows Temp not mounted")
+def test_blender_build_point_cloud_writes_given_radii():
+    script = WIN_TEMP / "dhr_radii_check.py"
+    script.write_text(
+        "\n".join([
+            "import sys, traceback",
+            f"sys.path.insert(0, {CODE_WIN + '/BlenderConvert'!r})",
+            "import bpy, numpy as np",
+            "import DEMHeadlessRender as dhr",
+            "try:",
+            "    dhr.ensure_procedural_rock_material()",
+            "    import DEMBulkInstanceBlender as dbi",
+            "    pos = np.zeros((3, 3), dtype=np.float32)",
+            "    radii = np.array([0.1, 0.2, 0.3], dtype=np.float32)",
+            "    obj, _g = dbi._build_point_cloud(pos, 9.9, 0, radii=radii)",
+            "    r = np.empty(3, dtype=np.float32)",
+            "    obj.data.attributes['radius'].data.foreach_get('value', r)",
+            "    assert np.allclose(r, radii), r",
+            "    obj2, _g2 = dbi._build_point_cloud(pos, 9.9, 0)",
+            "    r2 = np.empty(3, dtype=np.float32)",
+            "    obj2.data.attributes['radius'].data.foreach_get('value', r2)",
+            "    assert np.allclose(r2, 9.9), r2",
+            "    print('RADII_OK')",
+            "except Exception:",
+            "    traceback.print_exc()",
+            "    sys.exit(1)",
+        ]) + "\n",
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [str(BLENDER_EXE), "--background", "--python", f"{WIN_TEMP_WIN}/dhr_radii_check.py"],
+        capture_output=True, text=True, check=False,
+    )
+    combined = (result.stdout or "") + (result.stderr or "")
+    assert result.returncode == 0, combined[-3000:]
+    assert "RADII_OK" in combined
