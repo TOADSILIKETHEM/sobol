@@ -1383,3 +1383,181 @@ def test_pipeline_warning_only_for_per_sphere():
     assert tsr.pipeline_warning(5000, ("composite",)) == ""
     assert "5000" in tsr.pipeline_warning(5000, ("per_sphere", "composite"))
     assert tsr.pipeline_warning(500, ("per_sphere",)) == ""
+
+
+# --- Task 6: render path form ----------------------------------------------
+
+def _render_form_or_error(setup):
+    async def _scenario():
+        app = tsr.SimRenderTUIApp()
+        async with app.run_test():
+            setup(app)
+            try:
+                return app._build_render_form()
+            except ValueError as exc:
+                return exc
+    return asyncio.run(_scenario())
+
+
+def _tick(app, name, value=True):
+    app.query_one(f"#{tsr.PATH_CHECKBOX_IDS[name]}", tsr.Checkbox).value = value
+
+
+def test_path_checkbox_defaults():
+    form = _render_form_or_error(lambda app: None)
+    assert form.paths == ("per_sphere",)
+    assert form.envelope_method == "hull"
+    assert form.placeholder_obj == tsr.DEFAULT_PLACEHOLDER_OBJ
+    assert form.n_points == 1_000_000
+
+
+def test_no_path_ticked_is_error():
+    err = _render_form_or_error(lambda app: _tick(app, "per_sphere", False))
+    assert isinstance(err, ValueError)
+    assert "render path" in str(err)
+
+
+def test_composite_requires_venv_python(monkeypatch, tmp_path):
+    monkeypatch.setattr(tsr, "WIN_VENV_PYTHON", tmp_path / "missing" / "python.exe")
+    err = _render_form_or_error(lambda app: _tick(app, "composite"))
+    assert isinstance(err, ValueError)
+    assert "python.exe" in str(err)
+
+
+def test_instance_grains_requires_venv_python(monkeypatch, tmp_path):
+    monkeypatch.setattr(tsr, "WIN_VENV_PYTHON", tmp_path / "missing" / "python.exe")
+    err = _render_form_or_error(lambda app: _tick(app, "instance_grains"))
+    assert isinstance(err, ValueError)
+
+
+def test_composite_with_venv_and_sdf(monkeypatch, tmp_path):
+    exe = tmp_path / "python.exe"
+    exe.write_bytes(b"")
+    monkeypatch.setattr(tsr, "WIN_VENV_PYTHON", exe)
+
+    def setup(app):
+        _tick(app, "composite")
+        app.query_one("#envelope-method", tsr.Select).value = "sdf"
+
+    form = _render_form_or_error(setup)
+    assert form.paths == ("per_sphere", "composite")
+    assert form.envelope_method == "sdf"
+
+
+def test_instance_static_missing_obj_is_error(tmp_path):
+    def setup(app):
+        _tick(app, "instance_static")
+        app.query_one("#placeholder-obj", tsr.Input).value = str(tmp_path / "nope.obj")
+
+    err = _render_form_or_error(setup)
+    assert isinstance(err, ValueError)
+    assert "placeholder_obj" in str(err)
+
+
+def test_instance_static_nonpositive_n_points_is_error(tmp_path):
+    obj = tmp_path / "a.obj"
+    obj.write_text("v 0 0 0\n")
+
+    def setup(app):
+        _tick(app, "instance_static")
+        app.query_one("#placeholder-obj", tsr.Input).value = str(obj)
+        app.query_one("#n-points", tsr.Input).value = "0"
+
+    assert isinstance(_render_form_or_error(setup), ValueError)
+
+
+def test_instance_static_valid(tmp_path):
+    obj = tmp_path / "a.obj"
+    obj.write_text("v 0 0 0\n")
+
+    def setup(app):
+        _tick(app, "per_sphere", False)
+        _tick(app, "instance_static")
+        app.query_one("#placeholder-obj", tsr.Input).value = str(obj)
+        app.query_one("#n-points", tsr.Input).value = "5000"
+
+    form = _render_form_or_error(setup)
+    assert form.paths == ("instance_static",)
+    assert form.placeholder_obj == str(obj)
+    assert form.n_points == 5000
+
+
+def test_unticked_path_fields_are_not_validated():
+    def setup(app):
+        app.query_one("#n-points", tsr.Input).value = "garbage"
+        app.query_one("#placeholder-obj", tsr.Input).value = "C:/nope.obj"
+
+    form = _render_form_or_error(setup)
+    assert form.paths == ("per_sphere",)
+
+
+def test_envelope_method_select_disallows_blank():
+    async def _scenario():
+        app = tsr.SimRenderTUIApp()
+        async with app.run_test():
+            select = app.query_one("#envelope-method", tsr.Select)
+            return select._allow_blank, select.value
+
+    allow_blank, value = asyncio.run(_scenario())
+    assert allow_blank is False
+    assert value == "hull"
+
+
+def test_set_pipeline_stage_preprocess_shows_path_label():
+    async def _scenario():
+        app = tsr.SimRenderTUIApp()
+        async with app.run_test():
+            app._pipeline_running = True
+            app._pipeline_start = time.monotonic()
+            app._pipeline_dry_run = False
+            app._pipeline_warning = ""
+            app._set_pipeline_stage(
+                "preprocess",
+                {"path": "composite", "index": 2, "total": 3, "output_dir": Path("/tmp/x_viz")},
+            )
+            return str(app.query_one("#status", tsr.Static).content)
+
+    text = asyncio.run(_scenario())
+    assert text.startswith("Preprocessing [composite 2/3]...")
+
+
+def test_set_pipeline_stage_render_tracks_path_output_dir(tmp_path):
+    render_dir = tmp_path / "run_0001_render_composite"
+    render_dir.mkdir()
+    (render_dir / "frame_0001.png").write_bytes(b"")
+
+    async def _scenario():
+        app = tsr.SimRenderTUIApp()
+        async with app.run_test():
+            app._pipeline_running = True
+            app._pipeline_start = time.monotonic()
+            app._pipeline_dry_run = False
+            app._pipeline_warning = ""
+            app._set_pipeline_stage(
+                "render",
+                {"n_expected": 3, "path": "composite", "index": 2, "total": 3, "output_dir": render_dir},
+            )
+            return app._pipeline_render_dir, str(app.query_one("#status", tsr.Static).content)
+
+    tracked, text = asyncio.run(_scenario())
+    assert tracked == render_dir
+    assert "Rendering [composite 2/3]..." in text
+    assert "1/3 frame(s)" in text
+
+
+def test_report_result_partial_is_error_status():
+    async def _scenario():
+        app = tsr.SimRenderTUIApp()
+        async with app.run_test():
+            app._report_result(tsr.PipelineResult(
+                stage="partial", ok=False,
+                message="converted 3 frame(s); per_sphere: ok, 3 frame(s) in 1s to X; "
+                        "composite: failed at preprocess: boom",
+            ))
+            s = app.query_one("#status", tsr.Static)
+            return str(s.content), s.has_class("err")
+
+    text, is_err = asyncio.run(_scenario())
+    assert "Finished with failures:" in text
+    assert "composite: failed at preprocess: boom" in text
+    assert is_err is True

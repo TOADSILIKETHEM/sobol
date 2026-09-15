@@ -429,6 +429,13 @@ RENDER_PATHS: Dict[str, RenderPath] = {
 }
 RENDER_PATH_NAMES: Tuple[str, ...] = tuple(RENDER_PATHS)
 
+PATH_CHECKBOX_IDS: Dict[str, str] = {
+    "per_sphere": "path-per-sphere",
+    "composite": "path-composite",
+    "instance_grains": "path-instance-grains",
+    "instance_static": "path-instance-static",
+}
+
 
 def run_render_path(spec: RenderPath, ctx: PathContext, on_stage=None, index: int = 1, total: int = 1) -> PathResult:
     """[preprocess] -> render for one path. Never raises for stage failures."""
@@ -695,6 +702,7 @@ class SimRenderTUIApp(App[None]):
         self._pipeline_stage: str = "sim"
         self._pipeline_n_expected: Optional[int] = None
         self._pipeline_dry_run: bool = False
+        self._pipeline_path_label: Optional[str] = None
         # This TUI runs one pipeline at a time -- @work(thread=True) defaults
         # to exclusive=False, so without this guard a second click while a
         # worker is in flight would start a second worker that overwrites
@@ -763,6 +771,40 @@ class SimRenderTUIApp(App[None]):
             yield _Row(
                 "video_fps", Input("", id="video-fps", placeholder="(same as fps)"), "int, optional",
             )
+
+            yield Static("Render — paths (any combination; one sim feeds all)", classes="sec")
+            yield _Row(
+                "per_sphere",
+                Checkbox("one sphere per grain", value=True, id=PATH_CHECKBOX_IDS["per_sphere"]),
+                "≤~2000 grains",
+            )
+            yield _Row(
+                "composite",
+                Checkbox("envelope mesh + ejecta (D3)", value=False, id=PATH_CHECKBOX_IDS["composite"]),
+                "any N",
+            )
+            yield _Row(
+                "instance_grains",
+                Checkbox("real grains, GN-instanced", value=False, id=PATH_CHECKBOX_IDS["instance_grains"]),
+                "any N",
+            )
+            yield _Row(
+                "instance_static",
+                Checkbox("shape-model placeholder cloud", value=False, id=PATH_CHECKBOX_IDS["instance_static"]),
+                "not sim motion",
+            )
+            yield _Row(
+                "envelope_method",
+                Select(
+                    [("hull", "hull"), ("sdf", "sdf")],
+                    value="hull", id="envelope-method", allow_blank=False,
+                ),
+                "composite",
+            )
+            yield _Row(
+                "placeholder_obj", Input(DEFAULT_PLACEHOLDER_OBJ, id="placeholder-obj"), "instance_static",
+            )
+            yield _Row("n_points", Input("1000000", id="n-points"), "instance_static")
 
         with Horizontal(id="bar"):
             yield Button("Run Pipeline", id="btn-run", variant="success")
@@ -861,6 +903,27 @@ class SimRenderTUIApp(App[None]):
         video_fps = int(video_fps_raw) if video_fps_raw else None
         if video_fps is not None and video_fps <= 0:
             raise ValueError(f"video_fps must be > 0 when set (got {video_fps})")
+        paths = tuple(
+            name for name in RENDER_PATH_NAMES
+            if self.query_one(f"#{PATH_CHECKBOX_IDS[name]}", Checkbox).value
+        )
+        if not paths:
+            raise ValueError("tick at least one render path")
+        envelope_method = str(self.query_one("#envelope-method", Select).value)
+        placeholder_obj = self._iv("placeholder-obj")
+        n_points = 1_000_000
+        # Path-specific fields are only validated when their path is ticked.
+        if "instance_static" in paths:
+            n_points = int(self._iv("n-points"))
+            if n_points <= 0:
+                raise ValueError(f"n_points must be > 0 (got {n_points})")
+            if not placeholder_obj or not from_windows_path(placeholder_obj).is_file():
+                raise ValueError(f"placeholder_obj not found: {placeholder_obj!r}")
+        if {"composite", "instance_grains"} & set(paths) and not Path(WIN_VENV_PYTHON).is_file():
+            raise ValueError(
+                f"Windows venv python not found at {WIN_VENV_PYTHON} -- needed by the "
+                "composite / instance_grains preprocess"
+            )
         return RenderFormValues(
             resolution=resolution,
             samples=samples,
@@ -869,6 +932,10 @@ class SimRenderTUIApp(App[None]):
             camera_mode=str(camera_mode),
             encode_video=bool(encode_video),
             video_fps=video_fps,
+            paths=paths,
+            envelope_method=envelope_method,
+            placeholder_obj=placeholder_obj,
+            n_points=n_points,
         )
 
     @on(Button.Pressed, "#btn-run")
@@ -914,6 +981,7 @@ class SimRenderTUIApp(App[None]):
         self._pipeline_stage = "sim"
         self._pipeline_n_expected = None
         self._pipeline_dry_run = dry_run
+        self._pipeline_path_label = None
         if dry_run:
             self._set_status(f"{warning}Dry run...")
         else:
@@ -926,8 +994,13 @@ class SimRenderTUIApp(App[None]):
     def _set_pipeline_stage(self, stage: str, info: Optional[dict] = None) -> None:
         """Called from the worker via call_from_thread when a stage starts."""
         self._pipeline_stage = stage
-        if info and "n_expected" in info:
+        info = info or {}
+        if "n_expected" in info:
             self._pipeline_n_expected = info["n_expected"]
+        if "path" in info:
+            self._pipeline_path_label = f"{info['path']} {info['index']}/{info['total']}"
+        if stage == "render" and "output_dir" in info:
+            self._pipeline_render_dir = info["output_dir"]
         if self._pipeline_running and not self._pipeline_dry_run:
             self._tick_progress()
 
@@ -959,6 +1032,7 @@ class SimRenderTUIApp(App[None]):
                 n_png=n_png,
                 n_expected=self._pipeline_n_expected,
                 warning=self._pipeline_warning,
+                path_label=self._pipeline_path_label,
             )
         )
 
@@ -1009,6 +1083,8 @@ class SimRenderTUIApp(App[None]):
             return
         if result.ok:
             self._set_status(f"{time_prefix}Done ({result.stage}): {result.message}", error=False)
+        elif result.stage == "partial":
+            self._set_status(f"{time_prefix}Finished with failures: {result.message}", error=True)
         else:
             self._set_status(f"{time_prefix}Failed at {result.stage}: {result.message}", error=True)
 
