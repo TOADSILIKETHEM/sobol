@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Textual TUI: configure one PHANTOM DEM run, run it, convert dumps,
-render a per-sphere Blender clip headless. One run per launch — see
-sobol/tui_run.py for the Sobol sweep TUI.
+render it headless through any mix of per-sphere, composite, and
+point-cloud (instanced real grains / static placeholder) paths. One run per
+launch — see sobol/tui_run.py for the Sobol sweep TUI.
 
 Launch:
     python3 sobol/tui_sim_render.py
@@ -17,7 +18,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).parent / "Analysis"))
@@ -92,6 +93,29 @@ def to_windows_path(p: Path) -> str:
 # therefore stays a /mnt/c path).
 DEM_HEADLESS_RENDER = to_windows_path(_REPO_WIN_CODE / "BlenderConvert" / "DEMHeadlessRender.py")
 
+# Executed directly from WSL like BLENDER_EXE (so a /mnt/c path); runs the
+# composite and real-grain preprocess scripts, which need scipy / numpy that
+# Blender's bundled Python lacks (composite) or that the Windows side owns.
+WIN_VENV_PYTHON = _REPO_WIN_CODE / ".venv" / "Scripts" / "python.exe"
+# Static placeholder shape model -- opened by Windows blender.exe, so a
+# Windows-style path.
+DEFAULT_PLACEHOLDER_OBJ = to_windows_path(
+    _REPO_WIN_CODE / "BlenderConvert" / "Shapes"
+    / "gbo.ast-apophis.jpl.radar.shape_model_v1.0"
+    / "gbo.ast-apophis.jpl.radar.shape_model_v1.0" / "data" / "apophis_v233s7.obj"
+)
+
+_WIN_DRIVE_RE = re.compile(r"^([a-zA-Z]):[\\/](.*)$")
+
+
+def from_windows_path(s: str) -> Path:
+    """Windows <DRIVE>:/... (or <DRIVE>:\\...) -> WSL /mnt/<drive>/... Path.
+    Anything else is returned as a Path unchanged."""
+    m = _WIN_DRIVE_RE.match(s)
+    if not m:
+        return Path(s)
+    return Path(f"/mnt/{m.group(1).lower()}/" + m.group(2).replace("\\", "/"))
+
 
 def check_blender_exe(path: str = BLENDER_EXE) -> None:
     if not Path(path).is_file():
@@ -156,6 +180,10 @@ class RenderFormValues:
     camera_mode: str = "auto"
     encode_video: bool = False
     video_fps: Optional[int] = None
+    paths: Tuple[str, ...] = ("per_sphere",)
+    envelope_method: str = "hull"
+    placeholder_obj: str = DEFAULT_PLACEHOLDER_OBJ
+    n_points: int = 1_000_000
 
 
 @dataclass
@@ -172,14 +200,27 @@ class RenderParams:
     camera_mode: str = "auto"
     encode_video: bool = False
     video_fps: Optional[int] = None
+    viz_path: str = "per_sphere"  # DEMHeadlessRender.py --viz-path
+    manifest: Optional[Path] = None  # required unless viz_path == "per_sphere"
+
+
+@dataclass
+class PathResult:
+    name: str
+    ok: bool
+    stage: str  # "preprocess" | "render" | "done"
+    message: str
+    n_frames: int = 0
+    elapsed_s: float = 0.0
 
 
 @dataclass
 class PipelineResult:
-    stage: str  # "sim" | "convert" | "render" | "done"
+    stage: str  # "sim" | "convert" | "done" | "partial" | "error"
     ok: bool
     message: str
     record: Optional[RunRecord] = None
+    paths: List[PathResult] = field(default_factory=list)
 
 
 def run_sim_stage(params: SimParams) -> RunRecord:
@@ -226,10 +267,8 @@ def _grains_and_bodies_dirs(run_dir: Path, base_output_dir: Path, output_root: P
     return grains_dir, bodies_dir
 
 
-def _render_output_dir(run_dir: Path, base_output_dir: Path, output_root: Path) -> Path:
-    sim_name = output_root.name
-    run_name = run_dir.name
-    return base_output_dir / sim_name / f"{run_name}_render"
+def _render_output_dir(batch_dir: Path, run_name: str, path_name: str) -> Path:
+    return batch_dir / f"{run_name}_render_{path_name}"
 
 
 def run_convert_stage(record: RunRecord, base_output_dir: Path) -> None:
@@ -253,11 +292,31 @@ class RenderError(RuntimeError):
     pass
 
 
+class PreprocessError(RuntimeError):
+    pass
+
+
+def _output_tail(result: subprocess.CompletedProcess, n_lines: int = 40) -> str:
+    # Blender / script print() output goes to stdout; an uncaught Python
+    # traceback goes to stderr. A failure can land in either stream, so
+    # combine both before taking the tail.
+    combined = (result.stdout or "") + "\n" + (result.stderr or "")
+    return "\n".join(combined.splitlines()[-n_lines:])
+
+
 def build_render_command(params: RenderParams) -> List[str]:
     cmd = [
         BLENDER_EXE, "--background", "--python", DEM_HEADLESS_RENDER, "--",
-        "--grains-dir", to_windows_path(params.grains_dir),
-        "--bodies-dir", to_windows_path(params.bodies_dir),
+        "--viz-path", params.viz_path,
+    ]
+    if params.viz_path == "per_sphere":
+        cmd += [
+            "--grains-dir", to_windows_path(params.grains_dir),
+            "--bodies-dir", to_windows_path(params.bodies_dir),
+        ]
+    else:
+        cmd += ["--manifest", to_windows_path(params.manifest)]
+    cmd += [
         "--output-dir", to_windows_path(params.output_dir),
         "--resolution", params.resolution,
         "--samples", str(params.samples),
@@ -277,14 +336,154 @@ def run_render_stage(params: RenderParams) -> subprocess.CompletedProcess:
     cmd = build_render_command(params)
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        # Blender's own print() output (including everything
-        # DEMGrainsBlenderEarthCam.py prints while exec()'d) goes to stdout;
-        # an uncaught Python traceback goes to stderr. A failure can land in
-        # either stream, so combine both before taking the tail.
-        combined = (result.stdout or "") + "\n" + (result.stderr or "")
-        tail = "\n".join(combined.splitlines()[-40:])
-        raise RenderError(f"blender exited {result.returncode}:\n{tail}")
+        raise RenderError(f"blender exited {result.returncode}:\n{_output_tail(result)}")
     return result
+
+
+@dataclass
+class PathContext:
+    """Everything a render path needs once sim + convert have succeeded."""
+
+    grains_dir: Path
+    bodies_dir: Path
+    batch_dir: Path  # <base_output_dir>/<batch name>
+    run_name: str  # e.g. "run_0001"
+    render_form: RenderFormValues
+    n_expected_frames: int
+
+
+def _max_frames_args(ctx: PathContext) -> List[str]:
+    mf = ctx.render_form.max_frames
+    return ["--max-frames", str(mf)] if mf is not None else []
+
+
+def build_composite_preprocess_command(ctx: PathContext, output_dir: Path) -> List[str]:
+    return [
+        str(WIN_VENV_PYTHON), to_windows_path(_REPO_WIN_CODE / "viz" / "viz_preprocess.py"),
+        "--grains-dir", to_windows_path(ctx.grains_dir),
+        "--bodies-dir", to_windows_path(ctx.bodies_dir),
+        "--output-dir", to_windows_path(output_dir),
+        "--envelope-method", ctx.render_form.envelope_method,
+    ] + _max_frames_args(ctx)
+
+
+def build_instance_grains_preprocess_command(ctx: PathContext, output_dir: Path) -> List[str]:
+    return [
+        str(WIN_VENV_PYTHON),
+        to_windows_path(_REPO_WIN_CODE / "viz" / "viz_preprocess_grains_instance.py"),
+        "--grains-dir", to_windows_path(ctx.grains_dir),
+        "--bodies-dir", to_windows_path(ctx.bodies_dir),
+        "--output-dir", to_windows_path(output_dir),
+    ] + _max_frames_args(ctx)
+
+
+def build_instance_static_preprocess_command(ctx: PathContext, output_dir: Path) -> List[str]:
+    # viz_preprocess_lite.py needs mathutils.bvhtree -> Blender's Python.
+    # One static cloud regardless of frame count, so no --max-frames.
+    return [
+        BLENDER_EXE, "--background", "--python",
+        to_windows_path(_REPO_WIN_CODE / "viz" / "viz_preprocess_lite.py"), "--",
+        "--grains-dir", to_windows_path(ctx.grains_dir),
+        "--bodies-dir", to_windows_path(ctx.bodies_dir),
+        "--output-dir", to_windows_path(output_dir),
+        "--shape-obj", to_windows_path(Path(ctx.render_form.placeholder_obj)),
+        "--n-points", str(ctx.render_form.n_points),
+    ]
+
+
+def run_preprocess_stage(cmd: List[str], output_dir: Path) -> Path:
+    """Run one preprocess subprocess from the Windows repo root; return its manifest path."""
+    result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(_REPO_WIN_CODE))
+    if result.returncode != 0:
+        raise PreprocessError(f"exited {result.returncode}:\n{_output_tail(result)}")
+    manifest = output_dir / "manifest.json"
+    if not manifest.is_file():
+        raise PreprocessError(f"preprocess wrote no manifest at {output_dir}")
+    return manifest
+
+
+@dataclass(frozen=True)
+class RenderPath:
+    name: str
+    viz_dir_suffix: Optional[str]  # None = no preprocess stage
+    build_preprocess_command: Optional[Callable[[PathContext, Path], List[str]]]
+    headless_viz_path: str  # DEMHeadlessRender.py --viz-path
+
+
+# Insertion order is the fixed run order.
+RENDER_PATHS: Dict[str, RenderPath] = {
+    "per_sphere": RenderPath("per_sphere", None, None, "per_sphere"),
+    "composite": RenderPath("composite", "_viz", build_composite_preprocess_command, "composite"),
+    "instance_grains": RenderPath(
+        "instance_grains", "_viz_instance", build_instance_grains_preprocess_command, "instance",
+    ),
+    "instance_static": RenderPath(
+        "instance_static", "_viz_instance_static", build_instance_static_preprocess_command, "instance",
+    ),
+}
+RENDER_PATH_NAMES: Tuple[str, ...] = tuple(RENDER_PATHS)
+
+
+def run_render_path(spec: RenderPath, ctx: PathContext, on_stage=None, index: int = 1, total: int = 1) -> PathResult:
+    """[preprocess] -> render for one path. Never raises for stage failures."""
+    t0 = time.monotonic()
+
+    def notify(stage: str, **info) -> None:
+        if on_stage is not None:
+            on_stage(stage, path=spec.name, index=index, total=total, **info)
+
+    manifest: Optional[Path] = None
+    if spec.build_preprocess_command is not None:
+        viz_dir = ctx.batch_dir / f"{ctx.run_name}{spec.viz_dir_suffix}"
+        notify("preprocess", output_dir=viz_dir)
+        try:
+            manifest = run_preprocess_stage(spec.build_preprocess_command(ctx, viz_dir), viz_dir)
+        except PreprocessError as exc:
+            return PathResult(spec.name, False, "preprocess", str(exc), 0, time.monotonic() - t0)
+
+    output_dir = _render_output_dir(ctx.batch_dir, ctx.run_name, spec.name)
+    notify("render", n_expected=ctx.n_expected_frames, output_dir=output_dir)
+    form = ctx.render_form
+    params = RenderParams(
+        grains_dir=ctx.grains_dir,
+        bodies_dir=ctx.bodies_dir,
+        output_dir=output_dir,
+        resolution=form.resolution,
+        samples=form.samples,
+        fps=form.fps,
+        max_frames=form.max_frames,
+        camera_mode=form.camera_mode,
+        encode_video=form.encode_video,
+        video_fps=form.video_fps,
+        viz_path=spec.headless_viz_path,
+        manifest=manifest,
+    )
+    try:
+        run_render_stage(params)
+    except RenderError as exc:
+        return PathResult(
+            spec.name, False, "render", str(exc),
+            count_matching(output_dir, "frame_*.png"), time.monotonic() - t0,
+        )
+
+    elapsed = time.monotonic() - t0
+    n_frames = count_matching(output_dir, "frame_*.png")
+    if n_frames == 0:
+        return PathResult(spec.name, False, "render", f"render wrote no frames to {output_dir}", 0, elapsed)
+    message = f"{n_frames} frame(s) in {elapsed:.0f}s to {output_dir}"
+    if form.encode_video:
+        video_path = output_dir / "animation.mp4"
+        message += (
+            f", encoded to {video_path}" if video_path.is_file()
+            else f", video encode requested but {video_path} not found"
+        )
+    return PathResult(spec.name, True, "done", message, n_frames, elapsed)
+
+
+def format_path_result(r: PathResult) -> str:
+    if r.ok:
+        return f"{r.name}: ok, {r.message}"
+    return f"{r.name}: failed at {r.stage}: {r.message}"
 
 
 def count_matching(directory: Optional[Path], pattern: str) -> int:
@@ -303,19 +502,23 @@ def format_live_progress(
     n_png: int = 0,
     n_expected: Optional[int] = None,
     warning: str = "",
+    path_label: Optional[str] = None,
 ) -> str:
     """Status-bar text for the live-progress tick. Pure — no widget I/O."""
     elapsed = f"{elapsed_s:.0f}s elapsed"
+    label = f" [{path_label}]" if path_label else ""
     if stage == "convert":
         count = f"{n_npz}/{n_expected} npz" if n_expected is not None else f"{n_npz} npz"
         body = f"Converting... {elapsed}, {count}"
+    elif stage == "preprocess":
+        body = f"Preprocessing{label}... {elapsed}"
     elif stage == "render":
         count = (
             f"{n_png}/{n_expected} frame(s)"
             if n_expected is not None
             else f"{n_png} frame(s)"
         )
-        body = f"Rendering... {elapsed}, {count}"
+        body = f"Rendering{label}... {elapsed}, {count}"
     else:
         body = f"Running sim... {elapsed}, {n_dumps} dump file(s)"
     return f"{warning}{body}"
@@ -327,12 +530,20 @@ def run_pipeline(
     base_output_dir: Path,
     on_stage=None,
 ) -> PipelineResult:
-    """Sim -> convert -> render, stopping at the first failed stage.
+    """Sim -> convert -> each ticked render path ([preprocess] -> render).
+
+    Sim or convert failure stops everything. A render-path failure is recorded
+    on that path and the remaining paths still run (they are independent).
 
     on_stage(stage: str, **info) is optional. The TUI uses it to flip the
-    status bar from dump counts to convert/render counts so the bar does not
-    freeze on the last dump after PHANTOM exits.
+    status bar between dump / npz / preprocess / frame counts.
     """
+    if not render_form.paths:
+        raise ValueError("at least one render path must be selected")
+    unknown = [p for p in render_form.paths if p not in RENDER_PATHS]
+    if unknown:
+        raise ValueError(f"unknown render path(s): {', '.join(unknown)}")
+
     def notify(stage: str, **info) -> None:
         if on_stage is not None:
             on_stage(stage, **info)
@@ -356,7 +567,6 @@ def run_pipeline(
 
     run_dir = Path(record.run_dir)
     grains_dir, bodies_dir = _grains_and_bodies_dirs(run_dir, base_output_dir, sim_params.output_root)
-    output_dir = _render_output_dir(run_dir, base_output_dir, sim_params.output_root)
 
     # DEMDumpConvert.py never raises on a bad dump or an empty run -- it
     # prints and carries on -- so run_convert_stage() "succeeding" is not
@@ -377,37 +587,28 @@ def run_pipeline(
     n_expected_frames = n_npz
     if render_form.max_frames is not None:
         n_expected_frames = min(n_npz, render_form.max_frames)
-    notify("render", n_expected=n_expected_frames)
 
-    render_params = RenderParams(
+    ctx = PathContext(
         grains_dir=grains_dir,
         bodies_dir=bodies_dir,
-        output_dir=output_dir,
-        resolution=render_form.resolution,
-        samples=render_form.samples,
-        fps=render_form.fps,
-        max_frames=render_form.max_frames,
-        camera_mode=render_form.camera_mode,
-        encode_video=render_form.encode_video,
-        video_fps=render_form.video_fps,
+        batch_dir=base_output_dir / sim_params.output_root.name,
+        run_name=run_dir.name,
+        render_form=render_form,
+        n_expected_frames=n_expected_frames,
     )
-    try:
-        run_render_stage(render_params)
-    except RenderError as exc:
-        return PipelineResult(stage="render", ok=False, message=str(exc), record=record)
-
-    n_frames = count_matching(output_dir, "frame_*.png")
-    message = f"converted {n_npz} frame(s); rendered {n_frames} frame(s) to {output_dir}"
-    if render_form.encode_video:
-        video_path = output_dir / "animation.mp4"
-        message += (
-            f"; encoded to {video_path}" if video_path.is_file()
-            else f"; video encode requested but {video_path} not found"
-        )
+    specs = [RENDER_PATHS[name] for name in RENDER_PATH_NAMES if name in render_form.paths]
+    results = [
+        run_render_path(spec, ctx, on_stage=on_stage, index=i, total=len(specs))
+        for i, spec in enumerate(specs, start=1)
+    ]
+    all_ok = all(r.ok for r in results)
+    message = f"converted {n_npz} frame(s); " + "; ".join(format_path_result(r) for r in results)
     return PipelineResult(
-        stage="done", ok=True,
+        stage="done" if all_ok else "partial",
+        ok=all_ok,
         message=message,
         record=record,
+        paths=results,
     )
 
 
@@ -415,17 +616,22 @@ _PER_SPHERE_GRAIN_WARN_THRESHOLD = 2000
 
 
 def warn_if_high_grain_count(np_apophis: int) -> Optional[str]:
-    """Non-blocking warning: this pipeline is per-sphere only (see CLAUDE.md's
-    pipeline-comparison table) -- composite/instancing exist precisely
-    because per-sphere degrades above ~2000 grains.
-    """
+    """Non-blocking warning: the per-sphere path degrades above ~2000 grains
+    (see CLAUDE.md's pipeline-comparison table)."""
     if np_apophis <= _PER_SPHERE_GRAIN_WARN_THRESHOLD:
         return None
     return (
         f"Warning: np_apophis={np_apophis} — per-sphere path is intended for "
         f"≤{_PER_SPHERE_GRAIN_WARN_THRESHOLD} grains; consider the composite or "
-        "instancing path instead. "
+        "instance_grains path instead. "
     )
+
+
+def pipeline_warning(np_apophis: int, paths) -> str:
+    """Grain-count warning, only when the per-sphere path is ticked."""
+    if "per_sphere" not in paths:
+        return ""
+    return warn_if_high_grain_count(np_apophis) or ""
 
 
 class _Row(Horizontal):
@@ -685,7 +891,7 @@ class SimRenderTUIApp(App[None]):
         except ValueError as exc:
             self._set_status(f"Error: {exc}", error=True)
             return
-        warning = warn_if_high_grain_count(sim_params.sample.np_apophis) or ""
+        warning = pipeline_warning(sim_params.sample.np_apophis, render_form.paths)
         self._pipeline_running = True
         self._set_buttons_disabled(True)
         self._pipeline_start = time.monotonic()
@@ -695,9 +901,8 @@ class SimRenderTUIApp(App[None]):
             self._pipeline_run_dir, demcsvs, sim_params.output_root,
         )
         self._pipeline_grains_dir = grains_dir
-        self._pipeline_render_dir = _render_output_dir(
-            self._pipeline_run_dir, demcsvs, sim_params.output_root,
-        )
+        # Set per path by the "render" stage callback (Task 6).
+        self._pipeline_render_dir = None
         self._pipeline_prefix = sim_params.prefix
         self._pipeline_warning = warning
         self._pipeline_stage = "sim"

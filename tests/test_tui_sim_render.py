@@ -90,13 +90,9 @@ def test_grains_and_bodies_dirs():
 
 
 def test_render_output_dir():
-    run_dir = Path("/mnt/c/.../sobol_mass_runs/sobol_20260914_120000_batch/run_0001")
-    base_output_dir = Path("/mnt/c/.../Code/DEMCSVs")
-    output_root = Path("/mnt/c/.../sobol_mass_runs/sobol_20260914_120000_batch")
-
-    out_dir = tsr._render_output_dir(run_dir, base_output_dir, output_root)
-
-    assert out_dir == base_output_dir / "sobol_20260914_120000_batch" / "run_0001_render"
+    batch_dir = Path("/mnt/c/.../Code/DEMCSVs/sobol_20260914_120000_batch")
+    out_dir = tsr._render_output_dir(batch_dir, "run_0001", "per_sphere")
+    assert out_dir == batch_dir / "run_0001_render_per_sphere"
 
 
 def test_run_convert_stage_calls_converter(monkeypatch):
@@ -307,6 +303,16 @@ def _write_fake_npz(grains_dir: Path, n: int = 1) -> None:
         (grains_dir / f"sobol_{i:05d}.npz").write_bytes(b"")
 
 
+def _write_fake_pngs(output_dir: Path, n: int) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for i in range(1, n + 1):
+        (output_dir / f"frame_{i:04d}.png").write_bytes(b"")
+
+
+def _ok_completed():
+    return subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+
+
 def test_run_pipeline_stops_after_failed_render(monkeypatch, tmp_path):
     monkeypatch.setattr(tsr, "run_sim_stage", lambda params: _ok_record())
 
@@ -324,9 +330,12 @@ def test_run_pipeline_stops_after_failed_render(monkeypatch, tmp_path):
     sim_params = tsr.SimParams(output_root=Path("sobol_mass_runs/batch"))
     result = tsr.run_pipeline(sim_params, tsr.RenderFormValues(), base_output_dir)
 
-    assert result.stage == "render"
+    assert result.stage == "partial"
     assert result.ok is False
+    assert result.paths[0].name == "per_sphere"
+    assert result.paths[0].stage == "render"
     assert "some error" in result.message
+    assert "per_sphere: failed at render:" in result.message
 
 
 def test_run_pipeline_convert_succeeds_but_no_npz_fails_before_render(monkeypatch, tmp_path):
@@ -365,7 +374,8 @@ def test_run_pipeline_full_success(monkeypatch, tmp_path):
     captured = {}
     def fake_render(params):
         captured["params"] = params
-        return subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+        _write_fake_pngs(params.output_dir, 1)
+        return _ok_completed()
     monkeypatch.setattr(tsr, "run_render_stage", fake_render)
 
     sim_params = tsr.SimParams(output_root=Path("sobol_mass_runs/batch"))
@@ -374,10 +384,13 @@ def test_run_pipeline_full_success(monkeypatch, tmp_path):
 
     assert result.stage == "done"
     assert result.ok is True
+    assert [r.name for r in result.paths] == ["per_sphere"]
     rp = captured["params"]
+    assert rp.viz_path == "per_sphere"
+    assert rp.manifest is None
     assert rp.grains_dir == base_output_dir / "batch" / "run_0001_grains_output"
     assert rp.bodies_dir == base_output_dir / "batch" / "run_0001_bodies_output"
-    assert rp.output_dir == base_output_dir / "batch" / "run_0001_render"
+    assert rp.output_dir == base_output_dir / "batch" / "run_0001_render_per_sphere"
     assert rp.resolution == "640x360"
     assert rp.samples == 8
     assert rp.camera_mode == "grain_only"
@@ -407,8 +420,9 @@ def test_run_pipeline_success_message_counts_rendered_frames(monkeypatch, tmp_pa
     sim_params = tsr.SimParams(output_root=Path("sobol_mass_runs/batch"))
     result = tsr.run_pipeline(sim_params, tsr.RenderFormValues(), base_output_dir)
 
-    output_dir = base_output_dir / "batch" / "run_0001_render"
-    assert result.message == f"converted 3 frame(s); rendered 2 frame(s) to {output_dir}"
+    output_dir = base_output_dir / "batch" / "run_0001_render_per_sphere"
+    assert result.message.startswith("converted 3 frame(s); per_sphere: ok, 2 frame(s) in ")
+    assert result.message.endswith(f"s to {output_dir}")
 
 
 def test_run_pipeline_message_reports_encoded_video(monkeypatch, tmp_path):
@@ -434,11 +448,9 @@ def test_run_pipeline_message_reports_encoded_video(monkeypatch, tmp_path):
     render_form = tsr.RenderFormValues(encode_video=True)
     result = tsr.run_pipeline(sim_params, render_form, base_output_dir)
 
-    output_dir = base_output_dir / "batch" / "run_0001_render"
-    assert result.message == (
-        f"converted 2 frame(s); rendered 2 frame(s) to {output_dir}"
-        f"; encoded to {output_dir / 'animation.mp4'}"
-    )
+    output_dir = base_output_dir / "batch" / "run_0001_render_per_sphere"
+    assert f"per_sphere: ok, 2 frame(s) in " in result.message
+    assert result.message.endswith(f"s to {output_dir}, encoded to {output_dir / 'animation.mp4'}")
 
 
 def test_run_pipeline_message_flags_missing_video_when_requested(monkeypatch, tmp_path):
@@ -496,6 +508,9 @@ def test_run_pipeline_notifies_stage_callbacks(monkeypatch, tmp_path):
 
     assert [s[0] for s in stages] == ["sim", "convert", "render"]
     assert stages[2][1]["n_expected"] == 3
+    assert stages[2][1]["path"] == "per_sphere"
+    assert (stages[2][1]["index"], stages[2][1]["total"]) == (1, 1)
+    assert stages[2][1]["output_dir"] == base_output_dir / "batch" / "run_0001_render_per_sphere"
 
 
 def test_run_pipeline_render_n_expected_respects_max_frames(monkeypatch, tmp_path):
@@ -640,6 +655,7 @@ async def _click_and_wait_for_settled_status(
             text.startswith("Dry run")
             or text.startswith("Running")
             or text.startswith("Converting")
+            or text.startswith("Preprocessing")
             or text.startswith("Rendering")
         ):
             await pilot.pause(step)
@@ -1047,3 +1063,279 @@ def test_build_sim_params_kt_cgs_zero_does_not_compute_coh_gap_max():
 
     assert params.sample.kt_cgs == 0.0
     assert params.sample.coh_gap_max_cgs is None
+
+
+# --- Bulk render paths: commands, preprocess stage, partial failure -------
+
+def _mnt_ctx(**form_kw):
+    batch = Path("/mnt/c/DEMCSVs/batch")
+    return tsr.PathContext(
+        grains_dir=batch / "run_0001_grains_output",
+        bodies_dir=batch / "run_0001_bodies_output",
+        batch_dir=batch,
+        run_name="run_0001",
+        render_form=tsr.RenderFormValues(**form_kw),
+        n_expected_frames=3,
+    )
+
+
+def test_render_path_registry_order_and_wiring():
+    assert tsr.RENDER_PATH_NAMES == ("per_sphere", "composite", "instance_grains", "instance_static")
+    assert tsr.RENDER_PATHS["per_sphere"].build_preprocess_command is None
+    assert tsr.RENDER_PATHS["composite"].viz_dir_suffix == "_viz"
+    assert tsr.RENDER_PATHS["composite"].headless_viz_path == "composite"
+    assert tsr.RENDER_PATHS["instance_grains"].viz_dir_suffix == "_viz_instance"
+    assert tsr.RENDER_PATHS["instance_grains"].headless_viz_path == "instance"
+    assert tsr.RENDER_PATHS["instance_static"].viz_dir_suffix == "_viz_instance_static"
+    assert tsr.RENDER_PATHS["instance_static"].headless_viz_path == "instance"
+
+
+def test_render_form_values_new_defaults():
+    r = tsr.RenderFormValues()
+    assert r.paths == ("per_sphere",)
+    assert r.envelope_method == "hull"
+    assert r.placeholder_obj == tsr.DEFAULT_PLACEHOLDER_OBJ
+    assert r.placeholder_obj.endswith("/apophis_v233s7.obj")
+    assert r.placeholder_obj.startswith("C:/")
+    assert r.n_points == 1_000_000
+
+
+def test_composite_preprocess_command():
+    ctx = _mnt_ctx(envelope_method="sdf", max_frames=3)
+    cmd = tsr.build_composite_preprocess_command(ctx, ctx.batch_dir / "run_0001_viz")
+    assert cmd[0] == str(tsr.WIN_VENV_PYTHON)
+    assert cmd[1] == tsr.to_windows_path(tsr._REPO_WIN_CODE / "viz" / "viz_preprocess.py")
+    assert cmd[cmd.index("--grains-dir") + 1] == "C:/DEMCSVs/batch/run_0001_grains_output"
+    assert cmd[cmd.index("--bodies-dir") + 1] == "C:/DEMCSVs/batch/run_0001_bodies_output"
+    assert cmd[cmd.index("--output-dir") + 1] == "C:/DEMCSVs/batch/run_0001_viz"
+    assert cmd[cmd.index("--envelope-method") + 1] == "sdf"
+    assert cmd[cmd.index("--max-frames") + 1] == "3"
+
+
+def test_composite_preprocess_command_without_max_frames():
+    ctx = _mnt_ctx()
+    cmd = tsr.build_composite_preprocess_command(ctx, ctx.batch_dir / "run_0001_viz")
+    assert "--max-frames" not in cmd
+    assert cmd[cmd.index("--envelope-method") + 1] == "hull"
+
+
+def test_instance_grains_preprocess_command():
+    ctx = _mnt_ctx(max_frames=2)
+    cmd = tsr.build_instance_grains_preprocess_command(ctx, ctx.batch_dir / "run_0001_viz_instance")
+    assert cmd[0] == str(tsr.WIN_VENV_PYTHON)
+    assert cmd[1] == tsr.to_windows_path(
+        tsr._REPO_WIN_CODE / "viz" / "viz_preprocess_grains_instance.py"
+    )
+    assert cmd[cmd.index("--output-dir") + 1] == "C:/DEMCSVs/batch/run_0001_viz_instance"
+    assert cmd[cmd.index("--max-frames") + 1] == "2"
+    assert "--envelope-method" not in cmd
+
+
+def test_instance_static_preprocess_command():
+    ctx = _mnt_ctx(placeholder_obj="C:/shapes/a.obj", n_points=5000, max_frames=2)
+    cmd = tsr.build_instance_static_preprocess_command(
+        ctx, ctx.batch_dir / "run_0001_viz_instance_static"
+    )
+    assert cmd[0] == tsr.BLENDER_EXE
+    assert cmd[1:4] == [
+        "--background", "--python",
+        tsr.to_windows_path(tsr._REPO_WIN_CODE / "viz" / "viz_preprocess_lite.py"),
+    ]
+    assert cmd[4] == "--"
+    assert cmd[cmd.index("--shape-obj") + 1] == "C:/shapes/a.obj"
+    assert cmd[cmd.index("--n-points") + 1] == "5000"
+    assert cmd[cmd.index("--output-dir") + 1] == "C:/DEMCSVs/batch/run_0001_viz_instance_static"
+    assert "--max-frames" not in cmd
+
+
+def test_instance_static_preprocess_command_converts_wsl_obj_path():
+    ctx = _mnt_ctx(placeholder_obj="/mnt/c/shapes/a.obj")
+    cmd = tsr.build_instance_static_preprocess_command(ctx, ctx.batch_dir / "x")
+    assert cmd[cmd.index("--shape-obj") + 1] == "C:/shapes/a.obj"
+
+
+def test_build_render_command_bulk_path_uses_manifest():
+    params = tsr.RenderParams(
+        grains_dir=Path("/mnt/c/g"), bodies_dir=Path("/mnt/c/b"),
+        output_dir=Path("/mnt/c/DEMCSVs/batch/run_0001_render_composite"),
+        viz_path="composite", manifest=Path("/mnt/c/DEMCSVs/batch/run_0001_viz/manifest.json"),
+    )
+    cmd = tsr.build_render_command(params)
+    assert cmd[4] == "--"
+    assert cmd[cmd.index("--viz-path") + 1] == "composite"
+    assert cmd[cmd.index("--manifest") + 1] == "C:/DEMCSVs/batch/run_0001_viz/manifest.json"
+    assert "--grains-dir" not in cmd and "--bodies-dir" not in cmd
+    assert cmd[cmd.index("--output-dir") + 1] == "C:/DEMCSVs/batch/run_0001_render_composite"
+
+
+def test_build_render_command_per_sphere_passes_viz_path():
+    params = tsr.RenderParams(
+        grains_dir=Path("/mnt/c/g"), bodies_dir=Path("/mnt/c/b"), output_dir=Path("/mnt/c/o"),
+    )
+    cmd = tsr.build_render_command(params)
+    assert cmd[cmd.index("--viz-path") + 1] == "per_sphere"
+    assert "--manifest" not in cmd
+
+
+def test_run_preprocess_stage_failure_raises_with_tail(monkeypatch, tmp_path):
+    fake = subprocess.CompletedProcess(args=[], returncode=2, stdout="a\nqhull boom", stderr="")
+    captured = {}
+    def fake_run(cmd, **kw):
+        captured.update(kw)
+        return fake
+    monkeypatch.setattr(tsr.subprocess, "run", fake_run)
+    with pytest.raises(tsr.PreprocessError, match="qhull boom"):
+        tsr.run_preprocess_stage(["python.exe"], tmp_path / "viz")
+    assert captured["cwd"] == str(tsr._REPO_WIN_CODE)
+
+
+def test_run_preprocess_stage_exit_0_without_manifest_raises(monkeypatch, tmp_path):
+    monkeypatch.setattr(tsr.subprocess, "run", lambda *a, **kw: _ok_completed())
+    with pytest.raises(tsr.PreprocessError, match="preprocess wrote no manifest at"):
+        tsr.run_preprocess_stage(["python.exe"], tmp_path / "viz")
+
+
+def test_run_preprocess_stage_returns_manifest(monkeypatch, tmp_path):
+    out = tmp_path / "viz"
+    def fake_run(cmd, **kw):
+        out.mkdir()
+        (out / "manifest.json").write_text("{}")
+        return _ok_completed()
+    monkeypatch.setattr(tsr.subprocess, "run", fake_run)
+    assert tsr.run_preprocess_stage(["python.exe"], out) == out / "manifest.json"
+
+
+def _pipeline_setup(monkeypatch, tmp_path, n_npz=2):
+    monkeypatch.setattr(tsr, "run_sim_stage", lambda params: _ok_record())
+    base = tmp_path / "DEMCSVs"
+    grains = base / "batch" / "run_0001_grains_output"
+    monkeypatch.setattr(tsr, "run_convert_stage", lambda rec, b: _write_fake_npz(grains, n_npz))
+    return base, tsr.SimParams(output_root=Path("sobol_mass_runs/batch"))
+
+
+def _fake_preprocess_ok(cmd, output_dir):
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "manifest.json").write_text("{}")
+    return output_dir / "manifest.json"
+
+
+def test_run_pipeline_partial_failure_continues_other_paths(monkeypatch, tmp_path):
+    base, sim_params = _pipeline_setup(monkeypatch, tmp_path)
+
+    def fake_pre(cmd, output_dir):
+        if output_dir.name == "run_0001_viz":
+            raise tsr.PreprocessError("exited 1:\nqhull boom")
+        return _fake_preprocess_ok(cmd, output_dir)
+    monkeypatch.setattr(tsr, "run_preprocess_stage", fake_pre)
+
+    rendered = []
+    def fake_render(params):
+        rendered.append((params.viz_path, params.manifest))
+        _write_fake_pngs(params.output_dir, 2)
+        return _ok_completed()
+    monkeypatch.setattr(tsr, "run_render_stage", fake_render)
+
+    form = tsr.RenderFormValues(paths=("instance_grains", "per_sphere", "composite"))
+    result = tsr.run_pipeline(sim_params, form, base)
+
+    assert result.stage == "partial"
+    assert result.ok is False
+    assert [r.name for r in result.paths] == ["per_sphere", "composite", "instance_grains"]
+    assert [r.ok for r in result.paths] == [True, False, True]
+    assert result.paths[1].stage == "preprocess"
+    assert rendered == [
+        ("per_sphere", None),
+        ("instance", base / "batch" / "run_0001_viz_instance" / "manifest.json"),
+    ]
+    assert "per_sphere: ok, 2 frame(s)" in result.message
+    assert "composite: failed at preprocess:" in result.message
+    assert "qhull boom" in result.message
+    assert "instance_grains: ok, 2 frame(s)" in result.message
+
+
+def test_run_pipeline_all_paths_ok_is_done(monkeypatch, tmp_path):
+    base, sim_params = _pipeline_setup(monkeypatch, tmp_path)
+    monkeypatch.setattr(tsr, "run_preprocess_stage", _fake_preprocess_ok)
+    out_dirs = []
+    def fake_render(params):
+        out_dirs.append(params.output_dir.name)
+        _write_fake_pngs(params.output_dir, 1)
+        return _ok_completed()
+    monkeypatch.setattr(tsr, "run_render_stage", fake_render)
+
+    form = tsr.RenderFormValues(paths=tsr.RENDER_PATH_NAMES)
+    result = tsr.run_pipeline(sim_params, form, base)
+
+    assert result.stage == "done" and result.ok is True
+    assert out_dirs == [
+        "run_0001_render_per_sphere", "run_0001_render_composite",
+        "run_0001_render_instance_grains", "run_0001_render_instance_static",
+    ]
+
+
+def test_run_pipeline_zero_pngs_is_render_failure(monkeypatch, tmp_path):
+    base, sim_params = _pipeline_setup(monkeypatch, tmp_path)
+    monkeypatch.setattr(tsr, "run_render_stage", lambda params: _ok_completed())
+    result = tsr.run_pipeline(sim_params, tsr.RenderFormValues(), base)
+    assert result.ok is False
+    assert result.paths[0].stage == "render"
+    assert "render wrote no frames to" in result.message
+
+
+def test_run_pipeline_rejects_empty_or_unknown_paths_before_sim(monkeypatch):
+    sim_mock = MagicMock()
+    monkeypatch.setattr(tsr, "run_sim_stage", sim_mock)
+    with pytest.raises(ValueError, match="render path"):
+        tsr.run_pipeline(tsr.SimParams(), tsr.RenderFormValues(paths=()), Path("/x"))
+    with pytest.raises(ValueError, match="bogus"):
+        tsr.run_pipeline(tsr.SimParams(), tsr.RenderFormValues(paths=("bogus",)), Path("/x"))
+    sim_mock.assert_not_called()
+
+
+def test_run_pipeline_stage_callbacks_per_path(monkeypatch, tmp_path):
+    base, sim_params = _pipeline_setup(monkeypatch, tmp_path, n_npz=5)
+    monkeypatch.setattr(tsr, "run_preprocess_stage", _fake_preprocess_ok)
+    monkeypatch.setattr(
+        tsr, "run_render_stage",
+        lambda params: (_write_fake_pngs(params.output_dir, 1), _ok_completed())[1],
+    )
+    stages = []
+    tsr.run_pipeline(
+        sim_params, tsr.RenderFormValues(paths=("per_sphere", "composite"), max_frames=2), base,
+        on_stage=lambda stage, **info: stages.append((stage, info)),
+    )
+    assert [s[0] for s in stages] == ["sim", "convert", "render", "preprocess", "render"]
+    pre = stages[3][1]
+    assert (pre["path"], pre["index"], pre["total"]) == ("composite", 2, 2)
+    assert pre["output_dir"] == base / "batch" / "run_0001_viz"
+    assert stages[4][1]["n_expected"] == 2
+    assert stages[4][1]["output_dir"] == base / "batch" / "run_0001_render_composite"
+
+
+def test_format_path_result():
+    ok = tsr.PathResult(name="composite", ok=True, stage="done", message="3 frame(s) in 5s to X")
+    bad = tsr.PathResult(name="instance_static", ok=False, stage="preprocess", message="boom")
+    assert tsr.format_path_result(ok) == "composite: ok, 3 frame(s) in 5s to X"
+    assert tsr.format_path_result(bad) == "instance_static: failed at preprocess: boom"
+
+
+def test_format_live_progress_preprocess_with_label():
+    text = tsr.format_live_progress(12.0, "preprocess", path_label="composite 2/3")
+    assert text == "Preprocessing [composite 2/3]... 12s elapsed"
+
+
+def test_format_live_progress_render_with_label():
+    text = tsr.format_live_progress(3.0, "render", n_png=1, n_expected=4, path_label="per_sphere 1/2")
+    assert text == "Rendering [per_sphere 1/2]... 3s elapsed, 1/4 frame(s)"
+
+
+def test_from_windows_path():
+    assert tsr.from_windows_path("C:/Users/x/a.obj") == Path("/mnt/c/Users/x/a.obj")
+    assert tsr.from_windows_path("D:\\data\\b.obj") == Path("/mnt/d/data/b.obj")
+    assert tsr.from_windows_path("/mnt/c/y") == Path("/mnt/c/y")
+
+
+def test_pipeline_warning_only_for_per_sphere():
+    assert tsr.pipeline_warning(5000, ("composite",)) == ""
+    assert "5000" in tsr.pipeline_warning(5000, ("per_sphere", "composite"))
+    assert tsr.pipeline_warning(500, ("per_sphere",)) == ""
