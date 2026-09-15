@@ -334,7 +334,10 @@ def build_render_command(params: RenderParams) -> List[str]:
 
 def run_render_stage(params: RenderParams) -> subprocess.CompletedProcess:
     cmd = build_render_command(params)
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True)
+    except OSError as exc:
+        raise RenderError(f"could not start {cmd[0]}: {exc}") from exc
     if result.returncode != 0:
         raise RenderError(f"blender exited {result.returncode}:\n{_output_tail(result)}")
     return result
@@ -393,7 +396,10 @@ def build_instance_static_preprocess_command(ctx: PathContext, output_dir: Path)
 
 def run_preprocess_stage(cmd: List[str], output_dir: Path) -> Path:
     """Run one preprocess subprocess from the Windows repo root; return its manifest path."""
-    result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(_REPO_WIN_CODE))
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(_REPO_WIN_CODE))
+    except OSError as exc:
+        raise PreprocessError(f"could not start {cmd[0]}: {exc}") from exc
     if result.returncode != 0:
         raise PreprocessError(f"exited {result.returncode}:\n{_output_tail(result)}")
     manifest = output_dir / "manifest.json"

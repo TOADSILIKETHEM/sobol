@@ -1205,6 +1205,25 @@ def test_run_preprocess_stage_returns_manifest(monkeypatch, tmp_path):
     assert tsr.run_preprocess_stage(["python.exe"], out) == out / "manifest.json"
 
 
+def test_run_preprocess_stage_spawn_oserror_raises_preprocess_error(monkeypatch, tmp_path):
+    def fake_run(cmd, **kw):
+        raise FileNotFoundError("no python.exe")
+    monkeypatch.setattr(tsr.subprocess, "run", fake_run)
+    with pytest.raises(tsr.PreprocessError, match="could not start"):
+        tsr.run_preprocess_stage(["python.exe"], tmp_path / "viz")
+
+
+def test_run_render_stage_spawn_oserror_raises_render_error(monkeypatch):
+    def fake_run(cmd, **kw):
+        raise FileNotFoundError("no blender.exe")
+    monkeypatch.setattr(tsr.subprocess, "run", fake_run)
+    params = tsr.RenderParams(
+        grains_dir=Path("/mnt/c/g"), bodies_dir=Path("/mnt/c/b"), output_dir=Path("/mnt/c/o"),
+    )
+    with pytest.raises(tsr.RenderError, match="could not start"):
+        tsr.run_render_stage(params)
+
+
 def _pipeline_setup(monkeypatch, tmp_path, n_npz=2):
     monkeypatch.setattr(tsr, "run_sim_stage", lambda params: _ok_record())
     base = tmp_path / "DEMCSVs"
@@ -1251,6 +1270,31 @@ def test_run_pipeline_partial_failure_continues_other_paths(monkeypatch, tmp_pat
     assert "composite: failed at preprocess:" in result.message
     assert "qhull boom" in result.message
     assert "instance_grains: ok, 2 frame(s)" in result.message
+
+
+def test_run_pipeline_spawn_failure_on_one_path_keeps_other_paths(monkeypatch, tmp_path):
+    # Fix round 1: a spawn-level OSError (e.g. WIN_VENV_PYTHON missing) from
+    # subprocess.run itself -- not a non-zero returncode -- must still be
+    # contained to that one path's PathResult, not escape run_pipeline
+    # entirely and discard the paths that already succeeded.
+    base, sim_params = _pipeline_setup(monkeypatch, tmp_path)
+
+    def fake_subprocess_run(cmd, **kw):
+        raise FileNotFoundError("no python.exe")
+    monkeypatch.setattr(tsr.subprocess, "run", fake_subprocess_run)
+
+    def fake_render(params):
+        _write_fake_pngs(params.output_dir, 1)
+        return _ok_completed()
+    monkeypatch.setattr(tsr, "run_render_stage", fake_render)
+
+    form = tsr.RenderFormValues(paths=("per_sphere", "composite"))
+    result = tsr.run_pipeline(sim_params, form, base)
+
+    assert result.stage == "partial"
+    assert [r.ok for r in result.paths] == [True, False]
+    assert result.paths[1].stage == "preprocess"
+    assert "could not start" in result.message
 
 
 def test_run_pipeline_all_paths_ok_is_done(monkeypatch, tmp_path):
