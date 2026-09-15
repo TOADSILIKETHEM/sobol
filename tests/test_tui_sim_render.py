@@ -5,6 +5,7 @@ import re
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -40,7 +41,7 @@ def test_sim_params_defaults():
 def test_render_form_values_defaults():
     r = tsr.RenderFormValues()
     assert r.resolution == "1920x1080"
-    assert r.samples == 128
+    assert r.samples == 500
     assert r.fps == 24
     assert r.max_frames is None
     assert r.camera_mode == "auto"
@@ -177,6 +178,35 @@ def test_build_render_command_with_max_frames():
     cmd = tsr.build_render_command(params)
     idx = cmd.index("--max-frames")
     assert cmd[idx + 1] == "3"
+
+
+def test_build_render_command_without_encode_video_omits_flags():
+    params = tsr.RenderParams(
+        grains_dir=Path("/mnt/c/g"), bodies_dir=Path("/mnt/c/b"), output_dir=Path("/mnt/c/o"),
+    )
+    cmd = tsr.build_render_command(params)
+    assert "--encode-video" not in cmd
+    assert "--video-fps" not in cmd
+
+
+def test_build_render_command_with_encode_video_default_fps():
+    params = tsr.RenderParams(
+        grains_dir=Path("/mnt/c/g"), bodies_dir=Path("/mnt/c/b"), output_dir=Path("/mnt/c/o"),
+        encode_video=True,
+    )
+    cmd = tsr.build_render_command(params)
+    assert "--encode-video" in cmd
+    assert "--video-fps" not in cmd  # None means DEMHeadlessRender.py falls back to --fps
+
+
+def test_build_render_command_with_encode_video_and_explicit_fps():
+    params = tsr.RenderParams(
+        grains_dir=Path("/mnt/c/g"), bodies_dir=Path("/mnt/c/b"), output_dir=Path("/mnt/c/o"),
+        encode_video=True, video_fps=60,
+    )
+    cmd = tsr.build_render_command(params)
+    idx = cmd.index("--video-fps")
+    assert cmd[idx + 1] == "60"
 
 
 def test_run_render_stage_success(monkeypatch):
@@ -381,6 +411,185 @@ def test_run_pipeline_success_message_counts_rendered_frames(monkeypatch, tmp_pa
     assert result.message == f"converted 3 frame(s); rendered 2 frame(s) to {output_dir}"
 
 
+def test_run_pipeline_message_reports_encoded_video(monkeypatch, tmp_path):
+    record = _ok_record()
+    monkeypatch.setattr(tsr, "run_sim_stage", lambda params: record)
+
+    base_output_dir = tmp_path / "DEMCSVs"
+    grains_dir = base_output_dir / "batch" / "run_0001_grains_output"
+
+    def fake_convert(rec, base_output_dir):
+        _write_fake_npz(grains_dir, 2)
+    monkeypatch.setattr(tsr, "run_convert_stage", fake_convert)
+
+    def fake_render(params):
+        params.output_dir.mkdir(parents=True, exist_ok=True)
+        (params.output_dir / "frame_0001.png").write_bytes(b"")
+        (params.output_dir / "frame_0002.png").write_bytes(b"")
+        (params.output_dir / "animation.mp4").write_bytes(b"")  # DEMHeadlessRender.py's output
+        return subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+    monkeypatch.setattr(tsr, "run_render_stage", fake_render)
+
+    sim_params = tsr.SimParams(output_root=Path("sobol_mass_runs/batch"))
+    render_form = tsr.RenderFormValues(encode_video=True)
+    result = tsr.run_pipeline(sim_params, render_form, base_output_dir)
+
+    output_dir = base_output_dir / "batch" / "run_0001_render"
+    assert result.message == (
+        f"converted 2 frame(s); rendered 2 frame(s) to {output_dir}"
+        f"; encoded to {output_dir / 'animation.mp4'}"
+    )
+
+
+def test_run_pipeline_message_flags_missing_video_when_requested(monkeypatch, tmp_path):
+    # If --encode-video was requested but DEMHeadlessRender.py somehow didn't
+    # produce the mp4 (and didn't raise either), the success message should
+    # say so rather than silently claiming a video that isn't there.
+    record = _ok_record()
+    monkeypatch.setattr(tsr, "run_sim_stage", lambda params: record)
+
+    base_output_dir = tmp_path / "DEMCSVs"
+    grains_dir = base_output_dir / "batch" / "run_0001_grains_output"
+
+    def fake_convert(rec, base_output_dir):
+        _write_fake_npz(grains_dir, 1)
+    monkeypatch.setattr(tsr, "run_convert_stage", fake_convert)
+
+    def fake_render(params):
+        params.output_dir.mkdir(parents=True, exist_ok=True)
+        (params.output_dir / "frame_0001.png").write_bytes(b"")
+        return subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+    monkeypatch.setattr(tsr, "run_render_stage", fake_render)
+
+    sim_params = tsr.SimParams(output_root=Path("sobol_mass_runs/batch"))
+    render_form = tsr.RenderFormValues(encode_video=True)
+    result = tsr.run_pipeline(sim_params, render_form, base_output_dir)
+
+    assert "video encode requested but" in result.message
+    assert "not found" in result.message
+
+
+def test_run_pipeline_notifies_stage_callbacks(monkeypatch, tmp_path):
+    record = _ok_record()
+    monkeypatch.setattr(tsr, "run_sim_stage", lambda params: record)
+
+    base_output_dir = tmp_path / "DEMCSVs"
+    grains_dir = base_output_dir / "batch" / "run_0001_grains_output"
+
+    def fake_convert(rec, base_output_dir):
+        _write_fake_npz(grains_dir, 3)
+    monkeypatch.setattr(tsr, "run_convert_stage", fake_convert)
+    monkeypatch.setattr(
+        tsr, "run_render_stage",
+        lambda params: subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+    )
+
+    stages = []
+
+    def on_stage(stage, **info):
+        stages.append((stage, info))
+
+    sim_params = tsr.SimParams(output_root=Path("sobol_mass_runs/batch"))
+    tsr.run_pipeline(
+        sim_params, tsr.RenderFormValues(), base_output_dir, on_stage=on_stage,
+    )
+
+    assert [s[0] for s in stages] == ["sim", "convert", "render"]
+    assert stages[2][1]["n_expected"] == 3
+
+
+def test_run_pipeline_render_n_expected_respects_max_frames(monkeypatch, tmp_path):
+    monkeypatch.setattr(tsr, "run_sim_stage", lambda params: _ok_record())
+    base_output_dir = tmp_path / "DEMCSVs"
+    grains_dir = base_output_dir / "batch" / "run_0001_grains_output"
+
+    def fake_convert(rec, base_output_dir):
+        _write_fake_npz(grains_dir, 5)
+    monkeypatch.setattr(tsr, "run_convert_stage", fake_convert)
+    monkeypatch.setattr(
+        tsr, "run_render_stage",
+        lambda params: subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+    )
+
+    stages = []
+    tsr.run_pipeline(
+        tsr.SimParams(output_root=Path("sobol_mass_runs/batch")),
+        tsr.RenderFormValues(max_frames=2),
+        base_output_dir,
+        on_stage=lambda stage, **info: stages.append((stage, info)),
+    )
+
+    assert stages[-1][0] == "render"
+    assert stages[-1][1]["n_expected"] == 2
+
+
+def test_format_live_progress_sim():
+    assert tsr.format_live_progress(44, "sim", n_dumps=14) == (
+        "Running sim... 44s elapsed, 14 dump file(s)"
+    )
+
+
+def test_format_live_progress_convert_with_expected():
+    assert tsr.format_live_progress(900, "convert", n_npz=80, n_expected=217) == (
+        "Converting... 900s elapsed, 80/217 npz"
+    )
+
+
+def test_format_live_progress_render_with_expected():
+    assert tsr.format_live_progress(1200, "render", n_png=20, n_expected=217) == (
+        "Rendering... 1200s elapsed, 20/217 frame(s)"
+    )
+
+
+def test_format_live_progress_render_without_expected():
+    assert tsr.format_live_progress(10, "render", n_png=0) == (
+        "Rendering... 10s elapsed, 0 frame(s)"
+    )
+
+
+def test_format_live_progress_warning_prefix():
+    msg = tsr.format_live_progress(1, "sim", n_dumps=0, warning="Warning: np_apophis=5000 — x. ")
+    assert msg.startswith("Warning: np_apophis=5000")
+    assert "Running sim..." in msg
+
+
+def test_count_matching_missing_dir(tmp_path):
+    assert tsr.count_matching(tmp_path / "nope", "*.png") == 0
+    assert tsr.count_matching(None, "*.png") == 0
+
+
+def test_count_matching_pngs(tmp_path):
+    (tmp_path / "frame_0001.png").write_bytes(b"")
+    (tmp_path / "frame_0002.png").write_bytes(b"")
+    (tmp_path / "notes.txt").write_text("skip")
+    assert tsr.count_matching(tmp_path, "frame_*.png") == 2
+
+
+def test_tick_progress_render_stage_counts_pngs(tmp_path):
+    """Status bar must leave dump counts once the worker reports render."""
+
+    async def _scenario():
+        app = tsr.SimRenderTUIApp()
+        async with app.run_test():
+            render_dir = tmp_path / "render"
+            render_dir.mkdir()
+            (render_dir / "frame_0001.png").write_bytes(b"")
+            (render_dir / "frame_0002.png").write_bytes(b"")
+            app._pipeline_start = time.monotonic()
+            app._pipeline_stage = "render"
+            app._pipeline_n_expected = 217
+            app._pipeline_render_dir = render_dir
+            app._pipeline_warning = ""
+            app._pipeline_dry_run = False
+            app._tick_progress()
+            return str(app.query_one("#status", tsr.Static).content)
+
+    text = asyncio.run(_scenario())
+    assert "Rendering..." in text
+    assert "2/217 frame(s)" in text
+    assert "dump file" not in text
+
+
 def test_check_blender_exe_raises_when_missing(tmp_path):
     missing = tmp_path / "does_not_exist" / "blender.exe"
     with pytest.raises(FileNotFoundError, match=str(missing)):
@@ -427,7 +636,12 @@ async def _click_and_wait_for_settled_status(
         text = str(status.content)
         elapsed = 0.0
         step = 0.1
-        while elapsed < timeout_s and (text.startswith("Dry run") or text.startswith("Running")):
+        while elapsed < timeout_s and (
+            text.startswith("Dry run")
+            or text.startswith("Running")
+            or text.startswith("Converting")
+            or text.startswith("Rendering")
+        ):
             await pilot.pause(step)
             elapsed += step
             text = str(status.content)

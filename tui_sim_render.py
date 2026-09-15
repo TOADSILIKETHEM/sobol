@@ -45,7 +45,7 @@ try:
     from textual.app import App, ComposeResult
     from textual.containers import Horizontal, ScrollableContainer
     from textual.timer import Timer
-    from textual.widgets import Button, Footer, Header, Input, Select, Static
+    from textual.widgets import Button, Checkbox, Footer, Header, Input, Select, Static
 except ImportError:
     sys.exit(
         "textual is not installed.\n"
@@ -150,10 +150,12 @@ class RenderFormValues:
     """Render-only inputs from the TUI's render form."""
 
     resolution: str = "1920x1080"
-    samples: int = 128
+    samples: int = 500
     fps: int = 24
     max_frames: Optional[int] = None
     camera_mode: str = "auto"
+    encode_video: bool = False
+    video_fps: Optional[int] = None
 
 
 @dataclass
@@ -164,10 +166,12 @@ class RenderParams:
     bodies_dir: Path
     output_dir: Path
     resolution: str = "1920x1080"
-    samples: int = 128
+    samples: int = 500
     fps: int = 24
     max_frames: Optional[int] = None
     camera_mode: str = "auto"
+    encode_video: bool = False
+    video_fps: Optional[int] = None
 
 
 @dataclass
@@ -262,6 +266,10 @@ def build_render_command(params: RenderParams) -> List[str]:
     ]
     if params.max_frames is not None:
         cmd += ["--max-frames", str(params.max_frames)]
+    if params.encode_video:
+        cmd += ["--encode-video"]
+        if params.video_fps is not None:
+            cmd += ["--video-fps", str(params.video_fps)]
     return cmd
 
 
@@ -279,8 +287,57 @@ def run_render_stage(params: RenderParams) -> subprocess.CompletedProcess:
     return result
 
 
-def run_pipeline(sim_params: SimParams, render_form: RenderFormValues, base_output_dir: Path) -> PipelineResult:
-    """Sim -> convert -> render, stopping at the first failed stage."""
+def count_matching(directory: Optional[Path], pattern: str) -> int:
+    """Return glob hits under directory, or 0 if it is missing / None."""
+    if directory is None or not directory.is_dir():
+        return 0
+    return len(list(directory.glob(pattern)))
+
+
+def format_live_progress(
+    elapsed_s: float,
+    stage: str,
+    *,
+    n_dumps: int = 0,
+    n_npz: int = 0,
+    n_png: int = 0,
+    n_expected: Optional[int] = None,
+    warning: str = "",
+) -> str:
+    """Status-bar text for the live-progress tick. Pure — no widget I/O."""
+    elapsed = f"{elapsed_s:.0f}s elapsed"
+    if stage == "convert":
+        count = f"{n_npz}/{n_expected} npz" if n_expected is not None else f"{n_npz} npz"
+        body = f"Converting... {elapsed}, {count}"
+    elif stage == "render":
+        count = (
+            f"{n_png}/{n_expected} frame(s)"
+            if n_expected is not None
+            else f"{n_png} frame(s)"
+        )
+        body = f"Rendering... {elapsed}, {count}"
+    else:
+        body = f"Running sim... {elapsed}, {n_dumps} dump file(s)"
+    return f"{warning}{body}"
+
+
+def run_pipeline(
+    sim_params: SimParams,
+    render_form: RenderFormValues,
+    base_output_dir: Path,
+    on_stage=None,
+) -> PipelineResult:
+    """Sim -> convert -> render, stopping at the first failed stage.
+
+    on_stage(stage: str, **info) is optional. The TUI uses it to flip the
+    status bar from dump counts to convert/render counts so the bar does not
+    freeze on the last dump after PHANTOM exits.
+    """
+    def notify(stage: str, **info) -> None:
+        if on_stage is not None:
+            on_stage(stage, **info)
+
+    notify("sim")
     record = run_sim_stage(sim_params)
     if record.status != "ok":
         return PipelineResult(
@@ -288,6 +345,9 @@ def run_pipeline(sim_params: SimParams, render_form: RenderFormValues, base_outp
             message=record.error or f"sim ended with status={record.status!r}",
             record=record,
         )
+
+    n_dumps = count_matching(Path(record.run_dir), f"{sim_params.prefix}_[0-9]*")
+    notify("convert", n_expected=n_dumps if n_dumps else None)
 
     try:
         run_convert_stage(record, base_output_dir)
@@ -302,7 +362,7 @@ def run_pipeline(sim_params: SimParams, render_form: RenderFormValues, base_outp
     # prints and carries on -- so run_convert_stage() "succeeding" is not
     # proof any frame was actually converted. Catch that here rather than
     # let Blender fail minutes/hours later on "no grain npz files found".
-    n_npz = len(list(grains_dir.glob("*.npz")))
+    n_npz = count_matching(grains_dir, "*.npz")
     if n_npz == 0:
         return PipelineResult(
             stage="convert", ok=False,
@@ -314,6 +374,11 @@ def run_pipeline(sim_params: SimParams, render_form: RenderFormValues, base_outp
             ),
             record=record,
         )
+    n_expected_frames = n_npz
+    if render_form.max_frames is not None:
+        n_expected_frames = min(n_npz, render_form.max_frames)
+    notify("render", n_expected=n_expected_frames)
+
     render_params = RenderParams(
         grains_dir=grains_dir,
         bodies_dir=bodies_dir,
@@ -323,16 +388,25 @@ def run_pipeline(sim_params: SimParams, render_form: RenderFormValues, base_outp
         fps=render_form.fps,
         max_frames=render_form.max_frames,
         camera_mode=render_form.camera_mode,
+        encode_video=render_form.encode_video,
+        video_fps=render_form.video_fps,
     )
     try:
         run_render_stage(render_params)
     except RenderError as exc:
         return PipelineResult(stage="render", ok=False, message=str(exc), record=record)
 
-    n_frames = len(list(output_dir.glob("frame_*.png")))
+    n_frames = count_matching(output_dir, "frame_*.png")
+    message = f"converted {n_npz} frame(s); rendered {n_frames} frame(s) to {output_dir}"
+    if render_form.encode_video:
+        video_path = output_dir / "animation.mp4"
+        message += (
+            f"; encoded to {video_path}" if video_path.is_file()
+            else f"; video encode requested but {video_path} not found"
+        )
     return PipelineResult(
         stage="done", ok=True,
-        message=f"converted {n_npz} frame(s); rendered {n_frames} frame(s) to {output_dir}",
+        message=message,
         record=record,
     )
 
@@ -402,8 +476,13 @@ class SimRenderTUIApp(App[None]):
         self._progress_timer: Optional[Timer] = None
         self._pipeline_start: Optional[float] = None
         self._pipeline_run_dir: Optional[Path] = None
+        self._pipeline_grains_dir: Optional[Path] = None
+        self._pipeline_render_dir: Optional[Path] = None
         self._pipeline_prefix: str = ""
         self._pipeline_warning: str = ""
+        self._pipeline_stage: str = "sim"
+        self._pipeline_n_expected: Optional[int] = None
+        self._pipeline_dry_run: bool = False
         # This TUI runs one pipeline at a time -- @work(thread=True) defaults
         # to exclusive=False, so without this guard a second click while a
         # worker is in flight would start a second worker that overwrites
@@ -454,7 +533,7 @@ class SimRenderTUIApp(App[None]):
 
             yield Static("Render", classes="sec")
             yield _Row("resolution", Input("1920x1080", id="resolution"), "WxH")
-            yield _Row("samples", Input("128", id="samples"), "int")
+            yield _Row("samples", Input("500", id="samples"), "int")
             yield _Row("fps", Input("24", id="fps"), "int")
             yield _Row("max_frames", Input("", id="max-frames", placeholder="(all frames)"), "int, optional")
             yield _Row(
@@ -463,6 +542,14 @@ class SimRenderTUIApp(App[None]):
                     [("auto", "auto"), ("grain_only", "grain_only")],
                     value="auto", id="camera-mode", allow_blank=False,
                 ),
+            )
+            yield _Row(
+                "encode_video",
+                Checkbox("encode to MP4 after render", value=False, id="encode-video"),
+                "optional final stage",
+            )
+            yield _Row(
+                "video_fps", Input("", id="video-fps", placeholder="(same as fps)"), "int, optional",
             )
 
         with Horizontal(id="bar"):
@@ -557,12 +644,19 @@ class SimRenderTUIApp(App[None]):
         if max_frames is not None and max_frames <= 0:
             raise ValueError(f"max_frames must be > 0 when set (got {max_frames})")
         camera_mode = self.query_one("#camera-mode", Select).value
+        encode_video = self.query_one("#encode-video", Checkbox).value
+        video_fps_raw = self._iv("video-fps")
+        video_fps = int(video_fps_raw) if video_fps_raw else None
+        if video_fps is not None and video_fps <= 0:
+            raise ValueError(f"video_fps must be > 0 when set (got {video_fps})")
         return RenderFormValues(
             resolution=resolution,
             samples=samples,
             fps=fps,
             max_frames=max_frames,
             camera_mode=str(camera_mode),
+            encode_video=bool(encode_video),
+            video_fps=video_fps,
         )
 
     @on(Button.Pressed, "#btn-run")
@@ -596,27 +690,65 @@ class SimRenderTUIApp(App[None]):
         self._set_buttons_disabled(True)
         self._pipeline_start = time.monotonic()
         self._pipeline_run_dir = sim_params.output_root / "run_0001"
+        demcsvs = _REPO_WIN_CODE / "DEMCSVs"
+        grains_dir, _bodies_dir = _grains_and_bodies_dirs(
+            self._pipeline_run_dir, demcsvs, sim_params.output_root,
+        )
+        self._pipeline_grains_dir = grains_dir
+        self._pipeline_render_dir = _render_output_dir(
+            self._pipeline_run_dir, demcsvs, sim_params.output_root,
+        )
         self._pipeline_prefix = sim_params.prefix
         self._pipeline_warning = warning
-        self._set_status(f"{warning}{'Dry run' if dry_run else 'Running'}...")
+        self._pipeline_stage = "sim"
+        self._pipeline_n_expected = None
+        self._pipeline_dry_run = dry_run
+        if dry_run:
+            self._set_status(f"{warning}Dry run...")
+        else:
+            self._tick_progress()
         if self._progress_timer is not None:
             self._progress_timer.stop()
         self._progress_timer = self.set_interval(2.0, self._tick_progress)
         self._run_pipeline_worker(sim_params, render_form)
 
+    def _set_pipeline_stage(self, stage: str, info: Optional[dict] = None) -> None:
+        """Called from the worker via call_from_thread when a stage starts."""
+        self._pipeline_stage = stage
+        if info and "n_expected" in info:
+            self._pipeline_n_expected = info["n_expected"]
+        if self._pipeline_running and not self._pipeline_dry_run:
+            self._tick_progress()
+
     def _tick_progress(self) -> None:
-        """Coarse live progress while the worker thread runs (spec Component 1
-        "Live progress"): elapsed time plus a dump-file count under run_0001.
-        Deliberately does not parse phantom.log -- out of scope per the spec.
+        """Coarse live progress while the worker thread runs.
+
+        Stage is set by run_pipeline's on_stage callback. Sim counts dumps;
+        convert counts npz; render counts frame_*.png so the bar does not
+        freeze on the last dump after PHANTOM exits.
         """
         if self._pipeline_start is None:
             return
+        if self._pipeline_dry_run:
+            elapsed = time.monotonic() - self._pipeline_start
+            self._set_status(f"{self._pipeline_warning}Dry run... {elapsed:.0f}s elapsed")
+            return
         elapsed = time.monotonic() - self._pipeline_start
-        n_dumps = 0
-        if self._pipeline_run_dir is not None and self._pipeline_run_dir.is_dir():
-            n_dumps = len(list(self._pipeline_run_dir.glob(f"{self._pipeline_prefix}_[0-9]*")))
+        n_dumps = count_matching(
+            self._pipeline_run_dir, f"{self._pipeline_prefix}_[0-9]*",
+        )
+        n_npz = count_matching(self._pipeline_grains_dir, "*.npz")
+        n_png = count_matching(self._pipeline_render_dir, "frame_*.png")
         self._set_status(
-            f"{self._pipeline_warning}Running... {elapsed:.0f}s elapsed, {n_dumps} dump file(s)"
+            format_live_progress(
+                elapsed,
+                self._pipeline_stage,
+                n_dumps=n_dumps,
+                n_npz=n_npz,
+                n_png=n_png,
+                n_expected=self._pipeline_n_expected,
+                warning=self._pipeline_warning,
+            )
         )
 
     def _stop_progress_timer(self) -> None:
@@ -626,8 +758,13 @@ class SimRenderTUIApp(App[None]):
 
     @work(thread=True)
     def _run_pipeline_worker(self, sim_params: SimParams, render_form: RenderFormValues) -> None:
+        def on_stage(stage: str, **info) -> None:
+            self.call_from_thread(self._set_pipeline_stage, stage, info)
+
         try:
-            result = run_pipeline(sim_params, render_form, _REPO_WIN_CODE / "DEMCSVs")
+            result = run_pipeline(
+                sim_params, render_form, _REPO_WIN_CODE / "DEMCSVs", on_stage=on_stage,
+            )
         except Exception as exc:  # an uncaught exception here must never kill the app
             result = PipelineResult(
                 stage="error", ok=False, message=f"{type(exc).__name__}: {exc}",
