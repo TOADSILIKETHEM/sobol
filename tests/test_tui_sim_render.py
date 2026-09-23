@@ -205,9 +205,17 @@ def test_build_render_command_with_encode_video_and_explicit_fps():
     assert cmd[idx + 1] == "60"
 
 
+def _fake_run_logged(result, captured=None):
+    def fake(cmd, log_path, **kw):
+        if captured is not None:
+            captured.update(kw, cmd=cmd, log_path=log_path)
+        return result
+    return fake
+
+
 def test_run_render_stage_success(monkeypatch):
     fake_result = subprocess.CompletedProcess(args=["blender"], returncode=0, stdout="ok", stderr="")
-    monkeypatch.setattr(tsr.subprocess, "run", lambda *a, **kw: fake_result)
+    monkeypatch.setattr(tsr, "_run_logged", _fake_run_logged(fake_result))
 
     params = tsr.RenderParams(
         grains_dir=Path("/mnt/c/g"), bodies_dir=Path("/mnt/c/b"), output_dir=Path("/mnt/c/o"),
@@ -216,15 +224,28 @@ def test_run_render_stage_success(monkeypatch):
     assert result is fake_result
 
 
-def test_run_render_stage_failure_raises_with_combined_tail(monkeypatch):
-    # Blender's own print() output goes to stdout; a Python traceback goes to
-    # stderr -- a failure can show up in either, so both must be checked.
-    stdout_text = "\n".join(f"stdout line {i}" for i in range(30))
-    stderr_text = "\n".join(f"stderr line {i}" for i in range(30))
-    fake_result = subprocess.CompletedProcess(
-        args=["blender"], returncode=1, stdout=stdout_text, stderr=stderr_text,
+def test_run_render_stage_writes_render_log_in_output_dir(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(tsr, "_run_logged", _fake_run_logged(_ok_completed(), captured))
+    lines = []
+    params = tsr.RenderParams(
+        grains_dir=Path("/mnt/c/g"), bodies_dir=Path("/mnt/c/b"), output_dir=Path("/mnt/c/o"),
+        on_line=lines.append,
     )
-    monkeypatch.setattr(tsr.subprocess, "run", lambda *a, **kw: fake_result)
+    tsr.run_render_stage(params)
+    assert captured["log_path"] == Path("/mnt/c/o/render.log")
+    assert captured["on_line"] is params.on_line
+    assert captured["cmd"] == tsr.build_render_command(params)
+
+
+def test_run_render_stage_failure_raises_with_combined_tail(monkeypatch):
+    # _run_logged merges stderr into stdout (Blender's print() output and a
+    # Python traceback can land in either); only the last ~40 lines survive.
+    stdout_text = "\n".join(f"line {i}" for i in range(60))
+    fake_result = subprocess.CompletedProcess(
+        args=["blender"], returncode=1, stdout=stdout_text, stderr="",
+    )
+    monkeypatch.setattr(tsr, "_run_logged", _fake_run_logged(fake_result))
 
     params = tsr.RenderParams(
         grains_dir=Path("/mnt/c/g"), bodies_dir=Path("/mnt/c/b"), output_dir=Path("/mnt/c/o"),
@@ -232,24 +253,72 @@ def test_run_render_stage_failure_raises_with_combined_tail(monkeypatch):
     with pytest.raises(tsr.RenderError) as excinfo:
         tsr.run_render_stage(params)
     msg = str(excinfo.value)
-    assert "stderr line 29" in msg  # last lines of the combined text are kept
-    assert "stdout line 0" not in msg  # only the last ~40 combined lines survive
+    assert "line 59" in msg
+    assert "line 0\n" not in msg
+    assert "render.log" in msg  # points at the full log
 
 
 def test_run_render_stage_failure_reads_stdout_only_traceback(monkeypatch):
-    # Regression case: some failures print everything to stdout with an
-    # empty stderr (e.g. exec()'d script prints its own error and returns
-    # non-zero without raising) -- stderr-only capture would show nothing.
     fake_result = subprocess.CompletedProcess(
         args=["blender"], returncode=1, stdout="GRAINS_DIR pattern not found", stderr="",
     )
-    monkeypatch.setattr(tsr.subprocess, "run", lambda *a, **kw: fake_result)
+    monkeypatch.setattr(tsr, "_run_logged", _fake_run_logged(fake_result))
 
     params = tsr.RenderParams(
         grains_dir=Path("/mnt/c/g"), bodies_dir=Path("/mnt/c/b"), output_dir=Path("/mnt/c/o"),
     )
     with pytest.raises(tsr.RenderError, match="GRAINS_DIR pattern not found"):
         tsr.run_render_stage(params)
+
+
+def _child(code: str):
+    return [sys.executable, "-c", code]
+
+
+def test_run_logged_streams_merged_output_to_log_and_callback(tmp_path):
+    log = tmp_path / "nested" / "render.log"
+    seen = []
+    result = tsr._run_logged(
+        _child("import sys; print('out one'); print('err two', file=sys.stderr); "
+               "sys.stdout.flush(); sys.exit(3)"),
+        log, on_line=seen.append,
+    )
+    assert result.returncode == 3
+    text = log.read_text(encoding="utf-8")
+    assert "out one" in text and "err two" in text
+    assert sorted(seen) == ["err two", "out one"]
+    assert "out one" in result.stdout and "err two" in result.stdout
+
+
+def test_run_logged_replaces_undecodable_bytes(tmp_path):
+    log = tmp_path / "render.log"
+    result = tsr._run_logged(
+        _child("import sys; sys.stdout.buffer.write(b'bad \\xff byte\\n')"), log,
+    )
+    assert result.returncode == 0
+    assert "bad \ufffd byte" in log.read_text(encoding="utf-8")
+
+
+def test_run_logged_keeps_full_log_but_bounded_tail(tmp_path):
+    log = tmp_path / "render.log"
+    result = tsr._run_logged(_child("for i in range(5000): print(f'L{i}')"), log)
+    assert log.read_text(encoding="utf-8").count("\n") == 5000
+    kept = result.stdout.splitlines()
+    assert kept[-1] == "L4999"
+    assert len(kept) <= tsr._LOG_TAIL_LINES
+
+
+def test_run_logged_spawn_failure_raises_oserror_and_logs(tmp_path):
+    log = tmp_path / "render.log"
+    with pytest.raises(OSError):
+        tsr._run_logged([str(tmp_path / "no_such_exe")], log)
+    assert "could not start" in log.read_text(encoding="utf-8")
+
+
+def test_run_logged_passes_cwd(tmp_path):
+    log = tmp_path / "x.log"
+    tsr._run_logged(_child("import os; print(os.getcwd())"), log, cwd=str(tmp_path))
+    assert str(tmp_path) in log.read_text(encoding="utf-8")
 
 
 def _ok_record(run_dir="sobol_mass_runs/batch/run_0001"):
@@ -1104,7 +1173,8 @@ def test_composite_preprocess_command():
     ctx = _mnt_ctx(envelope_method="sdf", max_frames=3)
     cmd = tsr.build_composite_preprocess_command(ctx, ctx.batch_dir / "run_0001_viz")
     assert cmd[0] == str(tsr.WIN_VENV_PYTHON)
-    assert cmd[1] == tsr.to_windows_path(tsr._REPO_WIN_CODE / "viz" / "viz_preprocess.py")
+    assert cmd[1] == "-u"  # unbuffered, so preprocess.log / status line stream live
+    assert cmd[2] == tsr.to_windows_path(tsr._REPO_WIN_CODE / "viz" / "viz_preprocess.py")
     assert cmd[cmd.index("--grains-dir") + 1] == "C:/DEMCSVs/batch/run_0001_grains_output"
     assert cmd[cmd.index("--bodies-dir") + 1] == "C:/DEMCSVs/batch/run_0001_bodies_output"
     assert cmd[cmd.index("--output-dir") + 1] == "C:/DEMCSVs/batch/run_0001_viz"
@@ -1123,7 +1193,8 @@ def test_instance_grains_preprocess_command():
     ctx = _mnt_ctx(max_frames=2)
     cmd = tsr.build_instance_grains_preprocess_command(ctx, ctx.batch_dir / "run_0001_viz_instance")
     assert cmd[0] == str(tsr.WIN_VENV_PYTHON)
-    assert cmd[1] == tsr.to_windows_path(
+    assert cmd[1] == "-u"
+    assert cmd[2] == tsr.to_windows_path(
         tsr._REPO_WIN_CODE / "viz" / "viz_preprocess_grains_instance.py"
     )
     assert cmd[cmd.index("--output-dir") + 1] == "C:/DEMCSVs/batch/run_0001_viz_instance"
@@ -1180,20 +1251,29 @@ def test_build_render_command_per_sphere_passes_viz_path():
 def test_run_preprocess_stage_failure_raises_with_tail(monkeypatch, tmp_path):
     fake = subprocess.CompletedProcess(args=[], returncode=2, stdout="a\nqhull boom", stderr="")
     captured = {}
-    def fake_run(cmd, **kw):
-        captured.update(kw)
-        return fake
-    monkeypatch.setattr(tsr.subprocess, "run", fake_run)
+    monkeypatch.setattr(tsr, "_run_logged", _fake_run_logged(fake, captured))
     with pytest.raises(tsr.PreprocessError, match="qhull boom"):
         tsr.run_preprocess_stage(["python.exe"], tmp_path / "viz")
     assert captured["cwd"] == str(tsr._REPO_WIN_CODE)
+
+
+def test_run_preprocess_stage_writes_preprocess_log_and_passes_on_line(monkeypatch, tmp_path):
+    out = tmp_path / "viz"
+    out.mkdir()
+    (out / "manifest.json").write_text("{}")
+    captured = {}
+    monkeypatch.setattr(tsr, "_run_logged", _fake_run_logged(_ok_completed(), captured))
+    cb = lambda line: None
+    tsr.run_preprocess_stage(["python.exe"], out, on_line=cb)
+    assert captured["log_path"] == out / "preprocess.log"
+    assert captured["on_line"] is cb
 
 
 def test_run_preprocess_stage_exit_0_without_manifest_raises(monkeypatch, tmp_path):
     fake = subprocess.CompletedProcess(
         args=[], returncode=0, stdout="Traceback ... boom", stderr="",
     )
-    monkeypatch.setattr(tsr.subprocess, "run", lambda *a, **kw: fake)
+    monkeypatch.setattr(tsr, "_run_logged", _fake_run_logged(fake))
     with pytest.raises(tsr.PreprocessError, match="wrote no manifest at") as excinfo:
         tsr.run_preprocess_stage(["python.exe"], tmp_path / "viz")
     assert "Traceback ... boom" in str(excinfo.value)
@@ -1201,57 +1281,31 @@ def test_run_preprocess_stage_exit_0_without_manifest_raises(monkeypatch, tmp_pa
 
 def test_run_preprocess_stage_returns_manifest(monkeypatch, tmp_path):
     out = tmp_path / "viz"
-    def fake_run(cmd, **kw):
+    def fake(cmd, log_path, **kw):
         out.mkdir()
         (out / "manifest.json").write_text("{}")
         return _ok_completed()
-    monkeypatch.setattr(tsr.subprocess, "run", fake_run)
+    monkeypatch.setattr(tsr, "_run_logged", fake)
     assert tsr.run_preprocess_stage(["python.exe"], out) == out / "manifest.json"
 
 
 def test_run_preprocess_stage_spawn_oserror_raises_preprocess_error(monkeypatch, tmp_path):
-    def fake_run(cmd, **kw):
+    def fake(cmd, log_path, **kw):
         raise FileNotFoundError("no python.exe")
-    monkeypatch.setattr(tsr.subprocess, "run", fake_run)
+    monkeypatch.setattr(tsr, "_run_logged", fake)
     with pytest.raises(tsr.PreprocessError, match="could not start"):
         tsr.run_preprocess_stage(["python.exe"], tmp_path / "viz")
 
 
 def test_run_render_stage_spawn_oserror_raises_render_error(monkeypatch):
-    def fake_run(cmd, **kw):
+    def fake(cmd, log_path, **kw):
         raise FileNotFoundError("no blender.exe")
-    monkeypatch.setattr(tsr.subprocess, "run", fake_run)
+    monkeypatch.setattr(tsr, "_run_logged", fake)
     params = tsr.RenderParams(
         grains_dir=Path("/mnt/c/g"), bodies_dir=Path("/mnt/c/b"), output_dir=Path("/mnt/c/o"),
     )
     with pytest.raises(tsr.RenderError, match="could not start"):
         tsr.run_render_stage(params)
-
-
-def test_run_preprocess_stage_passes_errors_replace(monkeypatch, tmp_path):
-    out = tmp_path / "viz"
-    out.mkdir()
-    (out / "manifest.json").write_text("{}")
-    captured = {}
-    def fake_run(cmd, **kw):
-        captured.update(kw)
-        return _ok_completed()
-    monkeypatch.setattr(tsr.subprocess, "run", fake_run)
-    tsr.run_preprocess_stage(["python.exe"], out)
-    assert captured["errors"] == "replace"
-
-
-def test_run_render_stage_passes_errors_replace(monkeypatch):
-    captured = {}
-    def fake_run(cmd, **kw):
-        captured.update(kw)
-        return _ok_completed()
-    monkeypatch.setattr(tsr.subprocess, "run", fake_run)
-    params = tsr.RenderParams(
-        grains_dir=Path("/mnt/c/g"), bodies_dir=Path("/mnt/c/b"), output_dir=Path("/mnt/c/o"),
-    )
-    tsr.run_render_stage(params)
-    assert captured["errors"] == "replace"
 
 
 def _pipeline_setup(monkeypatch, tmp_path, n_npz=2):
@@ -1262,7 +1316,7 @@ def _pipeline_setup(monkeypatch, tmp_path, n_npz=2):
     return base, tsr.SimParams(output_root=Path("sobol_mass_runs/batch"))
 
 
-def _fake_preprocess_ok(cmd, output_dir):
+def _fake_preprocess_ok(cmd, output_dir, **kw):
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "manifest.json").write_text("{}")
     return output_dir / "manifest.json"
@@ -1271,7 +1325,7 @@ def _fake_preprocess_ok(cmd, output_dir):
 def test_run_pipeline_partial_failure_continues_other_paths(monkeypatch, tmp_path):
     base, sim_params = _pipeline_setup(monkeypatch, tmp_path)
 
-    def fake_pre(cmd, output_dir):
+    def fake_pre(cmd, output_dir, **kw):
         if output_dir.name == "run_0001_viz":
             raise tsr.PreprocessError("exited 1:\nqhull boom")
         return _fake_preprocess_ok(cmd, output_dir)
@@ -1304,14 +1358,14 @@ def test_run_pipeline_partial_failure_continues_other_paths(monkeypatch, tmp_pat
 
 def test_run_pipeline_spawn_failure_on_one_path_keeps_other_paths(monkeypatch, tmp_path):
     # Fix round 1: a spawn-level OSError (e.g. WIN_VENV_PYTHON missing) from
-    # subprocess.run itself -- not a non-zero returncode -- must still be
+    # the subprocess spawn itself -- not a non-zero returncode -- must still be
     # contained to that one path's PathResult, not escape run_pipeline
     # entirely and discard the paths that already succeeded.
     base, sim_params = _pipeline_setup(monkeypatch, tmp_path)
 
-    def fake_subprocess_run(cmd, **kw):
+    def fake_run_logged(cmd, log_path, **kw):
         raise FileNotFoundError("no python.exe")
-    monkeypatch.setattr(tsr.subprocess, "run", fake_subprocess_run)
+    monkeypatch.setattr(tsr, "_run_logged", fake_run_logged)
 
     def fake_render(params):
         _write_fake_pngs(params.output_dir, 1)
@@ -1389,7 +1443,7 @@ def test_run_pipeline_stage_callbacks_per_path(monkeypatch, tmp_path):
 def test_run_pipeline_summary_is_single_line_with_multiline_failure(monkeypatch, tmp_path):
     base, sim_params = _pipeline_setup(monkeypatch, tmp_path)
 
-    def fake_pre(cmd, output_dir):
+    def fake_pre(cmd, output_dir, **kw):
         raise tsr.PreprocessError("exited 1:\n" + "\n".join(f"l{i}" for i in range(40)))
     monkeypatch.setattr(tsr, "run_preprocess_stage", fake_pre)
 
@@ -1630,3 +1684,68 @@ def test_report_result_partial_is_error_status():
     assert "Finished with failures:" in text
     assert "composite: failed at preprocess: boom" in text
     assert is_err is True
+
+
+def test_run_pipeline_threads_on_line_to_preprocess_and_render(monkeypatch, tmp_path):
+    base, sim_params = _pipeline_setup(monkeypatch, tmp_path)
+    pre_cbs, render_cbs = [], []
+    def fake_pre(cmd, output_dir, **kw):
+        pre_cbs.append(kw.get("on_line"))
+        return _fake_preprocess_ok(cmd, output_dir)
+    monkeypatch.setattr(tsr, "run_preprocess_stage", fake_pre)
+    def fake_render(params):
+        render_cbs.append(params.on_line)
+        _write_fake_pngs(params.output_dir, 1)
+        return _ok_completed()
+    monkeypatch.setattr(tsr, "run_render_stage", fake_render)
+
+    cb = lambda line: None
+    form = tsr.RenderFormValues(paths=("per_sphere", "composite"))
+    result = tsr.run_pipeline(sim_params, form, base, on_line=cb)
+
+    assert result.ok
+    assert pre_cbs == [cb]
+    assert render_cbs == [cb, cb]
+
+
+def test_format_live_progress_appends_last_log_line():
+    msg = tsr.format_live_progress(
+        12, "render", n_png=1, n_expected=4, path_label="composite 2/3",
+        last_line="Fra:14 Mem:2.1G | Sample 120/500",
+    )
+    assert msg.endswith("| Fra:14 Mem:2.1G | Sample 120/500")
+
+
+def test_format_live_progress_truncates_long_log_line():
+    msg = tsr.format_live_progress(1, "preprocess", last_line="x" * 500)
+    assert len(msg) < 200
+    assert msg.endswith("…")
+
+
+def test_format_live_progress_ignores_blank_log_line():
+    assert tsr.format_live_progress(1, "render", n_png=0, last_line="   ") == \
+        tsr.format_live_progress(1, "render", n_png=0)
+
+
+def test_tick_progress_shows_last_log_line_and_stage_change_clears_it(tmp_path):
+    async def _scenario():
+        app = tsr.SimRenderTUIApp()
+        async with app.run_test():
+            app._pipeline_start = time.monotonic()
+            app._pipeline_stage = "render"
+            app._pipeline_render_dir = tmp_path
+            app._pipeline_warning = ""
+            app._pipeline_dry_run = False
+            app._pipeline_running = True
+            app._on_subprocess_line("Fra:3 Mem:1.2G | Sample 8/16")
+            app._tick_progress()
+            shown = str(app.query_one("#status", tsr.Static).content)
+            app._set_pipeline_stage(
+                "preprocess", {"path": "composite", "index": 2, "total": 2},
+            )
+            after = str(app.query_one("#status", tsr.Static).content)
+            return shown, after
+
+    shown, after = asyncio.run(_scenario())
+    assert shown.endswith("| Fra:3 Mem:1.2G | Sample 8/16")
+    assert "Fra:3" not in after

@@ -15,6 +15,7 @@ import re
 import subprocess
 import sys
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -202,6 +203,10 @@ class RenderParams:
     video_fps: Optional[int] = None
     viz_path: str = "per_sphere"  # DEMHeadlessRender.py --viz-path
     manifest: Optional[Path] = None  # required unless viz_path == "per_sphere"
+    # Called with each line Blender prints (see _run_logged). A field rather
+    # than a run_render_stage() argument so stage fakes taking only `params`
+    # keep working.
+    on_line: Optional[Callable[[str], None]] = None
 
 
 @dataclass
@@ -304,6 +309,48 @@ def _output_tail(result: subprocess.CompletedProcess, n_lines: int = 40) -> str:
     return "\n".join(combined.splitlines()[-n_lines:])
 
 
+# Lines of child output held in memory for error messages; the log file on
+# disk keeps everything.
+_LOG_TAIL_LINES = 400
+
+
+def _run_logged(
+    cmd: List[str],
+    log_path: Path,
+    *,
+    cwd: Optional[str] = None,
+    on_line: Optional[Callable[[str], None]] = None,
+) -> subprocess.CompletedProcess:
+    """Run cmd, streaming its output line by line to log_path and on_line.
+
+    stderr is merged into stdout so the log keeps Blender's print() output and
+    a traceback in the order they happened. The returned CompletedProcess
+    carries only the last _LOG_TAIL_LINES lines in stdout (stderr is empty),
+    which is all _output_tail() needs. Raises OSError if cmd cannot start,
+    after writing that error to the log.
+    """
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    tail: deque = deque(maxlen=_LOG_TAIL_LINES)
+    with open(log_path, "w", encoding="utf-8") as log:
+        try:
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, errors="replace", cwd=cwd, bufsize=1,
+            )
+        except OSError as exc:
+            log.write(f"could not start {cmd[0]}: {exc}\n")
+            raise
+        with proc:
+            for line in proc.stdout:
+                log.write(line)
+                log.flush()
+                tail.append(line)
+                if on_line is not None:
+                    on_line(line.rstrip("\r\n"))
+        returncode = proc.wait()
+    return subprocess.CompletedProcess(cmd, returncode, stdout="".join(tail), stderr="")
+
+
 def build_render_command(params: RenderParams) -> List[str]:
     cmd = [
         BLENDER_EXE, "--background", "--python", DEM_HEADLESS_RENDER, "--",
@@ -334,12 +381,15 @@ def build_render_command(params: RenderParams) -> List[str]:
 
 def run_render_stage(params: RenderParams) -> subprocess.CompletedProcess:
     cmd = build_render_command(params)
+    log_path = params.output_dir / "render.log"
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, errors="replace")
+        result = _run_logged(cmd, log_path, on_line=params.on_line)
     except OSError as exc:
         raise RenderError(f"could not start {cmd[0]}: {exc}") from exc
     if result.returncode != 0:
-        raise RenderError(f"blender exited {result.returncode}:\n{_output_tail(result)}")
+        raise RenderError(
+            f"blender exited {result.returncode} (full log: {log_path}):\n{_output_tail(result)}"
+        )
     return result
 
 
@@ -360,9 +410,11 @@ def _max_frames_args(ctx: PathContext) -> List[str]:
     return ["--max-frames", str(mf)] if mf is not None else []
 
 
+# Windows python.exe block-buffers stdout into a pipe, so without -u its
+# output reaches preprocess.log and the status line only when it exits.
 def build_composite_preprocess_command(ctx: PathContext, output_dir: Path) -> List[str]:
     return [
-        str(WIN_VENV_PYTHON), to_windows_path(_REPO_WIN_CODE / "viz" / "viz_preprocess.py"),
+        str(WIN_VENV_PYTHON), "-u", to_windows_path(_REPO_WIN_CODE / "viz" / "viz_preprocess.py"),
         "--grains-dir", to_windows_path(ctx.grains_dir),
         "--bodies-dir", to_windows_path(ctx.bodies_dir),
         "--output-dir", to_windows_path(output_dir),
@@ -372,7 +424,7 @@ def build_composite_preprocess_command(ctx: PathContext, output_dir: Path) -> Li
 
 def build_instance_grains_preprocess_command(ctx: PathContext, output_dir: Path) -> List[str]:
     return [
-        str(WIN_VENV_PYTHON),
+        str(WIN_VENV_PYTHON), "-u",
         to_windows_path(_REPO_WIN_CODE / "viz" / "viz_preprocess_grains_instance.py"),
         "--grains-dir", to_windows_path(ctx.grains_dir),
         "--bodies-dir", to_windows_path(ctx.bodies_dir),
@@ -398,16 +450,20 @@ def build_instance_static_preprocess_command(ctx: PathContext, output_dir: Path)
     ]
 
 
-def run_preprocess_stage(cmd: List[str], output_dir: Path) -> Path:
-    """Run one preprocess subprocess from the Windows repo root; return its manifest path."""
+def run_preprocess_stage(
+    cmd: List[str], output_dir: Path, *, on_line: Optional[Callable[[str], None]] = None,
+) -> Path:
+    """Run one preprocess subprocess from the Windows repo root; return its manifest path.
+    Its output is logged to <output_dir>/preprocess.log."""
+    log_path = output_dir / "preprocess.log"
     try:
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, errors="replace", cwd=str(_REPO_WIN_CODE),
-        )
+        result = _run_logged(cmd, log_path, cwd=str(_REPO_WIN_CODE), on_line=on_line)
     except OSError as exc:
         raise PreprocessError(f"could not start {cmd[0]}: {exc}") from exc
     if result.returncode != 0:
-        raise PreprocessError(f"exited {result.returncode}:\n{_output_tail(result)}")
+        raise PreprocessError(
+            f"exited {result.returncode} (full log: {log_path}):\n{_output_tail(result)}"
+        )
     manifest = output_dir / "manifest.json"
     if not manifest.is_file():
         # blender --background --python exits 0 even after an uncaught
@@ -449,7 +505,10 @@ PATH_CHECKBOX_IDS: Dict[str, str] = {
 }
 
 
-def run_render_path(spec: RenderPath, ctx: PathContext, on_stage=None, index: int = 1, total: int = 1) -> PathResult:
+def run_render_path(
+    spec: RenderPath, ctx: PathContext, on_stage=None, index: int = 1, total: int = 1,
+    on_line: Optional[Callable[[str], None]] = None,
+) -> PathResult:
     """[preprocess] -> render for one path. Never raises for stage failures."""
     t0 = time.monotonic()
 
@@ -462,7 +521,9 @@ def run_render_path(spec: RenderPath, ctx: PathContext, on_stage=None, index: in
         viz_dir = ctx.batch_dir / f"{ctx.run_name}{spec.viz_dir_suffix}"
         notify("preprocess", output_dir=viz_dir)
         try:
-            manifest = run_preprocess_stage(spec.build_preprocess_command(ctx, viz_dir), viz_dir)
+            manifest = run_preprocess_stage(
+                spec.build_preprocess_command(ctx, viz_dir), viz_dir, on_line=on_line,
+            )
         except PreprocessError as exc:
             return PathResult(spec.name, False, "preprocess", str(exc), 0, time.monotonic() - t0)
 
@@ -482,6 +543,7 @@ def run_render_path(spec: RenderPath, ctx: PathContext, on_stage=None, index: in
         video_fps=form.video_fps,
         viz_path=spec.headless_viz_path,
         manifest=manifest,
+        on_line=on_line,
     )
     try:
         run_render_stage(params)
@@ -527,6 +589,9 @@ def count_matching(directory: Optional[Path], pattern: str) -> int:
     return len(list(directory.glob(pattern)))
 
 
+_STATUS_LOG_LINE_MAX = 100
+
+
 def format_live_progress(
     elapsed_s: float,
     stage: str,
@@ -537,8 +602,13 @@ def format_live_progress(
     n_expected: Optional[int] = None,
     warning: str = "",
     path_label: Optional[str] = None,
+    last_line: Optional[str] = None,
 ) -> str:
-    """Status-bar text for the live-progress tick. Pure — no widget I/O."""
+    """Status-bar text for the live-progress tick. Pure — no widget I/O.
+
+    last_line is the latest line a preprocess/render subprocess printed
+    (e.g. Blender's "Fra:14 ... Sample 120/500"), shown so a long stage that
+    has not written a frame yet still visibly moves."""
     elapsed = f"{elapsed_s:.0f}s elapsed"
     label = f" [{path_label}]" if path_label else ""
     if stage == "convert":
@@ -555,6 +625,11 @@ def format_live_progress(
         body = f"Rendering{label}... {elapsed}, {count}"
     else:
         body = f"Running sim... {elapsed}, {n_dumps} dump file(s)"
+    line = (last_line or "").strip()
+    if line:
+        if len(line) > _STATUS_LOG_LINE_MAX:
+            line = line[: _STATUS_LOG_LINE_MAX - 1] + "…"
+        body += f" | {line}"
     return f"{warning}{body}"
 
 
@@ -563,6 +638,7 @@ def run_pipeline(
     render_form: RenderFormValues,
     base_output_dir: Path,
     on_stage=None,
+    on_line: Optional[Callable[[str], None]] = None,
 ) -> PipelineResult:
     """Sim -> convert -> each ticked render path ([preprocess] -> render).
 
@@ -571,6 +647,11 @@ def run_pipeline(
 
     on_stage(stage: str, **info) is optional. The TUI uses it to flip the
     status bar between dump / npz / preprocess / frame counts.
+
+    on_line(line: str) is optional and receives every line the preprocess
+    and render subprocesses print (they also go to preprocess.log /
+    render.log). It is called on the worker thread, once per line, so it
+    must be cheap.
     """
     if not render_form.paths:
         raise ValueError("at least one render path must be selected")
@@ -632,7 +713,7 @@ def run_pipeline(
     )
     specs = [RENDER_PATHS[name] for name in RENDER_PATH_NAMES if name in render_form.paths]
     results = [
-        run_render_path(spec, ctx, on_stage=on_stage, index=i, total=len(specs))
+        run_render_path(spec, ctx, on_stage=on_stage, index=i, total=len(specs), on_line=on_line)
         for i, spec in enumerate(specs, start=1)
     ]
     all_ok = all(r.ok for r in results)
@@ -724,6 +805,10 @@ class SimRenderTUIApp(App[None]):
         self._pipeline_n_expected: Optional[int] = None
         self._pipeline_dry_run: bool = False
         self._pipeline_path_label: Optional[str] = None
+        # Latest line printed by the running preprocess/render subprocess.
+        # Written from the worker thread (a plain attribute store, atomic in
+        # CPython) and read by the 2 s tick -- no call_from_thread per line.
+        self._pipeline_last_line: Optional[str] = None
         # This TUI runs one pipeline at a time -- @work(thread=True) defaults
         # to exclusive=False, so without this guard a second click while a
         # worker is in flight would start a second worker that overwrites
@@ -1007,6 +1092,7 @@ class SimRenderTUIApp(App[None]):
         self._pipeline_n_expected = None
         self._pipeline_dry_run = dry_run
         self._pipeline_path_label = None
+        self._pipeline_last_line = None
         if dry_run:
             self._set_status(f"{warning}Dry run...")
         else:
@@ -1019,6 +1105,7 @@ class SimRenderTUIApp(App[None]):
     def _set_pipeline_stage(self, stage: str, info: Optional[dict] = None) -> None:
         """Called from the worker via call_from_thread when a stage starts."""
         self._pipeline_stage = stage
+        self._pipeline_last_line = None  # the previous stage's line is stale
         info = info or {}
         if "n_expected" in info:
             self._pipeline_n_expected = info["n_expected"]
@@ -1058,8 +1145,13 @@ class SimRenderTUIApp(App[None]):
                 n_expected=self._pipeline_n_expected,
                 warning=self._pipeline_warning,
                 path_label=self._pipeline_path_label,
+                last_line=self._pipeline_last_line,
             )
         )
+
+    def _on_subprocess_line(self, line: str) -> None:
+        """run_pipeline's on_line hook; runs on the worker thread."""
+        self._pipeline_last_line = line
 
     def _stop_progress_timer(self) -> None:
         if self._progress_timer is not None:
@@ -1074,6 +1166,7 @@ class SimRenderTUIApp(App[None]):
         try:
             result = run_pipeline(
                 sim_params, render_form, _REPO_WIN_CODE / "DEMCSVs", on_stage=on_stage,
+                on_line=self._on_subprocess_line,
             )
         except Exception as exc:  # an uncaught exception here must never kill the app
             result = PipelineResult(
