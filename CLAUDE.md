@@ -51,8 +51,10 @@ Parent: `../CLAUDE.md`. Shared facts: `../docs/SHARED_FACTS.md`. Merge/rename ca
    - `instance_grains` — `viz/viz_preprocess_grains_instance.py` in the Windows `.venv` python (real grains, per-grain radius, sorted by `grain_id`) → `DEMBulkInstanceBlender.py` (`static: false`).
    - `instance_static` — `viz/viz_preprocess_lite.py --shape-obj --n-points` under `blender.exe --background` → `DEMBulkInstanceBlender.py` (`static: true`; placeholder, not sim motion).
    A failed path is recorded and the remaining paths still run; result `done` only when every ticked path succeeds, else `partial`. Optional video encode (`encode_video`/`video_fps`) runs per path, inside `run_render_path()`, writing each path's `animation.mp4` next to its own `frame_*.png` sequence.
+   Every preprocess/render subprocess runs through `_run_logged()`: stdout+stderr merged, streamed line by line to `preprocess.log` / `render.log` next to that stage's output, with only a bounded tail kept for the error message (which names the full log). Output streams live because `DEMHeadlessRender.py` line-buffers stdout (Blender's Python block-buffers into a pipe and ignores `PYTHONUNBUFFERED`) and the `.venv` preprocess commands run `python.exe -u`. `instance_static`'s `viz_preprocess_lite.py` under `blender.exe` is not line-buffered, so its log arrives at exit.
+4. **Timing.** After any non-dry run whose `run_dir` exists (including `partial` and convert failures), `run_pipeline()` writes `<run_dir>/pipeline_timing.json` (`build_timing_report()`): wall-clock `total`/`sim`/`convert`; per path `preprocess_s`, `render_s` (includes video encode), `total_s`, `n_frames`, `render_s_per_frame`, `failed_stage`; `np_apophis` read from the run's own `sobol.setup` (not the form, which may be blank); dump/npz counts; the full sim sample and render form; hostname and `OMP_NUM_THREADS`; `sobol` and Windows `Code` git SHA with a `dirty` flag (tracked files only). A write failure is appended to the status message and never fails the run. This is the per-run evidence for the scope's measured wall-clock vs particle count (Obj 2) and D3's unattended render.
 
-**Output layout.** Each launch creates `<output_root>/<prefix>_<YYYYmmdd_HHMMSS>_<batch_label>/run_0001/`; the label defaults to `sim_render` and is sanitised with `sanitize_batch_label()`. Windows `Code/DEMCSVs/<batch>/`: `run_0001_{grains,bodies}_output/`, `run_0001_viz/` (composite), `run_0001_viz_instance/` (instance_grains), `run_0001_viz_instance_static/` (instance_static), and one `run_0001_render_<path>/` per ticked path with `frame_####.png` (+ `animation.mp4` if `encode_video`). Rename from v1 `run_0001_render/`: `../docs/CONTEXT_CHANGELOG.md`.
+**Output layout.** Each launch creates `<output_root>/<prefix>_<YYYYmmdd_HHMMSS>_<batch_label>/run_0001/`; the label defaults to `sim_render` and is sanitised with `sanitize_batch_label()`. Windows `Code/DEMCSVs/<batch>/`: `run_0001_{grains,bodies}_output/`, `run_0001_viz/` (composite), `run_0001_viz_instance/` (instance_grains), `run_0001_viz_instance_static/` (instance_static), and one `run_0001_render_<path>/` per ticked path with `frame_####.png` + `render.log` (+ `animation.mp4` if `encode_video`); each `run_0001_viz*/` also holds `preprocess.log`. WSL `run_0001/pipeline_timing.json` holds the run's timings. Rename from v1 `run_0001_render/`: `../docs/CONTEXT_CHANGELOG.md`.
 
 **Form.** Everything is on a single screen, with **Run Pipeline**, **Dry Run** and **Quit** buttons.
 - **Paths:**
@@ -72,7 +74,7 @@ Parent: `../CLAUDE.md`. Shared facts: `../docs/SHARED_FACTS.md`. Merge/rename ca
   - `use_dem` is hardcoded to `T`, because the convert and render stages need DEM grains.
 - **Render:**
   - `resolution` (1920x1080), `samples` (500), `fps` (24).
-  - `max_frames` (blank means all).
+  - `max_frames` (blank means all). For `per_sphere` it is patched into `DEMGrainsBlenderEarthCam.py`'s `MAX_FRAMES` so only those frames are keyframed (8-frame fixture, `max_frames 2`: ~72 s → ~26 s); composite/instance already load frames lazily.
   - `camera_mode` (`auto` | `grain_only`, which patches `CAMERA_MODE`).
   - `encode_video` checkbox (off by default) + `video_fps` (blank = same as `fps`) — optional final MP4-encode stage, applied per ticked render path.
   - Render fields are validated when you click, before the sim starts.
@@ -85,17 +87,16 @@ Parent: `../CLAUDE.md`. Shared facts: `../docs/SHARED_FACTS.md`. Merge/rename ca
 
 **Behaviour.**
 - At startup it checks `blender.exe` exists at `/mnt/c/Program Files/Blender Foundation/Blender 5.2/blender.exe`.
-- The status bar updates about every 2 s. During sim it counts `<prefix>_[0-9]*` dump files (`Running sim...`). When PHANTOM exits it flips to `Converting... N/M npz`, then cycles per ticked path: `Preprocessing [<path> i/n]...` (composite/instance_grains/instance_static only) and `Rendering [<path> i/n]... k/N frame(s)` (`frame_*.png` under that path's Windows render dir). The last dump count no longer freezes the bar.
-- The final status is one of: `[Ns] Done (done): converted N frame(s); rendered M frame(s) to …`, `[Ns] Finished with failures: …` (`partial` — one or more ticked render paths failed while others succeeded), `Failed at sim|convert: …`, or `Failed at error: <Type>: …` for an unexpected exception.
+- The status bar updates about every 2 s. During sim it counts `<prefix>_[0-9]*` dump files (`Running sim...`). When PHANTOM exits it flips to `Converting... N/M npz`, then cycles per ticked path: `Preprocessing [<path> i/n]...` (composite/instance_grains/instance_static only) and `Rendering [<path> i/n]... k/N frame(s)` (`frame_*.png` under that path's Windows render dir). The last dump count no longer freezes the bar. During preprocess/render the latest subprocess line is appended (`| … Saved: '…frame_0003.png'`, truncated to 100 chars) and cleared at each stage change.
+- The final status is one of: `[Ns] Done (done): converted N frame(s); rendered M frame(s) to …`, `[Ns] Finished with failures: …` (`partial` — one or more ticked render paths failed while others succeeded), `Failed at sim|convert: …`, or `Failed at error: <Type>: …` for an unexpected exception. When the timing file was written, ` | timing: <path>` is appended.
 - Only one pipeline can run at a time: the buttons are disabled and a second launch is refused.
 - `np_apophis > 2000` prepends a non-blocking warning only when `per_sphere` is ticked, because that path is meant for ≤~2000 grains.
 
 **Limits (v1).**
-- No mid-run cancel. Quitting mid-run leaves PHANTOM or Blender child processes running.
-- No streamed Blender log.
+- No mid-run cancel. Quitting mid-run leaves PHANTOM or Blender child processes running. Spike (2026-09-23): SIGTERM or SIGKILL on the WSL-side `Popen` of `blender.exe` does end the Windows process, so render/preprocess cancel only needs the TUI to hold the running `Popen`; the sim stage is harder because PHANTOM is spawned inside `run_one_case()`.
 - The `instance_grains`/`instance_static` camera tracks the grain CoM (origin), not the densest core — can sit between fragments on a breakup.
 
-**Tests.** `sobol/tests/test_tui_sim_render.py` (109, mocked) mocks PHANTOM, the converter and Blender, and includes Textual pilot tests run via `asyncio.run` (no pytest-asyncio needed). `sobol/tests/test_dem_headless_world.py` checks the TUI World HDRI (including a blender.exe smoke). `sobol/tests/test_dem_headless_gpu.py` checks Cycles OPTIX/CUDA GPU-only (CPU hybrid off). `sobol/tests/test_dem_headless_video.py` checks the optional `--encode-video`/`encode_video()` stage (arg parsing, frame-count-mismatch guard, and a blender.exe smoke that encodes 2 dummy frames to mp4). `sobol/tests/test_dem_headless_paths.py` (17) covers `DEMHeadlessRender.py`'s `--viz-path composite|instance` patching and the "Procedural rock" append — Blender integration tests, skip without `blender.exe`. `sobol/tests/test_viz_preprocess_grains_instance.py` (6) covers the `instance_grains` preprocess writer. A real sim→render run through the UI is still to be verified by hand.
+**Tests.** `sobol/tests/test_tui_sim_render.py` (131; mocked apart from `_run_logged`/`_git_state` tests that spawn real `python`/`git` children) mocks PHANTOM, the converter and Blender, and includes Textual pilot tests run via `asyncio.run` (no pytest-asyncio needed). `sobol/tests/test_dem_headless_world.py` checks the TUI World HDRI (including a blender.exe smoke). `sobol/tests/test_dem_headless_gpu.py` checks Cycles OPTIX/CUDA GPU-only (CPU hybrid off). `sobol/tests/test_dem_headless_video.py` checks the optional `--encode-video`/`encode_video()` stage (arg parsing, frame-count-mismatch guard, and a blender.exe smoke that encodes 2 dummy frames to mp4). `sobol/tests/test_dem_headless_paths.py` (21) covers `DEMHeadlessRender.py`'s `--viz-path composite|instance` patching, the per-sphere `MAX_FRAMES` patch, and the "Procedural rock" append — Blender integration tests, skip without `blender.exe`. Set `HONOURS_BLENDERCONVERT_DIR` to run them against another `Code` checkout (fixtures still come from the main `Code/DEMCSVs/`); the instance tests then need `Blenders/11.blend`, which is untracked and absent from a fresh worktree. `sobol/tests/test_viz_preprocess_grains_instance.py` (6) covers the `instance_grains` preprocess writer. A real sim→render run through the UI was done 2026-09-16 (composite + per_sphere).
 
 ## Key commands
 
@@ -148,7 +149,7 @@ cd /home/mboyle/Honours && python3 sobol/tui_sim_render.py
 # quick real test: np_apophis 500, tmax 1, dtmax 0.5, ephemeris_cache_dir /home/mboyle/Honours/sobol,
 #                  resolution 640x360, samples 16, max_frames 2  (Dry Run first)
 # all four paths: tick every render path box, max_frames 3 → four run_0001_render_<path>/ folders
-cd sobol && python3 -m pytest tests/test_tui_sim_render.py   # 109 mocked tests
+cd sobol && python3 -m pytest tests/test_tui_sim_render.py   # 131 tests
 ```
 
 Sensitivity analysis — classic (correlation stats from a completed sweep):
