@@ -1,5 +1,6 @@
 """--viz-path contract for DEMHeadlessRender.py (TUI bulk render paths)."""
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -9,7 +10,14 @@ import pytest
 
 CODE = Path("/mnt/c/Users/22boy/OneDrive/Documents/GC-Max_desktop/Honours/Code")
 CODE_WIN = "C:/Users/22boy/OneDrive/Documents/GC-Max_desktop/Honours/Code"
-BLENDERCONVERT = CODE / "BlenderConvert"
+# HONOURS_BLENDERCONVERT_DIR points the scripts under test at another checkout
+# (e.g. a git worktree of the Windows Code repo, which has no untracked
+# DEMCSVs/ fixtures); fixtures below always come from the main CODE checkout.
+BLENDERCONVERT = Path(os.environ.get("HONOURS_BLENDERCONVERT_DIR", str(CODE / "BlenderConvert")))
+BLENDERCONVERT_WIN = (
+    "C:/" + str(BLENDERCONVERT)[len("/mnt/c/"):]
+    if str(BLENDERCONVERT).startswith("/mnt/c/") else str(BLENDERCONVERT)
+)
 BLENDER_EXE = Path("/mnt/c/Program Files/Blender Foundation/Blender 5.2/blender.exe")
 WIN_TEMP = Path("/mnt/c/Users/22boy/AppData/Local/Temp")
 WIN_TEMP_WIN = "C:/Users/22boy/AppData/Local/Temp"
@@ -110,6 +118,32 @@ def test_patch_instance_real_script():
     assert "CAMERA_MODE = None" in out  # auto leaves it untouched
 
 
+def test_patch_per_sphere_max_frames_limits_scene_build():
+    # The frame limit must reach the builder before it keyframes, not only
+    # clamp scene.frame_end after every grain file has been keyframed.
+    out = dhr.patch_script_source(
+        "per_sphere", _real_src("per_sphere"),
+        grains_dir="C:/g/", bodies_dir="C:/b/", max_frames=3,
+    )
+    assert "\nMAX_FRAMES = 3\n" in out
+
+
+def test_patch_per_sphere_without_max_frames_leaves_constant():
+    out = dhr.patch_script_source(
+        "per_sphere", _real_src("per_sphere"), grains_dir="C:/g/", bodies_dir="C:/b/",
+    )
+    assert "\nMAX_FRAMES = None\n" in out
+
+
+def test_patch_composite_ignores_max_frames():
+    # Composite loads geometry per frame in a frame_change_pre handler, so it
+    # has no up-front build to limit; its script has no MAX_FRAMES constant.
+    out = dhr.patch_script_source(
+        "composite", _real_src("composite"), manifest="C:/m.json", max_frames=3,
+    )
+    assert "MAX_FRAMES" not in out
+
+
 def test_patch_windows_backslashes_are_literal():
     out = dhr.patch_script_source(
         "composite", "VIZ_MANIFEST = (\n    'x'\n)\nCAMERA_MODE = None\n",
@@ -177,7 +211,7 @@ def run_recorded_render(name, obj_name, dhr_args):
     rec_path_win = f"{WIN_TEMP_WIN}/dhr_{name}_records.json"
     script = WIN_TEMP / f"dhr_{name}_recorder.py"
     script.write_text(
-        _RECORDER.format(bc=CODE_WIN + "/BlenderConvert", obj=obj_name, out=rec_path_win),
+        _RECORDER.format(bc=BLENDERCONVERT_WIN, obj=obj_name, out=rec_path_win),
         encoding="utf-8",
     )
     result = subprocess.run(
@@ -258,7 +292,7 @@ def test_blender_build_point_cloud_writes_given_radii():
     script.write_text(
         "\n".join([
             "import sys, traceback",
-            f"sys.path.insert(0, {CODE_WIN + '/BlenderConvert'!r})",
+            f"sys.path.insert(0, {BLENDERCONVERT_WIN!r})",
             "import bpy, numpy as np",
             "import DEMHeadlessRender as dhr",
             "try:",
@@ -288,3 +322,23 @@ def test_blender_build_point_cloud_writes_given_radii():
     combined = (result.stdout or "") + (result.stderr or "")
     assert result.returncode == 0, combined[-3000:]
     assert "RADII_OK" in combined
+
+
+@pytest.mark.skipif(not BLENDER_EXE.is_file(), reason="blender.exe not installed")
+@pytest.mark.skipif(not WIN_TEMP.is_dir(), reason="Windows Temp not mounted")
+def test_blender_per_sphere_max_frames_builds_only_those_frames():
+    n_fixture = len(list((FIXTURE_RUN / "run_0001_grains_output").glob("*.npz")))
+    assert n_fixture > 2, "fixture needs more than 2 frames to show the limit"
+
+    result, _records, out_dir = run_recorded_render(
+        "per_sphere_max_frames", "DEM_Grain_0000",
+        ["--viz-path", "per_sphere",
+         "--grains-dir", FIXTURE_RUN_WIN + "/run_0001_grains_output",
+         "--bodies-dir", FIXTURE_RUN_WIN + "/run_0001_bodies_output",
+         "--max-frames", "2"],
+    )
+    combined = (result.stdout or "") + (result.stderr or "")
+    assert result.returncode == 0, combined[-3000:]
+    assert len(list(out_dir.glob("frame_*.png"))) == 2
+    assert "Keyframing 2 frames" in combined, combined[-3000:]
+    assert f"Keyframing {n_fixture} frames" not in combined
