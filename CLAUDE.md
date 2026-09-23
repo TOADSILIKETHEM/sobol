@@ -40,15 +40,19 @@ Runs the shared wizard once, then for each requested particle count: stages a te
 
 Parent: `../CLAUDE.md`. Shared facts: `../docs/SHARED_FACTS.md`. Merge/rename caveats: `../docs/CONTEXT_CHANGELOG.md`.
 
-`sobol/tui_sim_render.py` is a Textual TUI that takes **one** DEM run from configure → PHANTOM → dump conversion → headless per-sphere Blender render, with no manual steps. It handles one run per launch, not a sweep; `tui_run.py` is the sweep TUI. Windows render-script how-to: `Code/CLAUDE.md`.
+`sobol/tui_sim_render.py` is a Textual TUI that takes **one** DEM run from configure → PHANTOM → dump conversion → headless Blender render (any combination of render paths), with no manual steps. It handles one run per launch, not a sweep; `tui_run.py` is the sweep TUI. Windows render-script how-to: `Code/CLAUDE.md`.
 
 **Stages.** `run_pipeline()` calls each stage in order in one worker thread and stops at the first failure. Each stage reuses existing code:
 1. **Sim.** `run_sim_stage()` calls `preflight()` and `run_one_case(run_id=1, ...)` from `run_mass_sobol_phantom.py`. That means DEM `nfulldump=1`, ephemeris copy, and metrics extraction all behave exactly as in a sweep. Any `record.status != "ok"` stops the pipeline; `prepared_only` is reported as a dry-run success.
 2. **Convert.** `run_convert_stage()` calls `Analysis/run_demtocsv_batch.run_dem_dump_convert()` with `min_dem_grains` read automatically from the run's `sobol.setup`, writing Windows `DEMCSVs/<batch>/run_0001_{bodies,grains}_output/`. `DEMDumpConvert.py` never raises on bad or missing dumps, so the pipeline then counts `*.npz` and fails at `convert` if there are 0. The converter hardcodes the `sobol_[0-9]*` dump prefix, so keep `prefix = sobol`.
-3. **Render.** `run_render_stage()` runs Windows `blender.exe` through `/mnt/c` interop: `--background --python C:/.../Code/BlenderConvert/DEMHeadlessRender.py -- --grains-dir … --bodies-dir … --output-dir … --resolution --samples --fps --camera-mode [--max-frames] [--encode-video] [--video-fps]`. Paths are converted with `to_windows_path()`. `DEMHeadlessRender.py` text-patches and `exec()`s `DEMGrainsBlenderEarthCam.py`, assigns World `Deep Dark Space with Stars.001` (repo HDRI, same as `Apophisonly.blend`; see Windows `Code/CLAUDE.md`), enables Cycles **OPTIX** (else CUDA) GPU-only via `setup_cycles_gpu()` (raises if no GPU), and exits 1 on any exception. On a non-zero exit the TUI raises `RenderError` carrying the last 40 lines of stdout+stderr.
-   - **Video encode (optional, off by default).** When `render_form.encode_video` is set, `RenderParams`/`build_render_command()` append `--encode-video` (and `--video-fps N` if given — otherwise `DEMHeadlessRender.py` falls back to `--fps`). `DEMHeadlessRender.py`'s `encode_video()` combines the just-rendered `frame_*.png` sequence into `run_0001_render/animation.mp4` (H264, via Blender's own VSE-scripted ffmpeg — see Windows `Code/CLAUDE.md`), raising if the on-disk frame count doesn't match what was rendered. `run_pipeline()`'s success message reports the mp4 path, or flags it as missing if requested but not found.
+3. **Render paths.** Tick any combination on the form; one sim + one convert feed all of them, run in fixed order `per_sphere`, `composite`, `instance_grains`, `instance_static`. Each path is `[preprocess] → DEMHeadlessRender.py --viz-path …`:
+   - `per_sphere` — no preprocess; `DEMGrainsBlenderEarthCam.py` (≤~2000 grains).
+   - `composite` (D3) — `viz/viz_preprocess.py --envelope-method hull|sdf` in the Windows `.venv` python → `DEMBulkVizBlender.py`.
+   - `instance_grains` — `viz/viz_preprocess_grains_instance.py` in the Windows `.venv` python (real grains, per-grain radius, sorted by `grain_id`) → `DEMBulkInstanceBlender.py` (`static: false`).
+   - `instance_static` — `viz/viz_preprocess_lite.py --shape-obj --n-points` under `blender.exe --background` → `DEMBulkInstanceBlender.py` (`static: true`; placeholder, not sim motion).
+   A failed path is recorded and the remaining paths still run; result `done` only when every ticked path succeeds, else `partial`. Optional video encode (`encode_video`/`video_fps`) runs per path, inside `run_render_path()`, writing each path's `animation.mp4` next to its own `frame_*.png` sequence.
 
-**Output layout.** Each launch creates `<output_root>/<prefix>_<YYYYmmdd_HHMMSS>_<batch_label>/run_0001/`; the label defaults to `sim_render` and is sanitised with `sanitize_batch_label()`. Converted data and the PNGs land at Windows `Code/DEMCSVs/<that batch name>/run_0001_{grains_output,bodies_output,render}/`, with frames at `run_0001_render/frame_####.png` and, if `--encode-video` was passed, `run_0001_render/animation.mp4`.
+**Output layout.** Each launch creates `<output_root>/<prefix>_<YYYYmmdd_HHMMSS>_<batch_label>/run_0001/`; the label defaults to `sim_render` and is sanitised with `sanitize_batch_label()`. Windows `Code/DEMCSVs/<batch>/`: `run_0001_{grains,bodies}_output/`, `run_0001_viz/` (composite), `run_0001_viz_instance/` (instance_grains), `run_0001_viz_instance_static/` (instance_static), and one `run_0001_render_<path>/` per ticked path with `frame_####.png` (+ `animation.mp4` if `encode_video`). Rename from v1 `run_0001_render/`: `../docs/CONTEXT_CHANGELOG.md`.
 
 **Form.** Everything is on a single screen, with **Run Pipeline**, **Dry Run** and **Quit** buttons.
 - **Paths:**
@@ -70,21 +74,28 @@ Parent: `../CLAUDE.md`. Shared facts: `../docs/SHARED_FACTS.md`. Merge/rename ca
   - `resolution` (1920x1080), `samples` (500), `fps` (24).
   - `max_frames` (blank means all).
   - `camera_mode` (`auto` | `grain_only`, which patches `CAMERA_MODE`).
-  - `encode_video` checkbox (off by default) + `video_fps` (blank = same as `fps`) — optional final MP4-encode stage.
+  - `encode_video` checkbox (off by default) + `video_fps` (blank = same as `fps`) — optional final MP4-encode stage, applied per ticked render path.
   - Render fields are validated when you click, before the sim starts.
+- **Render paths:**
+  - Four checkboxes, any combination: `per_sphere` (ticked by default), `composite`, `instance_grains`, `instance_static`.
+  - `envelope_method` (`hull` | `sdf`, default `hull`) — path-specific field for `composite`.
+  - `placeholder_obj` (Windows copy of `apophis_v233s7.obj`) and `n_points` (default `1000000`) — path-specific fields for `instance_static`.
+  - Path-specific fields are validated only when their path is ticked.
+  - `.venv` python existence is checked at click time when `composite` or `instance_grains` is ticked (each runs its preprocess script in the Windows `.venv`).
 
 **Behaviour.**
 - At startup it checks `blender.exe` exists at `/mnt/c/Program Files/Blender Foundation/Blender 5.2/blender.exe`.
-- The status bar updates about every 2 s. During sim it counts `<prefix>_[0-9]*` dump files (`Running sim...`). When PHANTOM exits it flips to `Converting... N/M npz`, then `Rendering... N/M frame(s)` (`frame_*.png` under the Windows render dir). The last dump count no longer freezes the bar.
-- The final status is one of: `[Ns] Done (done): converted N frame(s); rendered M frame(s) to …`, `Failed at sim|convert|render: …`, or `Failed at error: <Type>: …` for an unexpected exception.
+- The status bar updates about every 2 s. During sim it counts `<prefix>_[0-9]*` dump files (`Running sim...`). When PHANTOM exits it flips to `Converting... N/M npz`, then cycles per ticked path: `Preprocessing [<path> i/n]...` (composite/instance_grains/instance_static only) and `Rendering [<path> i/n]... k/N frame(s)` (`frame_*.png` under that path's Windows render dir). The last dump count no longer freezes the bar.
+- The final status is one of: `[Ns] Done (done): converted N frame(s); rendered M frame(s) to …`, `[Ns] Finished with failures: …` (`partial` — one or more ticked render paths failed while others succeeded), `Failed at sim|convert: …`, or `Failed at error: <Type>: …` for an unexpected exception.
 - Only one pipeline can run at a time: the buttons are disabled and a second launch is refused.
-- `np_apophis > 2000` prepends a non-blocking warning, because the per-sphere path is meant for ≤~2000 grains.
+- `np_apophis > 2000` prepends a non-blocking warning only when `per_sphere` is ticked, because that path is meant for ≤~2000 grains.
 
 **Limits (v1).**
 - No mid-run cancel. Quitting mid-run leaves PHANTOM or Blender child processes running.
 - No streamed Blender log.
+- The `instance_grains`/`instance_static` camera tracks the grain CoM (origin), not the densest core — can sit between fragments on a breakup.
 
-**Tests.** `sobol/tests/test_tui_sim_render.py` mocks PHANTOM, the converter and Blender, and includes Textual pilot tests run via `asyncio.run` (no pytest-asyncio needed). `sobol/tests/test_dem_headless_world.py` checks the TUI World HDRI (including a blender.exe smoke). `sobol/tests/test_dem_headless_gpu.py` checks Cycles OPTIX/CUDA GPU-only (CPU hybrid off). `sobol/tests/test_dem_headless_video.py` checks the optional `--encode-video`/`encode_video()` stage (arg parsing, frame-count-mismatch guard, and a blender.exe smoke that encodes 2 dummy frames to mp4). A real sim→render run through the UI is still to be verified by hand.
+**Tests.** `sobol/tests/test_tui_sim_render.py` (109, mocked) mocks PHANTOM, the converter and Blender, and includes Textual pilot tests run via `asyncio.run` (no pytest-asyncio needed). `sobol/tests/test_dem_headless_world.py` checks the TUI World HDRI (including a blender.exe smoke). `sobol/tests/test_dem_headless_gpu.py` checks Cycles OPTIX/CUDA GPU-only (CPU hybrid off). `sobol/tests/test_dem_headless_video.py` checks the optional `--encode-video`/`encode_video()` stage (arg parsing, frame-count-mismatch guard, and a blender.exe smoke that encodes 2 dummy frames to mp4). `sobol/tests/test_dem_headless_paths.py` (17) covers `DEMHeadlessRender.py`'s `--viz-path composite|instance` patching and the "Procedural rock" append — Blender integration tests, skip without `blender.exe`. `sobol/tests/test_viz_preprocess_grains_instance.py` (6) covers the `instance_grains` preprocess writer. A real sim→render run through the UI is still to be verified by hand.
 
 ## Key commands
 
@@ -136,7 +147,8 @@ Single run end-to-end: sim → convert → headless Blender render (Textual TUI,
 cd /home/mboyle/Honours && python3 sobol/tui_sim_render.py
 # quick real test: np_apophis 500, tmax 1, dtmax 0.5, ephemeris_cache_dir /home/mboyle/Honours/sobol,
 #                  resolution 640x360, samples 16, max_frames 2  (Dry Run first)
-cd sobol && python3 -m pytest tests/test_tui_sim_render.py   # 51 mocked tests
+# all four paths: tick every render path box, max_frames 3 → four run_0001_render_<path>/ folders
+cd sobol && python3 -m pytest tests/test_tui_sim_render.py   # 109 mocked tests
 ```
 
 Sensitivity analysis — classic (correlation stats from a completed sweep):
