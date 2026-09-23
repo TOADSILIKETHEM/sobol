@@ -10,13 +10,15 @@ Launch:
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import platform
 import re
 import subprocess
 import sys
 import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
@@ -216,7 +218,9 @@ class PathResult:
     stage: str  # "preprocess" | "render" | "done"
     message: str
     n_frames: int = 0
-    elapsed_s: float = 0.0
+    elapsed_s: float = 0.0  # preprocess + render
+    preprocess_s: Optional[float] = None  # None = path has no preprocess stage
+    render_s: Optional[float] = None  # None = render never started; includes video encode
 
 
 @dataclass
@@ -226,6 +230,7 @@ class PipelineResult:
     message: str
     record: Optional[RunRecord] = None
     paths: List[PathResult] = field(default_factory=list)
+    timing_path: Optional[Path] = None  # <run_dir>/pipeline_timing.json once written
 
 
 def run_sim_stage(params: SimParams) -> RunRecord:
@@ -517,6 +522,7 @@ def run_render_path(
             on_stage(stage, path=spec.name, index=index, total=total, **info)
 
     manifest: Optional[Path] = None
+    preprocess_s: Optional[float] = None
     if spec.build_preprocess_command is not None:
         viz_dir = ctx.batch_dir / f"{ctx.run_name}{spec.viz_dir_suffix}"
         notify("preprocess", output_dir=viz_dir)
@@ -525,8 +531,13 @@ def run_render_path(
                 spec.build_preprocess_command(ctx, viz_dir), viz_dir, on_line=on_line,
             )
         except PreprocessError as exc:
-            return PathResult(spec.name, False, "preprocess", str(exc), 0, time.monotonic() - t0)
+            elapsed = time.monotonic() - t0
+            return PathResult(
+                spec.name, False, "preprocess", str(exc), 0, elapsed, preprocess_s=elapsed,
+            )
+        preprocess_s = time.monotonic() - t0
 
+    t_render = time.monotonic()
     output_dir = _render_output_dir(ctx.batch_dir, ctx.run_name, spec.name)
     notify("render", n_expected=ctx.n_expected_frames, output_dir=output_dir)
     form = ctx.render_form
@@ -551,12 +562,17 @@ def run_render_path(
         return PathResult(
             spec.name, False, "render", str(exc),
             count_matching(output_dir, "frame_*.png"), time.monotonic() - t0,
+            preprocess_s=preprocess_s, render_s=time.monotonic() - t_render,
         )
 
+    render_s = time.monotonic() - t_render
     elapsed = time.monotonic() - t0
     n_frames = count_matching(output_dir, "frame_*.png")
     if n_frames == 0:
-        return PathResult(spec.name, False, "render", f"render wrote no frames to {output_dir}", 0, elapsed)
+        return PathResult(
+            spec.name, False, "render", f"render wrote no frames to {output_dir}", 0, elapsed,
+            preprocess_s=preprocess_s, render_s=render_s,
+        )
     message = f"{n_frames} frame(s) in {elapsed:.0f}s to {output_dir}"
     if form.encode_video:
         video_path = output_dir / "animation.mp4"
@@ -564,7 +580,10 @@ def run_render_path(
             f", encoded to {video_path}" if video_path.is_file()
             else f", video encode requested but {video_path} not found"
         )
-    return PathResult(spec.name, True, "done", message, n_frames, elapsed)
+    return PathResult(
+        spec.name, True, "done", message, n_frames, elapsed,
+        preprocess_s=preprocess_s, render_s=render_s,
+    )
 
 
 def format_path_result(r: PathResult) -> str:
@@ -633,6 +652,118 @@ def format_live_progress(
     return f"{warning}{body}"
 
 
+_TIMING_SCHEMA_VERSION = 1
+_SOBOL_REPO = Path(__file__).resolve().parent
+
+
+def _write_json(path: Path, data: dict) -> None:
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+
+def _np_apophis_from_setup(run_dir: Path) -> Optional[int]:
+    """np_apophis the run actually used, from its generated sobol.setup.
+
+    The form's np_apophis can be blank (template value kept), so this -- not
+    the form -- is the grain count to report against wall-clock time."""
+    setup = run_dir / "sobol.setup"
+    if not setup.is_file():
+        return None
+    for line in setup.read_text(encoding="utf-8", errors="replace").splitlines():
+        stripped = line.split("!", 1)[0].strip()
+        key, sep, val = stripped.partition("=")
+        if sep and key.strip().lower() == "np_apophis":
+            try:
+                return int(float(val.strip()))
+            except ValueError:
+                return None
+    return None
+
+
+def _git_state(repo: Path) -> Optional[dict]:
+    """{"sha", "dirty"} for repo's HEAD, or None if it is not a readable git repo.
+
+    dirty ignores untracked files (sobol/ keeps many untracked staging dirs);
+    it flags uncommitted edits to tracked code, i.e. whether the SHA alone
+    reproduces the run."""
+    def git(*args) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["git", "-C", str(repo), *args],
+            capture_output=True, text=True, errors="replace", timeout=60,
+        )
+    try:
+        head = git("rev-parse", "HEAD")
+        if head.returncode != 0:
+            return None
+        status = git("status", "--porcelain", "--untracked-files=no")
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return {
+        "sha": head.stdout.strip(),
+        "dirty": bool(status.stdout.strip()) if status.returncode == 0 else None,
+    }
+
+
+def _path_timing(r: PathResult) -> dict:
+    per_frame = (
+        r.render_s / r.n_frames if r.render_s is not None and r.n_frames > 0 else None
+    )
+    return {
+        "name": r.name,
+        "ok": r.ok,
+        "failed_stage": None if r.ok else r.stage,
+        "preprocess_s": r.preprocess_s,
+        "render_s": r.render_s,
+        "total_s": r.elapsed_s,
+        "n_frames": r.n_frames,
+        "render_s_per_frame": per_frame,
+    }
+
+
+def build_timing_report(
+    sim_params: SimParams,
+    render_form: RenderFormValues,
+    result: PipelineResult,
+    facts: Dict[str, object],
+    *,
+    started_at: datetime,
+    finished_at: datetime,
+    total_s: float,
+    run_dir: Path,
+) -> dict:
+    """pipeline_timing.json contents: measured wall-clock per stage and path,
+    the grain count and render settings they depend on, and the code
+    versions that produced them."""
+    return {
+        "schema_version": _TIMING_SCHEMA_VERSION,
+        "started_at": started_at.isoformat(timespec="seconds"),
+        "finished_at": finished_at.isoformat(timespec="seconds"),
+        "outcome": {"stage": result.stage, "ok": result.ok},
+        "wall_clock_s": {
+            "total": total_s,
+            "sim": facts.get("sim_s"),
+            "convert": facts.get("convert_s"),
+        },
+        "paths": [_path_timing(r) for r in result.paths],
+        "counts": {
+            "np_apophis": _np_apophis_from_setup(run_dir),
+            "n_dumps": facts.get("n_dumps"),
+            "n_npz_frames": facts.get("n_npz"),
+            "n_expected_frames": facts.get("n_expected_frames"),
+        },
+        "sim": asdict(sim_params.sample),
+        "render": asdict(render_form),
+        "run_dir": str(run_dir),
+        "environment": {
+            "hostname": platform.node(),
+            "omp_num_threads": os.environ.get("OMP_NUM_THREADS"),
+            "phantom_dir": str(sim_params.phantom_dir),
+            "blender_exe": BLENDER_EXE,
+        },
+        "git": {"sobol": _git_state(_SOBOL_REPO), "code": _git_state(_REPO_WIN_CODE)},
+        "notes": "render_s includes the optional video encode; total_s = preprocess_s + render_s.",
+    }
+
+
 def run_pipeline(
     sim_params: SimParams,
     render_form: RenderFormValues,
@@ -652,6 +783,10 @@ def run_pipeline(
     and render subprocesses print (they also go to preprocess.log /
     render.log). It is called on the worker thread, once per line, so it
     must be cheap.
+
+    Unless the sim was a dry run, per-stage wall-clock times are written to
+    <run_dir>/pipeline_timing.json (see build_timing_report); a failure to
+    write it is noted in the message but never fails the pipeline.
     """
     if not render_form.paths:
         raise ValueError("at least one render path must be selected")
@@ -659,12 +794,54 @@ def run_pipeline(
     if unknown:
         raise ValueError(f"unknown render path(s): {', '.join(unknown)}")
 
+    started_at = datetime.now().astimezone()
+    t0 = time.monotonic()
+    facts: Dict[str, object] = {}
+    result = _run_pipeline_stages(
+        sim_params, render_form, base_output_dir, on_stage, on_line, facts,
+    )
+    record = result.record
+    if record is None or record.status == "prepared_only":
+        return result
+    run_dir = Path(record.run_dir)
+    if not run_dir.is_dir():
+        return result
+    report = build_timing_report(
+        sim_params, render_form, result, facts,
+        started_at=started_at,
+        finished_at=datetime.now().astimezone(),
+        total_s=time.monotonic() - t0,
+        run_dir=run_dir,
+    )
+    timing_path = run_dir / "pipeline_timing.json"
+    try:
+        _write_json(timing_path, report)
+    except OSError as exc:
+        result.message += f" (timing not written: {exc})"
+    else:
+        result.timing_path = timing_path
+    return result
+
+
+def _run_pipeline_stages(
+    sim_params: SimParams,
+    render_form: RenderFormValues,
+    base_output_dir: Path,
+    on_stage,
+    on_line: Optional[Callable[[str], None]],
+    facts: Dict[str, object],
+) -> PipelineResult:
+    """run_pipeline's stages. Records sim_s / convert_s / n_dumps / n_npz /
+    n_expected_frames into facts as each becomes known."""
+
     def notify(stage: str, **info) -> None:
         if on_stage is not None:
             on_stage(stage, **info)
 
     notify("sim")
+    t_sim = time.monotonic()
     record = run_sim_stage(sim_params)
+    facts["sim_s"] = time.monotonic() - t_sim
     if record.status != "ok":
         return PipelineResult(
             stage="sim", ok=False,
@@ -673,12 +850,16 @@ def run_pipeline(
         )
 
     n_dumps = count_matching(Path(record.run_dir), f"{sim_params.prefix}_[0-9]*")
+    facts["n_dumps"] = n_dumps
     notify("convert", n_expected=n_dumps if n_dumps else None)
 
+    t_convert = time.monotonic()
     try:
         run_convert_stage(record, base_output_dir)
     except ConvertError as exc:
+        facts["convert_s"] = time.monotonic() - t_convert
         return PipelineResult(stage="convert", ok=False, message=str(exc), record=record)
+    facts["convert_s"] = time.monotonic() - t_convert
 
     run_dir = Path(record.run_dir)
     grains_dir, bodies_dir = _grains_and_bodies_dirs(run_dir, base_output_dir, sim_params.output_root)
@@ -688,6 +869,7 @@ def run_pipeline(
     # proof any frame was actually converted. Catch that here rather than
     # let Blender fail minutes/hours later on "no grain npz files found".
     n_npz = count_matching(grains_dir, "*.npz")
+    facts["n_npz"] = n_npz
     if n_npz == 0:
         return PipelineResult(
             stage="convert", ok=False,
@@ -702,6 +884,7 @@ def run_pipeline(
     n_expected_frames = n_npz
     if render_form.max_frames is not None:
         n_expected_frames = min(n_npz, render_form.max_frames)
+    facts["n_expected_frames"] = n_expected_frames
 
     ctx = PathContext(
         grains_dir=grains_dir,
@@ -1199,12 +1382,19 @@ class SimRenderTUIApp(App[None]):
                 error=False,
             )
             return
+        timing = f" | timing: {result.timing_path}" if result.timing_path is not None else ""
         if result.ok:
-            self._set_status(f"{time_prefix}Done ({result.stage}): {result.message}", error=False)
+            self._set_status(
+                f"{time_prefix}Done ({result.stage}): {result.message}{timing}", error=False,
+            )
         elif result.stage == "partial":
-            self._set_status(f"{time_prefix}Finished with failures: {result.message}", error=True)
+            self._set_status(
+                f"{time_prefix}Finished with failures: {result.message}{timing}", error=True,
+            )
         else:
-            self._set_status(f"{time_prefix}Failed at {result.stage}: {result.message}", error=True)
+            self._set_status(
+                f"{time_prefix}Failed at {result.stage}: {result.message}{timing}", error=True,
+            )
 
 
 def main() -> None:

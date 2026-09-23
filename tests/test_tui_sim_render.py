@@ -1,6 +1,7 @@
 """Tests for tui_sim_render.py (sim+render pipeline TUI)."""
 import argparse
 import asyncio
+import json
 import re
 import subprocess
 import sys
@@ -1749,3 +1750,182 @@ def test_tick_progress_shows_last_log_line_and_stage_change_clears_it(tmp_path):
     shown, after = asyncio.run(_scenario())
     assert shown.endswith("| Fra:3 Mem:1.2G | Sample 8/16")
     assert "Fra:3" not in after
+
+
+# --- pipeline_timing.json (D3 / Obj 2 wall-clock evidence) -------------------
+
+def _timing_setup(monkeypatch, tmp_path, np_apophis=500):
+    run_dir = tmp_path / "sobol_mass_runs" / "batch" / "run_0001"
+    run_dir.mkdir(parents=True)
+    (run_dir / "sobol.setup").write_text(
+        f"  np_apophis =        {np_apophis}    ! number of DEM grains\n", encoding="utf-8",
+    )
+    for i in range(3):
+        (run_dir / f"sobol_{i:05d}").write_bytes(b"")
+    monkeypatch.setattr(tsr, "run_sim_stage", lambda params: _ok_record(str(run_dir)))
+    base = tmp_path / "DEMCSVs"
+    grains = base / "batch" / "run_0001_grains_output"
+    monkeypatch.setattr(tsr, "run_convert_stage", lambda rec, b: _write_fake_npz(grains, 3))
+    monkeypatch.setattr(tsr, "_git_state", lambda repo: {"sha": "abc123", "dirty": False})
+    sim_params = tsr.SimParams(output_root=run_dir.parent)
+    return base, sim_params, run_dir
+
+
+def _render_writes(n):
+    def fake_render(params):
+        _write_fake_pngs(params.output_dir, n)
+        return _ok_completed()
+    return fake_render
+
+
+def test_run_pipeline_writes_timing_json(monkeypatch, tmp_path):
+    base, sim_params, run_dir = _timing_setup(monkeypatch, tmp_path)
+    monkeypatch.setattr(tsr, "run_preprocess_stage", _fake_preprocess_ok)
+    monkeypatch.setattr(tsr, "run_render_stage", _render_writes(3))
+
+    form = tsr.RenderFormValues(paths=("per_sphere", "composite"), resolution="640x360", samples=16)
+    result = tsr.run_pipeline(sim_params, form, base)
+
+    assert result.ok
+    assert result.timing_path == run_dir / "pipeline_timing.json"
+    data = json.loads(result.timing_path.read_text(encoding="utf-8"))
+    assert data["schema_version"] == 1
+    assert data["outcome"] == {"stage": "done", "ok": True}
+    for key in ("total", "sim", "convert"):
+        assert data["wall_clock_s"][key] >= 0
+    assert data["counts"] == {
+        "np_apophis": 500, "n_dumps": 3, "n_npz_frames": 3, "n_expected_frames": 3,
+    }
+    assert [p["name"] for p in data["paths"]] == ["per_sphere", "composite"]
+    per_sphere, composite = data["paths"]
+    assert per_sphere["preprocess_s"] is None  # per_sphere has no preprocess stage
+    assert composite["preprocess_s"] >= 0
+    assert composite["n_frames"] == 3
+    assert composite["render_s_per_frame"] == pytest.approx(composite["render_s"] / 3)
+    assert data["render"]["resolution"] == "640x360"
+    assert data["render"]["samples"] == 16
+    assert data["git"] == {
+        "sobol": {"sha": "abc123", "dirty": False}, "code": {"sha": "abc123", "dirty": False},
+    }
+    assert data["started_at"] <= data["finished_at"]
+
+
+def test_run_pipeline_timing_splits_preprocess_and_render(monkeypatch, tmp_path):
+    base, sim_params, _run_dir = _timing_setup(monkeypatch, tmp_path)
+
+    def slow_pre(cmd, output_dir, **kw):
+        time.sleep(0.15)
+        return _fake_preprocess_ok(cmd, output_dir)
+    monkeypatch.setattr(tsr, "run_preprocess_stage", slow_pre)
+    monkeypatch.setattr(tsr, "run_render_stage", _render_writes(1))
+
+    result = tsr.run_pipeline(sim_params, tsr.RenderFormValues(paths=("composite",)), base)
+
+    path = result.paths[0]
+    assert path.preprocess_s >= 0.15
+    assert path.render_s < 0.15
+    assert path.elapsed_s == pytest.approx(path.preprocess_s + path.render_s, abs=0.05)
+
+
+def test_run_pipeline_timing_records_failed_path(monkeypatch, tmp_path):
+    base, sim_params, _run_dir = _timing_setup(monkeypatch, tmp_path)
+
+    def failing_pre(cmd, output_dir, **kw):
+        raise tsr.PreprocessError("exited 1:\nqhull boom")
+    monkeypatch.setattr(tsr, "run_preprocess_stage", failing_pre)
+    monkeypatch.setattr(tsr, "run_render_stage", _render_writes(2))
+
+    form = tsr.RenderFormValues(paths=("per_sphere", "composite"))
+    result = tsr.run_pipeline(sim_params, form, base)
+
+    data = json.loads(result.timing_path.read_text(encoding="utf-8"))
+    assert data["outcome"] == {"stage": "partial", "ok": False}
+    by_name = {p["name"]: p for p in data["paths"]}
+    assert by_name["per_sphere"]["failed_stage"] is None
+    assert by_name["composite"]["failed_stage"] == "preprocess"
+    assert by_name["composite"]["render_s"] is None
+    assert by_name["composite"]["render_s_per_frame"] is None
+
+
+def test_run_pipeline_timing_written_when_convert_fails(monkeypatch, tmp_path):
+    base, sim_params, run_dir = _timing_setup(monkeypatch, tmp_path)
+    monkeypatch.setattr(tsr, "run_convert_stage", lambda rec, b: None)  # converts nothing
+
+    result = tsr.run_pipeline(sim_params, tsr.RenderFormValues(), base)
+
+    assert result.stage == "convert"
+    data = json.loads((run_dir / "pipeline_timing.json").read_text(encoding="utf-8"))
+    assert data["outcome"] == {"stage": "convert", "ok": False}
+    assert data["paths"] == []
+    assert data["counts"]["n_npz_frames"] == 0
+
+
+def test_run_pipeline_no_timing_for_dry_run(monkeypatch, tmp_path):
+    base, sim_params, run_dir = _timing_setup(monkeypatch, tmp_path)
+    record = _ok_record(str(run_dir))
+    record.status = "prepared_only"
+    monkeypatch.setattr(tsr, "run_sim_stage", lambda params: record)
+
+    result = tsr.run_pipeline(sim_params, tsr.RenderFormValues(), base)
+
+    assert result.timing_path is None
+    assert not (run_dir / "pipeline_timing.json").exists()
+
+
+def test_run_pipeline_timing_write_failure_does_not_fail_pipeline(monkeypatch, tmp_path):
+    base, sim_params, _run_dir = _timing_setup(monkeypatch, tmp_path)
+    monkeypatch.setattr(tsr, "run_render_stage", _render_writes(1))
+
+    def boom(path, data):
+        raise OSError("disk full")
+    monkeypatch.setattr(tsr, "_write_json", boom)
+
+    result = tsr.run_pipeline(sim_params, tsr.RenderFormValues(), base)
+
+    assert result.ok
+    assert result.timing_path is None
+    assert "timing not written: disk full" in result.message
+
+
+def test_np_apophis_from_setup(tmp_path):
+    (tmp_path / "sobol.setup").write_text("np_apophis = 2000 ! comment\n", encoding="utf-8")
+    assert tsr._np_apophis_from_setup(tmp_path) == 2000
+    assert tsr._np_apophis_from_setup(tmp_path / "missing") is None
+
+
+def test_git_state_reports_sha_and_dirty(tmp_path):
+    def git(*args):
+        subprocess.run(["git", "-C", str(tmp_path), *args], check=True, capture_output=True)
+    git("init", "-q")
+    git("config", "user.email", "t@example.com")
+    git("config", "user.name", "t")
+    (tmp_path / "f.txt").write_text("a")
+    git("add", "f.txt")
+    git("commit", "-q", "-m", "init")
+    head = subprocess.run(
+        ["git", "-C", str(tmp_path), "rev-parse", "HEAD"], capture_output=True, text=True,
+    ).stdout.strip()
+
+    assert tsr._git_state(tmp_path) == {"sha": head, "dirty": False}
+    (tmp_path / "f.txt").write_text("b")
+    assert tsr._git_state(tmp_path) == {"sha": head, "dirty": True}
+
+
+def test_git_state_outside_repo_is_none(tmp_path):
+    assert tsr._git_state(tmp_path / "not_a_repo") is None
+
+
+@pytest.mark.parametrize("stage, ok", [("done", True), ("partial", False), ("convert", False)])
+def test_report_result_names_timing_file(tmp_path, stage, ok):
+    timing = tmp_path / "run_0001" / "pipeline_timing.json"
+
+    async def _scenario():
+        app = tsr.SimRenderTUIApp()
+        async with app.run_test():
+            app._pipeline_start = time.monotonic()
+            app._report_result(tsr.PipelineResult(
+                stage=stage, ok=ok, message="msg", record=_ok_record(), timing_path=timing,
+            ))
+            return str(app.query_one("#status", tsr.Static).content)
+
+    assert f"timing: {timing}" in asyncio.run(_scenario())
