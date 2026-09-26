@@ -1,0 +1,4 @@
+# Apophis mesh (apophis_v233s7.obj), scaled so half the longest extent = 0.170 km
+# (long axis 0.340 km, volume 0.01133 km^3, volume-equivalent D 0.279 km).
+# Matches Mia's runs/apophis/apophis.shape. Mass comes from this volume (setup e39b38de5).
+mesh apophis_v233s7.obj 0.170

@@ -20,3 +20,4 @@ sobol_mass_runs/
 
 # PHANTOM scratch / queue files
 sobol_00000.tmp
+tests/fixtures/sink_np300/
