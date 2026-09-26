@@ -46,9 +46,8 @@ APOPHIS_SINK_ID_DEFAULT = 11
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_APOPHIS_SHAPE_CONFIG = REPO_ROOT / "Shapes" / "apophis.shape"
 DEFAULT_APOPHIS_OBJ = REPO_ROOT / "Shapes" / "apophis_v233s7.obj"
-LITERATURE_MESH_SCALE_KM = 0.205
+LITERATURE_MESH_SCALE_KM = 0.170  # half long axis; mesh bbox sizes the lattice (Mia 150bb3845)
 HORIZONS_APOPHIS_RADIUS_KM = 0.170
-LITERATURE_SCALE_R_APOPHIS = 0.409741 / 2.0 / HORIZONS_APOPHIS_RADIUS_KM
 
 SPIN_PERIOD_HR_TO_SETUP_S = 3600.0
 DEFAULT_DN_COHES_FACTOR = 0.1
@@ -310,6 +309,7 @@ class RunSample:
     scale_r_apophis: Optional[float] = None
     scale_rho: Optional[float] = None
     use_dem: Optional[bool] = None
+    dem_model: str = "particle"  # "particle" (idem, use_dem=T) or "sink" (use_dem_as_sinks=T)
     use_shape_crop: Optional[bool] = None
     apophis_only: Optional[bool] = None
     np_apophis: Optional[int] = None
@@ -346,7 +346,6 @@ class RunWorkerPayload(NamedTuple):
     apophis_sink_id: int
     ephemeris_cache_dir: Optional[str]
     shape_file: Optional[str]
-    literature_scale_r_allowed: bool
 
 
 def _shape_crop_may_be_enabled(args: argparse.Namespace) -> bool:
@@ -360,7 +359,7 @@ def resolve_default_shape_file() -> Path:
     if DEFAULT_APOPHIS_OBJ.is_file():
         print(
             "[WARN] Shapes/apophis.shape missing; using bare .obj — PHANTOM forces mesh scale=1.0. "
-            "Add apophis.shape with 'mesh apophis_v233s7.obj 0.205' for literature sizing.",
+            "Add apophis.shape with 'mesh apophis_v233s7.obj 0.170' for literature sizing.",
             file=sys.stderr,
         )
         return DEFAULT_APOPHIS_OBJ
@@ -420,10 +419,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="KG",
         help=(
-            "Baseline Apophis mass in kg at scale_rho=1 (i.e. using the template density). "
-            "Required when --mass-min-kg and --mass-max-kg are set. "
-            "The sampled mass is converted to scale_rho = mass_kg / ref_mass_kg and patched "
-            "into the setup file."
+            "Deprecated: ignored. Sampled masses are written directly as mass_apophis (g)."
         ),
     )
     parser.add_argument(
@@ -628,6 +624,13 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--dem-model",
+        choices=("particle", "sink"),
+        default="particle",
+        help="DEM representation when use_dem is on: 'particle' = Mia's tree DEM (idem grains, "
+             "use_dem=T); 'sink' = legacy sink DEM (use_dem_as_sinks=T, all-pairs).",
+    )
+    parser.add_argument(
         "--np-apophis",
         type=int,
         default=None,
@@ -829,10 +832,8 @@ def validate_args(args: argparse.Namespace) -> None:
     if _mass_bounds_active(args):
         if m_lo <= 0 or m_hi <= 0 or m_hi <= m_lo:
             raise ValueError("mass bounds must satisfy 0 < mass-min-kg < mass-max-kg")
-        if args.apophis_ref_mass_kg is None:
-            raise ValueError("--apophis-ref-mass-kg is required when --mass-min-kg and --mass-max-kg are set")
-        if args.apophis_ref_mass_kg <= 0:
-            raise ValueError("--apophis-ref-mass-kg must be > 0")
+        if args.apophis_ref_mass_kg is not None:
+            print("[WARN] --apophis-ref-mass-kg is ignored: mass is written as mass_apophis (g)", flush=True)
         active_scale = _active_scale_variations(args)
         if any(p == "scale_rho" for p, *_ in active_scale):
             raise ValueError(
@@ -1083,12 +1084,9 @@ def apply_run_sample_to_setup(
     columns: Dict[str, str] = {}
 
     if sample.mass_kg is not None:
-        if ref_mass_kg is None:
-            raise RuntimeError("ref_mass_kg required to convert mass sample to scale_rho")
-        scale_rho_val = sample.mass_kg / ref_mass_kg
-        tok = format_real_token(scale_rho_val)
-        text = replace_setup_assignment(text, "scale_rho", tok)
-        validate_assignment(text, "scale_rho", tok)
+        tok = format_real_token(sample.mass_kg * 1.0e3)  # kg -> g (mass_apophis, setup e39b38de5)
+        text = replace_setup_assignment(text, "mass_apophis", tok)
+        validate_assignment(text, "mass_apophis", tok)
 
     _skip_setup_write = frozenset({
         "apophis_spin_obliquity",
@@ -1114,10 +1112,16 @@ def apply_run_sample_to_setup(
         columns[param] = csv_val
 
     if sample.use_dem is not None:
-        tok = format_logical_token(sample.use_dem)
-        text = replace_setup_assignment(text, "use_dem", tok)
-        validate_assignment(text, "use_dem", tok)
+        if sample.dem_model not in ("particle", "sink"):
+            raise RuntimeError(f"dem_model must be 'particle' or 'sink', got {sample.dem_model!r}")
+        particle = bool(sample.use_dem) and sample.dem_model == "particle"
+        sinks = bool(sample.use_dem) and sample.dem_model == "sink"
+        for key, val in (("use_dem", particle), ("use_dem_as_sinks", sinks)):
+            tok = format_logical_token(val)
+            text = replace_setup_assignment(text, key, tok)
+            validate_assignment(text, key, tok)
         columns["use_dem"] = "T" if sample.use_dem else "F"
+        columns["dem_model"] = sample.dem_model
 
     if sample.use_shape_crop is not None:
         path_tok = (shape_setup_value or "") if sample.use_shape_crop else ""
@@ -1279,6 +1283,7 @@ def _apply_fixed_run_sample_overrides(
     s: RunSample, args: argparse.Namespace, *, np_val: Optional[int] = None
 ) -> None:
     """Apply CLI fixed overrides that are not Sobol dimensions."""
+    s.dem_model = getattr(args, "dem_model", "particle")
     if getattr(args, "tmax_hours", None) is not None:
         s.tmax_hours = args.tmax_hours
     if getattr(args, "dtmax_hours", None) is not None:
@@ -1523,6 +1528,7 @@ def canonical_sweep_descriptor(args: argparse.Namespace) -> str:
     if spin_list is not None:
         parts.append(f"spin_period_list={spin_list}")
     parts.append(f"vary_use_dem={args.vary_use_dem}")
+    parts.append(f"dem_model={getattr(args, 'dem_model', 'particle')}")
     parts.append(f"vary_use_shape_crop={args.vary_use_shape_crop}")
     parts.append(f"vary_apophis_only={args.vary_apophis_only}")
     parts.append(f"apophis_only_fixed={getattr(args, 'apophis_only_fixed', None)}")
@@ -1695,17 +1701,6 @@ def stage_shape_assets(shape_file: Path, run_dir: Path) -> str:
             shutil.copy2(obj_path, run_dir / obj_path.name)
             break
     return src.name
-
-
-def _maybe_apply_literature_scale_r(
-    sample: RunSample, *, literature_scale_r_allowed: bool
-) -> None:
-    """Match lattice r_apophis to literature mesh half-extent when shape crop is on."""
-    if not sample.use_shape_crop or not literature_scale_r_allowed:
-        return
-    if sample.scale_r_apophis is not None:
-        return
-    sample.scale_r_apophis = LITERATURE_SCALE_R_APOPHIS
 
 
 def parse_sink_rows(path: Path) -> Tuple[List[float], List[Tuple[float, float, float]]]:
@@ -2860,7 +2855,6 @@ def run_one_case(
     apophis_sink_id: int,
     ephemeris_cache_dir: Optional[Path] = None,
     shape_file: Optional[str] = None,
-    literature_scale_r_allowed: bool = True,
 ) -> RunRecord:
     run_dir = output_root / f"run_{run_id:04d}"
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -2872,9 +2866,6 @@ def run_one_case(
     shape_setup_value: Optional[str] = None
     if sample.use_shape_crop and shape_file:
         shape_setup_value = stage_shape_assets(Path(shape_file), run_dir)
-        _maybe_apply_literature_scale_r(
-            sample, literature_scale_r_allowed=literature_scale_r_allowed
-        )
 
     param_columns = apply_run_sample_to_setup(
         run_setup, sample, ref_mass_kg, shape_setup_value
@@ -3061,7 +3052,6 @@ def _execute_run_worker(payload: RunWorkerPayload) -> RunRecord:
         payload.apophis_sink_id,
         Path(payload.ephemeris_cache_dir) if payload.ephemeris_cache_dir else None,
         payload.shape_file,
-        payload.literature_scale_r_allowed,
     )
 
 
@@ -3197,9 +3187,6 @@ def main() -> int:
             "(set OMP_NUM_THREADS=1 if PHANTOM is OpenMP to limit threads per process)."
         )
 
-    literature_scale_r_allowed = "scale_r_apophis" not in {
-        p for p, _, _, _ in _active_scale_variations(args)
-    }
     payloads = [
         RunWorkerPayload(
             run_id=idx,
@@ -3216,7 +3203,6 @@ def main() -> int:
             apophis_sink_id=args.sink_apophis_id,
             ephemeris_cache_dir=str(ephemeris_cache) if ephemeris_cache is not None else None,
             shape_file=args.shape_file if args.shape_file else None,
-            literature_scale_r_allowed=literature_scale_r_allowed,
         )
         for idx, sample in enumerate(samples, start=1)
     ]

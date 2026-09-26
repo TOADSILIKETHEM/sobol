@@ -114,6 +114,7 @@ DEST_TO_SECTION: Dict[str, str] = {
     "dtmax_hours_min": "Time (optional override / dimension)",
     "dtmax_hours_max": "Time (optional override / dimension)",
     "vary_use_dem": "Setup toggles",
+    "dem_model": "Setup toggles",
     "np_apophis": "Setup toggles",
     "vary_use_shape_crop": "Setup toggles",
     "use_shape_crop_fixed": "Setup toggles",
@@ -192,9 +193,8 @@ INTERACTIVE_BRIEF: Dict[str, tuple[str, str]] = {
         "Positive float; must be greater than mass min.",
     ),
     "apophis_ref_mass_kg": (
-        "Baseline Apophis mass in kg at scale_rho=1 (template density). "
-        "Sampled masses are converted to scale_rho = mass / ref_mass and patched into setup.",
-        "Positive float in kg (e.g. 2.7e10). Required when varying mass.",
+        "Deprecated and ignored: sampled masses are written directly as mass_apophis (g).",
+        "Press Enter to skip.",
     ),
     "seed": (
         "Random seed for scrambled Sobol draws and for Saltelli when used.",
@@ -298,6 +298,10 @@ INTERACTIVE_BRIEF: Dict[str, tuple[str, str]] = {
         "If yes, adds a Sobol dimension that toggles use_dem in the setup (T/F across runs).",
         "y, n, yes, no, t, f, 1, 0; or Enter to keep the current value.",
     ),
+    "dem_model": (
+        "DEM model: particle (Mia tree DEM, default) or sink (legacy all-pairs sink DEM).",
+        "particle or sink; or Enter to keep the current value.",
+    ),
     "np_apophis_list": (
         "Space-separated list of np_apophis values: one run per value within a single batch "
         "(e.g. '250 500 1000' → run_0001=250, run_0002=500, run_0003=1000). "
@@ -324,8 +328,8 @@ INTERACTIVE_BRIEF: Dict[str, tuple[str, str]] = {
     ),
     "shape_file": (
         "Path to the shape config (or .obj) staged into each run when shape cropping is enabled. "
-        "Default when cropping is on: repo Shapes/apophis.shape (mesh apophis_v233s7.obj at literature "
-        "~0.41 km long axis; runner also sets scale_r_apophis ≈ 1.205 unless you sweep that dimension).",
+        "Default when cropping is on: repo Shapes/apophis.shape (mesh apophis_v233s7.obj, half long "
+        "axis 0.170 km; the lattice is sized from the mesh and mass from its volume).",
         "File path string; or Enter to use the default when cropping is enabled.",
     ),
     "vary_apophis_only": (

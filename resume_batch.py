@@ -201,9 +201,6 @@ def main() -> int:
         ephemeris_cache = Path(args.ephemeris_cache_dir).resolve()
 
     ref_mass_kg = args.apophis_ref_mass_kg if _mass_bounds_active(args) else None
-    literature_scale_r_allowed = "scale_r_apophis" not in {
-        p for p, _, _, _ in _active_scale_variations(args)
-    }
 
     payloads = [
         RunWorkerPayload(
@@ -221,7 +218,6 @@ def main() -> int:
             apophis_sink_id=args.sink_apophis_id,
             ephemeris_cache_dir=str(ephemeris_cache) if ephemeris_cache else None,
             shape_file=args.shape_file if args.shape_file else None,
-            literature_scale_r_allowed=literature_scale_r_allowed,
         )
         for rid in todo_ids
     ]
