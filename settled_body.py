@@ -12,10 +12,14 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import re
+import shutil
+import subprocess
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from pathlib import Path
-from typing import Sequence, Tuple
+from typing import Dict, Optional, Sequence, Tuple
 
 DEM_TOOL_NAMES = ("phantommoddump", "phantomflyby", "phantomanalysis")
 
@@ -146,3 +150,106 @@ def resolve_dem_tools(phantom_dir: Path) -> DemTools:
     except FileNotFoundError as exc:
         raise FileNotFoundError(f"{exc}. Build them with: cd sobol && make demtools") from None
     return DemTools(*paths)
+
+
+@dataclass(frozen=True)
+class SettledBody:
+    dir: Path
+    dump: str               # final dump basename inside dir
+    infile: str             # .in matching that dump (carries idamp=2 from the settle!)
+    n_kept: int
+    n_settled: int
+    packing_fraction: float
+    utime_s: float          # seconds per code time unit
+    key: str
+
+    @classmethod
+    def load(cls, body_dir: Path) -> "SettledBody":
+        m = json.loads((Path(body_dir) / "body.json").read_text(encoding="utf-8"))
+        return cls(dir=Path(body_dir), dump=m["dump"], infile=m["infile"], n_kept=int(m["n_kept"]),
+                   n_settled=int(m["n_settled"]), packing_fraction=float(m["packing_fraction"]),
+                   utime_s=float(m["utime_s"]), key=m["key"])
+
+
+def settle_maxp(np_apophis: int) -> int:
+    """The settle cloud holds ~1.1*np*V_sphere(r_circ)/V_shape grains (~2.6x np for Apophis)."""
+    return max(4000, 8 * int(np_apophis))
+
+
+def set_in_keys(in_path: Path, keys: Dict[str, str]) -> None:
+    r = _runner()
+    text = Path(in_path).read_text(encoding="utf-8")
+    for key, val in keys.items():
+        text = r.replace_setup_assignment(text, key, val)
+    Path(in_path).write_text(text, encoding="utf-8")
+
+
+def _run(cmd, cwd: Path, log: Path, stdin_text: Optional[str] = None) -> None:
+    with open(log, "w", encoding="utf-8") as fh:
+        proc = subprocess.run([str(c) for c in cmd], cwd=str(cwd), input=stdin_text, text=True,
+                              stdout=fh, stderr=subprocess.STDOUT)
+    if proc.returncode != 0:
+        raise RuntimeError(f"{Path(str(cmd[0])).name} failed ({proc.returncode}); see {log}")
+
+
+def build_settled_body(
+    spec: SettleSpec,
+    cache_root: Path,
+    template_setup: Path,
+    phantomsetup_bin: Path,
+    phantom_bin: Path,
+    tools: DemTools,
+    ephemeris_cache_dir: Optional[Path],
+) -> SettledBody:
+    """Settle, crop and relax one body, or return the cached one. Not safe to call concurrently
+    for the same spec: callers build serially before dispatching workers."""
+    r = _runner()
+    key = settle_key(spec, (phantomsetup_bin, phantom_bin, tools.moddump))
+    final = Path(cache_root) / key
+    if (final / "body.json").is_file():
+        return SettledBody.load(final)
+    work = Path(cache_root) / f"{key}.partial"
+    if work.exists():
+        shutil.rmtree(work)
+    work.mkdir(parents=True)
+    maxp = [f"--maxp={settle_maxp(spec.np_apophis)}"]
+
+    shape_name = r.stage_shape_assets(Path(spec.shape_file), work)
+    if ephemeris_cache_dir is not None:
+        r.copy_ephemeris_txt_cache(Path(ephemeris_cache_dir), work)  # apophis_only still queries Horizons
+    write_settle_setup(template_setup, work / f"{SETTLE_PREFIX}.setup", spec, shape_name)
+    r.run_phantomsetup(Path(phantomsetup_bin), SETTLE_PREFIX, maxp, work, work / "settle_setup.log")
+    # every dump full: the crop needs velocities in the last settle dump
+    set_in_keys(work / f"{SETTLE_PREFIX}.in", {"nfulldump": f"{1:>10}"})
+    _run([phantom_bin, f"{SETTLE_PREFIX}.in", *maxp], work, work / "settle_phantom.log")
+    utime = r._parse_utime_from_phantom_log(work / "settle_phantom.log")
+    if utime is None:
+        raise RuntimeError(f"no 'Time: ... s' unit line in {work / 'settle_phantom.log'}")
+    settle_dumps = _pdem().list_full_dumps(work, SETTLE_PREFIX)
+    if not settle_dumps:
+        raise RuntimeError(f"settle wrote no {SETTLE_PREFIX}_NNNNN dumps in {work}")
+
+    rho = RHO_0_CGS * spec.scale_rho
+    _run([tools.moddump, settle_dumps[-1].name, CROP_PREFIX, "0", *maxp], work, work / "crop.log",
+         stdin_text=f"{shape_name}\n{rho:.6g}\n")  # prompts: shape file, bulk density g/cm^3
+    n_kept, n_settled, phi = parse_crop_log((work / "crop.log").read_text(errors="replace"))
+    dump, infile = f"{CROP_PREFIX}_00000", f"{CROP_PREFIX}.in"
+
+    if spec.relax_tdyn > 0.0:
+        tdyn_code = tdyn_seconds(spec.scale_rho) / utime
+        set_in_keys(work / infile, {
+            "tmax": r.format_real_token(spec.relax_tdyn * tdyn_code),
+            "dtmax": r.format_real_token(0.25 * spec.relax_tdyn * tdyn_code),
+            "nfulldump": f"{1:>10}",
+        })
+        _run([phantom_bin, infile, *maxp], work, work / "relax_phantom.log")
+        dump = _pdem().list_full_dumps(work, CROP_PREFIX)[-1].name
+
+    manifest = {
+        "key": key, "spec": asdict(spec), "dump": dump, "infile": infile,
+        "n_kept": n_kept, "n_settled": n_settled, "packing_fraction": phi, "utime_s": utime,
+        "created": datetime.now().isoformat(timespec="seconds"),
+    }
+    (work / "body.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    os.replace(work, final)  # atomic: a dir without body.json is never loaded
+    return SettledBody.load(final)
