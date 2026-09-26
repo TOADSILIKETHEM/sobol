@@ -28,8 +28,8 @@ if str(_REPO) not in sys.path:
 
 from sobol.run_mass_sobol_phantom import (  # noqa: E402
     SPIN_INTRINSIC_MAX_HOURS,
-    _apophis_time_groups,
-    _earth_apophis_closest_approach,
+    _closest_approach_for_model,
+    _load_apophis_groups,
     _extract_dem_metrics_bundle,
     _extract_mean_spin_period_hr,
     _intrinsic_spin_dump_intact,
@@ -68,7 +68,7 @@ def _metrics_for_run(
     else:
         _use_fast_metrics_defaults()
 
-    groups, time_of_key, n_sinks = _apophis_time_groups(run_dir, prefix, apophis_sink_id)
+    groups, time_of_key, n_sinks, model = _load_apophis_groups(run_dir, prefix, apophis_sink_id)
     out: Dict[str, Any] = {"n_dump_groups": len(groups), "n_sinks": n_sinks}
 
     if n_sinks < 2:
@@ -76,8 +76,8 @@ def _metrics_for_run(
 
     t_ca: Optional[float] = None
     if not apophis_only:
-        closest_km, closest_au, t_ca = _earth_apophis_closest_approach(
-            run_dir, prefix, earth_sink_id, apophis_sink_id
+        closest_km, closest_au, t_ca = _closest_approach_for_model(
+            run_dir, prefix, earth_sink_id, apophis_sink_id, groups, time_of_key, model
         )
         out["closest_approach_km"] = closest_km
         out["closest_approach_au"] = closest_au
@@ -393,13 +393,13 @@ def main() -> int:
             return 1
     print("OK: bundle matches standalone extractors")
 
-    groups, time_of_key, _ = _apophis_time_groups(
+    groups, time_of_key, _, model = _load_apophis_groups(
         run_dir, args.prefix, args.apophis_sink_id
     )
     t_ca_timeline: Optional[float] = None
     if not apophis_only:
-        _, _, t_ca_timeline = _earth_apophis_closest_approach(
-            run_dir, args.prefix, args.earth_sink_id, args.apophis_sink_id
+        _, _, t_ca_timeline = _closest_approach_for_model(
+            run_dir, args.prefix, args.earth_sink_id, args.apophis_sink_id, groups, time_of_key, model
         )
     if args.spin_timeline:
         _print_spin_timeline(

@@ -25,15 +25,18 @@ if str(_REPO) not in sys.path:
 from sobol.run_mass_sobol_phantom import (  # noqa: E402
     APOPHIS_SINK_ID_DEFAULT,
     EARTH_SINK_ID_DEFAULT,
-    _apophis_time_groups,
-    _earth_apophis_closest_approach,
+    _closest_approach_for_model,
+    _load_apophis_groups,
     _extract_dem_metrics_bundle,
     _use_fast_metrics_defaults,
 )
 
 
 def _run_has_ev(run_dir: Path, prefix: str, apophis_sink_id: int) -> bool:
-    return any(run_dir.glob(f"{prefix}Sink{apophis_sink_id:04d}N*.ev"))
+    """Grain data still on disk: Apophis sink .ev (sink DEM) or full dumps (particle DEM)."""
+    if any(run_dir.glob(f"{prefix}Sink{apophis_sink_id:04d}N*.ev")):
+        return True
+    return any(run_dir.glob(f"{prefix}_[0-9][0-9][0-9][0-9][0-9]"))
 
 
 def _apophis_only_from_setup(run_dir: Path, prefix: str) -> bool:
@@ -83,13 +86,13 @@ def reextract_batch(
                 continue
 
             apophis_only = _apophis_only_from_setup(run_dir, prefix)
-            groups, time_of_key, n_sinks = _apophis_time_groups(
+            groups, time_of_key, n_sinks, model = _load_apophis_groups(
                 run_dir, prefix, apophis_sink_id
             )
             t_ca = None
             if not apophis_only:
-                _, _, t_ca = _earth_apophis_closest_approach(
-                    run_dir, prefix, earth_sink_id, apophis_sink_id
+                _, _, t_ca = _closest_approach_for_model(
+                    run_dir, prefix, earth_sink_id, apophis_sink_id, groups, time_of_key, model
                 )
 
             disp, unbound, intrinsic, approach, post = _extract_dem_metrics_bundle(

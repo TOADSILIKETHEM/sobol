@@ -141,3 +141,76 @@ def test_coh_gap_explicit_value_wins(tmp_path):
     s = RunSample(use_dem=True, kt_cgs=1e7, dn_cohes_factor=0.1, coh_gap_max_cgs=123.0)
     runner.resolve_coh_gap_after_setup(tmp_path, "sobol", s)
     assert s.coh_gap_max_cgs == 123.0
+
+
+import math  # noqa: E402
+
+SINK_FIX = FIX / "sink_np300"
+needs_sink_fixture = pytest.mark.skipif(
+    not (SINK_FIX / "sobol_00000").is_file(),
+    reason="sink_np300 fixture absent; regenerate per tests/fixtures/README.md",
+)
+
+
+def test_load_groups_dispatches_particle():
+    g, tok, n, model = runner._load_apophis_groups(FIX / "particle_np300", "sobol", runner.APOPHIS_SINK_ID_DEFAULT)
+    assert model == "particle" and n >= 290 and len(g) >= 4
+
+
+@needs_sink_fixture
+def test_load_groups_dispatches_sink():
+    g, tok, n, model = runner._load_apophis_groups(SINK_FIX, "sobol", runner.APOPHIS_SINK_ID_DEFAULT)
+    assert model == "sink" and n >= 290
+
+
+def test_compute_run_metrics_particle_fixture(tmp_path):
+    run = tmp_path / "run"
+    shutil.copytree(FIX / "particle_np300", run)
+    s = RunSample(use_dem=True, dem_model="particle", np_apophis=300, apophis_only=False)
+    m = runner.compute_run_metrics(run, "sobol", s, runner.EARTH_SINK_ID_DEFAULT, runner.APOPHIS_SINK_ID_DEFAULT)
+    assert math.isfinite(m.closest_km) and m.closest_km > 1e4   # ~1 hr of a flyby 3 days out
+    # fixture spins at P=2 hr (omega/omega_crit ~1.01), so the pile spreads in both models
+    assert 0.95 < m.dispersion_ratio < 3.0
+    assert 0.0 <= m.unbound_fraction < 0.05
+
+
+@needs_sink_fixture
+def test_particle_and_sink_metrics_agree_on_fixture(tmp_path):
+    out = {}
+    for model in ("particle", "sink"):
+        run = tmp_path / model
+        shutil.copytree(FIX / f"{model}_np300", run)
+        s = RunSample(use_dem=True, dem_model=model, np_apophis=300, apophis_only=False)
+        out[model] = runner.compute_run_metrics(
+            run, "sobol", s, runner.EARTH_SINK_ID_DEFAULT, runner.APOPHIS_SINK_ID_DEFAULT)
+    assert out["particle"].closest_km == pytest.approx(out["sink"].closest_km, rel=1e-3)
+
+
+def test_point_mass_run_uses_sink_ev_for_ca(tmp_path, monkeypatch):
+    called = {}
+
+    def fake_ca(run_dir, prefix, e, a):
+        called["yes"] = True
+        return 4.0e4, 4.0e4 / runner.AU_IN_KM, 1.0
+
+    monkeypatch.setattr(runner, "_earth_apophis_closest_approach", fake_ca)
+    (tmp_path / "sobol.setup").write_text(" np_apophis = 1\n use_dem = F\n use_dem_as_sinks = F\n")
+    s = RunSample(np_apophis=1, apophis_only=False)
+    m = runner.compute_run_metrics(tmp_path, "sobol", s, runner.EARTH_SINK_ID_DEFAULT, runner.APOPHIS_SINK_ID_DEFAULT)
+    assert called and m.closest_km == 4.0e4
+    assert math.isnan(m.dispersion_ratio)
+
+
+def test_particle_loader_works_under_package_import():
+    # reextract_spin_metrics / verify_metric_extraction import the runner as sobol.run_mass_sobol_phantom
+    import subprocess
+    repo = Path(__file__).resolve().parents[2]
+    code = (
+        "import sys; sys.path.insert(0, %r)\n"
+        "from pathlib import Path\n"
+        "from sobol.run_mass_sobol_phantom import _load_apophis_groups\n"
+        "g, t, n, m = _load_apophis_groups(Path(%r), 'sobol', 11)\n"
+        "assert m == 'particle' and n >= 290, (m, n)\n"
+    ) % (str(repo), str(FIX / "particle_np300"))
+    res = subprocess.run([sys.executable, "-c", code], cwd="/", capture_output=True, text=True)
+    assert res.returncode == 0, res.stderr[-800:]

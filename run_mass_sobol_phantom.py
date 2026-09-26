@@ -1227,7 +1227,7 @@ def resolve_coh_gap_after_setup(run_dir: Path, prefix: str, sample: RunSample) -
         return
     if not sample.use_dem:
         return
-    import particle_dem as pdem
+    pdem = _particle_dem_module()
     dump = run_dir / f"{prefix}_00000.tmp"
     if not dump.is_file():
         dump = run_dir / f"{prefix}_00000"
@@ -2855,6 +2855,126 @@ def skip_closest_approach(sample: RunSample) -> bool:
     return sample.apophis_only is True
 
 
+def _particle_dem_module():
+    """particle_dem sibling module, whether this file runs as a script or as sobol.<module>."""
+    try:
+        import particle_dem as mod
+    except ImportError:
+        from sobol import particle_dem as mod
+    return mod
+
+
+class RunMetrics(NamedTuple):
+    closest_km: float
+    closest_au: float
+    dispersion_ratio: float
+    unbound_fraction: float
+    intrinsic_spin_period_hr: float
+    approach_spin_period_hr: float
+    post_flyby_spin_period_hr: float
+
+
+def _load_apophis_groups(
+    run_dir: Path, prefix: str, apophis_sink_id: int
+) -> Tuple[Dict[str, np.ndarray], Dict[str, float], int, str]:
+    """Grain groups for either DEM model; model read from the run's .setup."""
+    pdem = _particle_dem_module()
+    setup = run_dir / f"{prefix}.setup"
+    model = pdem.dem_model_from_setup(setup) if setup.is_file() else "sink"
+    if model == "particle":
+        g, t, n = pdem.apophis_time_groups_from_dumps(run_dir, prefix)
+    else:
+        g, t, n = _apophis_time_groups(run_dir, prefix, apophis_sink_id)
+    return g, t, n, model
+
+
+def _particle_closest_approach(
+    run_dir: Path, prefix: str, earth_sink_id: int,
+    groups: Dict[str, np.ndarray], time_of_key: Dict[str, float],
+) -> Tuple[float, float, float]:
+    """Earth–Apophis CA with Apophis = mass-weighted grain CoM at dump times."""
+    pdem = _particle_dem_module()
+    earth = _parse_sink_ev_array(_latest_centroid_ev_path(run_dir, prefix, earth_sink_id))
+    keys = sorted(groups, key=time_of_key.get)
+    t_apo = np.array([time_of_key[k] for k in keys])
+    com = np.array([np.average(groups[k][:, :3], axis=0, weights=groups[k][:, 3]) for k in keys])
+    d_km, t_ca = pdem.closest_approach_from_series(earth[:, 0], earth[:, 1:4], t_apo, com)
+    return d_km, d_km / AU_IN_KM, t_ca
+
+
+def _closest_approach_for_model(
+    run_dir: Path, prefix: str, earth_sink_id: int, apophis_sink_id: int,
+    groups: Dict[str, np.ndarray], time_of_key: Dict[str, float], model: str,
+) -> Tuple[float, float, float]:
+    """(km, au, t_ca): grain CoM for particle DEM, Apophis sink .ev otherwise."""
+    if model == "particle":
+        return _particle_closest_approach(run_dir, prefix, earth_sink_id, groups, time_of_key)
+    return _earth_apophis_closest_approach(run_dir, prefix, earth_sink_id, apophis_sink_id)
+
+
+def compute_run_metrics(
+    run_dir: Path, prefix: str, sample: RunSample, earth_sink_id: int, apophis_sink_id: int
+) -> RunMetrics:
+    """Closest approach + DEM breakup/spin metrics for a finished run directory."""
+    # Dump-grid metrics only (fast path); ignore METRICS_LEGACY_SUBSTEPS from the shell.
+    _use_fast_metrics_defaults()
+    # Read Apophis grains once (sink .ev files or particle dumps) and share across metrics.
+    _groups, _time_of_key, _n_sinks, _model = _load_apophis_groups(run_dir, prefix, apophis_sink_id)
+    _apophis_only = skip_closest_approach(sample)
+
+    nan = float("nan")
+    dispersion_ratio = unbound_fraction = nan
+    intrinsic_spin_period_hr = approach_spin_period_hr = post_flyby_spin_period_hr = nan
+    closest_km = closest_au = nan
+
+    if sample.use_dem is True and _n_sinks >= 2:
+        if _apophis_only:
+            (
+                dispersion_ratio,
+                unbound_fraction,
+                intrinsic_spin_period_hr,
+                _,
+                _,
+            ) = _extract_dem_metrics_bundle(
+                run_dir,
+                prefix,
+                apophis_sink_id,
+                apophis_only=True,
+                _groups=_groups,
+                _time_of_key=_time_of_key,
+                _n_sinks=_n_sinks,
+            )
+        else:
+            closest_km, closest_au, t_ca = _closest_approach_for_model(
+                run_dir, prefix, earth_sink_id, apophis_sink_id, _groups, _time_of_key, _model
+            )
+            (
+                dispersion_ratio,
+                unbound_fraction,
+                intrinsic_spin_period_hr,
+                approach_spin_period_hr,
+                post_flyby_spin_period_hr,
+            ) = _extract_dem_metrics_bundle(
+                run_dir,
+                prefix,
+                apophis_sink_id,
+                apophis_only=False,
+                earth_sink_id=earth_sink_id,
+                t_ca=t_ca,
+                _groups=_groups,
+                _time_of_key=_time_of_key,
+                _n_sinks=_n_sinks,
+            )
+    elif not _apophis_only:
+        closest_km, closest_au = extract_closest_approach(
+            run_dir, prefix, earth_sink_id, apophis_sink_id
+        )
+    return RunMetrics(
+        closest_km, closest_au, dispersion_ratio, unbound_fraction,
+        intrinsic_spin_period_hr, approach_spin_period_hr, post_flyby_spin_period_hr,
+    )
+
+
 def run_one_case(
     run_id: int,
     sample: RunSample,
@@ -2952,92 +3072,20 @@ def run_one_case(
         param_columns.update(in_param_cols)
         run_command([str(phantom_bin), f"{prefix}.in"] + maxp_flag, cwd=run_dir, log_path=run_dir / "phantom.log")
 
-        # Dump-grid metrics only (fast path); ignore METRICS_LEGACY_SUBSTEPS from the shell.
-        _use_fast_metrics_defaults()
-        # Read all Apophis sink .ev files once and share across all metric functions.
-        _groups, _time_of_key, _n_sinks = _apophis_time_groups(run_dir, prefix, apophis_sink_id)
-        _apophis_only = skip_closest_approach(sample)
-
-        dispersion_ratio = float("nan")
-        unbound_fraction = float("nan")
-        intrinsic_spin_period_hr = float("nan")
-        approach_spin_period_hr = float("nan")
-        post_flyby_spin_period_hr = float("nan")
-        closest_km = float("nan")
-        closest_au = float("nan")
-        t_ca: Optional[float] = None
-
-        if sample.use_dem is True and _n_sinks >= 2:
-            if _apophis_only:
-                (
-                    dispersion_ratio,
-                    unbound_fraction,
-                    intrinsic_spin_period_hr,
-                    _,
-                    _,
-                ) = _extract_dem_metrics_bundle(
-                    run_dir,
-                    prefix,
-                    apophis_sink_id,
-                    apophis_only=True,
-                    _groups=_groups,
-                    _time_of_key=_time_of_key,
-                    _n_sinks=_n_sinks,
-                )
-            else:
-                closest_km, closest_au, t_ca = _earth_apophis_closest_approach(
-                    run_dir, prefix, earth_sink_id, apophis_sink_id
-                )
-                (
-                    dispersion_ratio,
-                    unbound_fraction,
-                    intrinsic_spin_period_hr,
-                    approach_spin_period_hr,
-                    post_flyby_spin_period_hr,
-                ) = _extract_dem_metrics_bundle(
-                    run_dir,
-                    prefix,
-                    apophis_sink_id,
-                    apophis_only=False,
-                    earth_sink_id=earth_sink_id,
-                    t_ca=t_ca,
-                    _groups=_groups,
-                    _time_of_key=_time_of_key,
-                    _n_sinks=_n_sinks,
-                )
-        elif _apophis_only:
-            return RunRecord(
-                run_id=run_id,
-                mass_input_kg=mass_for_record,
-                run_dir=str(run_dir),
-                status="ok",
-                closest_approach_km=float("nan"),
-                closest_approach_au=float("nan"),
-                error="",
-                dispersion_ratio=dispersion_ratio,
-                unbound_fraction=unbound_fraction,
-                intrinsic_spin_period_hr=intrinsic_spin_period_hr,
-                approach_spin_period_hr=approach_spin_period_hr,
-                post_flyby_spin_period_hr=post_flyby_spin_period_hr,
-                param_columns=param_columns,
-            )
-        else:
-            closest_km, closest_au = extract_closest_approach(
-                run_dir, prefix, earth_sink_id, apophis_sink_id
-            )
+        m = compute_run_metrics(run_dir, prefix, sample, earth_sink_id, apophis_sink_id)
         return RunRecord(
             run_id=run_id,
             mass_input_kg=mass_for_record,
             run_dir=str(run_dir),
             status="ok",
-            closest_approach_km=closest_km,
-            closest_approach_au=closest_au,
+            closest_approach_km=m.closest_km,
+            closest_approach_au=m.closest_au,
             error="",
-            dispersion_ratio=dispersion_ratio,
-            unbound_fraction=unbound_fraction,
-            intrinsic_spin_period_hr=intrinsic_spin_period_hr,
-            approach_spin_period_hr=approach_spin_period_hr,
-            post_flyby_spin_period_hr=post_flyby_spin_period_hr,
+            dispersion_ratio=m.dispersion_ratio,
+            unbound_fraction=m.unbound_fraction,
+            intrinsic_spin_period_hr=m.intrinsic_spin_period_hr,
+            approach_spin_period_hr=m.approach_spin_period_hr,
+            post_flyby_spin_period_hr=m.post_flyby_spin_period_hr,
             param_columns=param_columns,
         )
     except Exception as exc:  # pragma: no cover - runtime path
