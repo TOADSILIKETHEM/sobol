@@ -9,10 +9,109 @@ The last dump of the last stage and its .in are the body; body.json records them
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+import hashlib
+import json
+import math
+import re
+from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Sequence, Tuple
 
 DEM_TOOL_NAMES = ("phantommoddump", "phantomflyby", "phantomanalysis")
+
+G_CGS = 6.674e-8
+RHO_0_CGS = 2.7  # eos_tillotson.f90:34 rho_0; setup bulk density = rho_0 * scale_rho
+SETTLE_PREFIX = "settle"
+CROP_PREFIX = "cropped"
+
+
+@dataclass(frozen=True)
+class SettleSpec:
+    np_apophis: int          # grains wanted AFTER the crop (setup settles ~1.1*np*V_circ/V_shape)
+    scale_rho: float         # bulk density = RHO_0_CGS * scale_rho
+    shape_file: str          # .shape config (or bare .obj) to crop to
+    pack_phi: float = 0.64   # setup_solarsystem default
+    pack_expand: float = 1.8  # setup_solarsystem default
+    settle_tdyn: float = 5.0  # settle length in t_dyn (assumption A1)
+    relax_tdyn: float = 0.5   # Mia: 0.5 t_dyn relax after the crop; 0 = skip
+
+
+def tdyn_seconds(scale_rho: float) -> float:
+    """t_dyn = 1/sqrt(G rho): what setup_solarsystem.f90 writes as tdyn_s for idamp=2."""
+    return 1.0 / math.sqrt(G_CGS * RHO_0_CGS * scale_rho)
+
+
+def _file_sha(p: Path) -> str:
+    h = hashlib.sha256()
+    with open(p, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _shape_asset_paths(shape_file: Path) -> list:
+    """The .shape config plus the OBJ its 'mesh' line points at (same rule as stage_shape_assets)."""
+    src = Path(shape_file).resolve()
+    out = [src]
+    if src.suffix.lower() == ".obj":
+        return out
+    for line in src.read_text(encoding="utf-8").splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[0].lower() == "mesh":
+            obj = Path(parts[1])
+            out.append(obj if obj.is_absolute() else (src.parent / obj).resolve())
+            break
+    return out
+
+
+def settle_key(spec: SettleSpec, binaries: Sequence[Path]) -> str:
+    """Cache dir name: readable prefix + hash of spec, shape/mesh bytes and binary bytes."""
+    payload = asdict(spec)
+    payload["shape_file"] = [_file_sha(p) for p in _shape_asset_paths(Path(spec.shape_file))]
+    payload["binaries"] = [_file_sha(Path(b).resolve()) for b in binaries]
+    digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:12]
+    return f"np{spec.np_apophis}_srho{spec.scale_rho:g}_{digest}"
+
+
+def write_settle_setup(template_setup: Path, dst: Path, spec: SettleSpec, shape_basename: str) -> None:
+    """Settle .setup: isolated body (apophis_only=T), loose cloud, no spin, dumps every 0.25 t_dyn."""
+    r = _runner()
+    text = Path(template_setup).read_text(encoding="utf-8")
+    tdyn_hr = tdyn_seconds(spec.scale_rho) / 3600.0
+    keys = {
+        "pack_settle": r.format_logical_token(True),
+        "apophis_only": r.format_logical_token(True),
+        "use_dem": r.format_logical_token(True),
+        "use_dem_as_sinks": r.format_logical_token(False),
+        "scale_rho": r.format_real_token(spec.scale_rho),
+        "mass_apophis": r.format_real_token(0.0),
+        "pack_phi": r.format_real_token(spec.pack_phi),
+        "pack_expand": r.format_real_token(spec.pack_expand),
+        "apophis_shape_file": shape_basename,
+        "apophis_spin_period": r.format_real_token(0.0),
+        "apophis_spin_torque_align_deg": r.format_real_token(-1.0),
+        "tmax_in": r.hours_to_phantom_time_string(spec.settle_tdyn * tdyn_hr),
+        "dtmax_in": r.hours_to_phantom_time_string(0.25 * tdyn_hr),
+    }
+    for key, val in keys.items():
+        text = r.replace_setup_assignment(text, key, val)
+        r.validate_assignment(text, key, val)
+    if not r._NP_APOPHIS_RE.search(text):
+        raise RuntimeError("np_apophis assignment not found in template .setup")
+    text = r._NP_APOPHIS_RE.sub(lambda m: m.group(1) + str(spec.np_apophis), text, count=1)
+    Path(dst).write_text(text, encoding="utf-8")
+
+
+_KEPT_RE = re.compile(r"grains kept\s*=\s*(\d+)\s+of\s+(\d+)")
+_PHI_RE = re.compile(r"packing fraction\s*=\s*([-+\d.Ee]+)")
+
+
+def parse_crop_log(text: str) -> Tuple[int, int, float]:
+    """(n_kept, n_settled, packing_fraction) from moddump_cropshape.f90 output."""
+    k, p = _KEPT_RE.search(text), _PHI_RE.search(text)
+    if not k or not p:
+        raise RuntimeError("crop moddump log has no 'grains kept' / 'packing fraction' lines")
+    return int(k.group(1)), int(k.group(2)), float(p.group(1))
 
 
 def _runner():
