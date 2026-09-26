@@ -4,7 +4,8 @@ Runs the shared wizard from ``interactive_run_mass_sobol``, then for each
 requested Apophis particle count copies ``<prefix>.{in,setup}`` (and ``*.txt``) into a
 staging directory, patches ``np_apophis`` in the copy only, and invokes
 ``run_mass_sobol_phantom.py`` once per count. Use the wizard (or CLI seeds) for
-``--use-dem-fixed`` / ``--vary-use-dem``; staging does not patch ``use_dem``.
+``--use-dem-fixed`` / ``--vary-use-dem`` and ``--dem-model {particle,sink}`` (forwarded to each
+child run, which writes ``use_dem`` / ``use_dem_as_sinks``); staging does not patch them.
 
 Usage::
 

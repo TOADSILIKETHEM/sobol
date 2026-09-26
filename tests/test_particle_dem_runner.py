@@ -214,3 +214,23 @@ def test_particle_loader_works_under_package_import():
     ) % (str(repo), str(FIX / "particle_np300"))
     res = subprocess.run([sys.executable, "-c", code], cwd="/", capture_output=True, text=True)
     assert res.returncode == 0, res.stderr[-800:]
+
+
+def test_wizard_argv_keeps_dem_model(monkeypatch):
+    # full run_interactive_wizard is broken on this parser before this work (--spin-period-list
+    # nargs='+'); exercise the per-action collector the wizard uses for dem_model
+    import interactive_run_mass_sobol as wiz
+    monkeypatch.setattr(wiz, "_read_line", lambda prompt: "")
+    parser = runner.build_parser()
+    state = parser.parse_args(["--dem-model", "sink"])
+    action = next(a for a in parser._actions if a.dest == "dem_model")
+    out = []
+    wiz._collect_store(action, state, out)
+    assert out == ["--dem-model", "sink"]
+    assert wiz._section_for_dest("dem_model") == "Setup toggles"
+
+
+def test_torque_reruns_parser_has_dem_model():
+    import run_torque_align_blender_reruns as tr
+    assert tr.build_parser().parse_args([]).dem_model == "particle"
+    assert tr.build_parser().parse_args(["--dem-model", "sink"]).dem_model == "sink"

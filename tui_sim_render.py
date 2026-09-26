@@ -858,6 +858,7 @@ class SimRenderTUIApp(App[None]):
         shape_file_raw = self._iv("shape-file")
         sample = RunSample(
             use_dem=True,
+            dem_model="particle",
             np_apophis=np_apophis,
             apophis_spin_period=float(self._iv("spin-period")) if self._iv("spin-period") else None,
             apophis_spin_torque_align_deg=(

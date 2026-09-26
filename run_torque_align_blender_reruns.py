@@ -44,6 +44,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--base-dir", type=Path, default=_REPO / "sobol")
     p.add_argument("--output-root", type=Path, default=_REPO / "sobol_mass_runs")
+    p.add_argument("--dem-model", choices=("particle", "sink"), default="particle",
+                   help="particle = Mia tree DEM (default); sink = legacy sink DEM")
     p.add_argument(
         "--batch-label",
         default="torque_align_blender_vis",
@@ -127,6 +129,7 @@ def main() -> int:
         samples.append(
             RunSample(
                 use_dem=True,
+                dem_model=args.dem_model,
                 np_apophis=np_apophis,
                 apophis_spin_period=spin_period,
                 apophis_spin_torque_align_deg=align_deg,
