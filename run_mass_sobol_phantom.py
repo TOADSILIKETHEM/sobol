@@ -315,6 +315,14 @@ class RunSample:
     # Timeframe: patched into the .setup file before phantomsetup as "X hr" strings.
     tmax_hours:  Optional[float] = None   # simulation end time in hours
     dtmax_hours: Optional[float] = None   # dump interval in hours
+    # Body + encounter (settled-body pipeline, docs/MIA_PACKING_WORKFLOW.md)
+    body_source: str = "lattice"   # "lattice" (phantomsetup closepacked) or "settled" (cache)
+    encounter: str = "ephemeris"   # "ephemeris" (2029 Horizons) or "hyperbola" (phantomflyby)
+    settled_body_dir: Optional[str] = None  # set by attach_settled_bodies before dispatch
+    flyby_rp_km: Optional[float] = None
+    flyby_vinf_kms: Optional[float] = None
+    flyby_start_sep_km: Optional[float] = None
+    flyby_perturber_earth_masses: Optional[float] = None
 
 
 class RunWorkerPayload(NamedTuple):
@@ -618,6 +626,30 @@ def build_parser() -> argparse.ArgumentParser:
         help="DEM representation when use_dem is on: 'particle' = Mia's tree DEM (idem grains, "
              "use_dem=T); 'sink' = legacy sink DEM (use_dem_as_sinks=T, all-pairs).",
     )
+    parser.add_argument(
+        "--body-source", choices=("lattice", "settled"), default="lattice",
+        help="Apophis body: 'lattice' = closepacked fill cut from the mesh by phantomsetup (default); "
+             "'settled' = Mia's settle -> crop -> relax packing, built once per (np, scale_rho) and cached.",
+    )
+    parser.add_argument(
+        "--encounter", choices=("ephemeris", "hyperbola"), default="ephemeris",
+        help="'ephemeris' = 2029 Horizons geometry (default); 'hyperbola' = phantomflyby puts the settled "
+             "body on a hyperbola past Earth (set --flyby-rp-km/--flyby-vinf-kms; no Sun/planets, no spin).",
+    )
+    parser.add_argument("--flyby-rp-km", type=float, default=None, metavar="KM",
+                        help="Hyperbola pericentre distance (km), fixed for every run.")
+    parser.add_argument("--flyby-vinf-kms", type=float, default=None, metavar="KM_S",
+                        help="Hyperbola velocity at infinity (km/s), fixed for every run.")
+    parser.add_argument("--flyby-start-sep-km", type=float, default=4.0e5, metavar="KM",
+                        help="Initial Earth-body separation on the incoming leg (km; Mia default 4e5).")
+    parser.add_argument("--flyby-perturber-earth-masses", type=float, default=1.0, metavar="M",
+                        help="Perturber mass in Earth masses (default 1).")
+    parser.add_argument("--settle-tdyn", type=float, default=5.0, metavar="N",
+                        help="Settle length in dynamical times t_dyn = 1/sqrt(G rho) (settled bodies).")
+    parser.add_argument("--relax-tdyn", type=float, default=0.5, metavar="N",
+                        help="Post-crop relax length in t_dyn (Mia: 0.5; 0 = skip).")
+    parser.add_argument("--body-cache-dir", default=None, metavar="DIR",
+                        help="Settled-body cache (default: <output-root>/settled_bodies).")
     parser.add_argument(
         "--np-apophis",
         type=int,
@@ -984,6 +1016,61 @@ def validate_args(args: argparse.Namespace) -> None:
             "vary-use-dem / vary-apophis-only / --np-apophis-list."
         )
 
+    _validate_body_encounter(args)
+
+
+def _validate_body_encounter(args: argparse.Namespace) -> None:
+    """Settled bodies / hyperbola encounters: reject combinations the PHANTOM tools cannot do."""
+    settled = args.body_source == "settled"
+    hyper = args.encounter == "hyperbola"
+    if not (settled or hyper):
+        return
+    if args.dem_model != "particle":
+        raise ValueError("--body-source settled / --encounter hyperbola need --dem-model particle "
+                         "(settle, crop and flyby moddumps work on idem particles, not sinks)")
+    if args.vary_use_dem or args.use_dem_fixed != "true":
+        raise ValueError("--body-source settled / --encounter hyperbola need --use-dem-fixed true")
+    if hyper and not settled:
+        raise ValueError("--encounter hyperbola needs --body-source settled "
+                         "(phantomflyby expects a bare body dump with no sinks)")
+    if settled and not hyper:
+        raise ValueError("--body-source settled with --encounter ephemeris needs Mia's packing_file "
+                         "setup key, which is not pushed yet (plan Task 11, docs/MIA_PACKING_WORKFLOW.md)")
+    if _mass_bounds_active(args):
+        raise ValueError("settled bodies take density from scale_rho (crop needs bulk density); "
+                         "drop --mass-min-kg/--mass-max-kg")
+    if args.scale_r_apophis_min is not None or args.scale_r_apophis_max is not None:
+        raise ValueError("settled bodies take their size from the shape file; drop --scale-r-apophis-*")
+    if getattr(args, "kn_min", None) is not None:
+        raise ValueError("a kn sweep would settle one body per run; not supported with settled bodies")
+    if args.np_apophis is None and getattr(args, "np_apophis_list", None) is None:
+        raise ValueError("--body-source settled needs --np-apophis or --np-apophis-list "
+                         "(grains kept after the crop)")
+    for flag, dest in (("--flyby-rp-km", "flyby_rp_km"), ("--flyby-vinf-kms", "flyby_vinf_kms")):
+        if getattr(args, dest) is None:
+            raise ValueError(f"--encounter hyperbola needs {flag} (no silent default)")
+        if getattr(args, dest) <= 0:
+            raise ValueError(f"{flag} must be > 0")
+    if args.tmax_hours is None or args.dtmax_hours is None:
+        raise ValueError("--encounter hyperbola needs --tmax-hours and --dtmax-hours "
+                         "(the flyby .in otherwise keeps the relax stage's times)")
+    spin_set = [getattr(args, d, None) for d in (
+        "spin_period_fixed", "spin_period_min", "spin_obliquity_min", "spin_azimuth_min",
+        "spin_torque_align_min", "spin_period_list")]
+    if any(v is not None for v in spin_set):
+        raise ValueError("phantomflyby sets no spin (moddump_earthflyby.f90); drop the spin flags")
+    if args.vary_apophis_only or getattr(args, "apophis_only_fixed", None) is not None:
+        raise ValueError("--encounter hyperbola always has the Earth perturber; drop apophis_only flags")
+    t_peri = _encounter_module().time_to_pericentre_hr(
+        args.flyby_rp_km, args.flyby_vinf_kms, args.flyby_start_sep_km, args.flyby_perturber_earth_masses)
+    if args.tmax_hours < 2.0 * t_peri:
+        raise ValueError(f"--tmax-hours {args.tmax_hours:g} ends before the body is back out to its "
+                         f"start separation; need >= {2.0 * t_peri:.3g} hr (2 x time to pericentre)")
+    if args.sink_earth_id == EARTH_SINK_ID_DEFAULT:
+        args.sink_earth_id = 1
+        print("[INFO] --encounter hyperbola: auto-set --sink-earth-id 1 (the perturber is the only sink).",
+              file=sys.stderr)
+
 
 def count_dimensions(args: argparse.Namespace) -> int:
     n = 0
@@ -1235,6 +1322,55 @@ def resolve_coh_gap_after_setup(run_dir: Path, prefix: str, sample: RunSample) -
     sample.coh_gap_max_cgs = sample.dn_cohes_factor * 2.0 * r_cm
 
 
+def attach_settled_bodies(
+    samples: List[RunSample],
+    *,
+    template_setup: Path,
+    shape_file: Path,
+    settle_tdyn: float,
+    relax_tdyn: float,
+    cache_root: Path,
+    phantomsetup_bin: Path,
+    phantom_bin: Path,
+    phantom_dir: Path,
+    ephemeris_cache_dir: Optional[Path],
+    dry_run: bool,
+) -> int:
+    """Build (or reuse) one settled body per unique spec, serially, before workers start.
+
+    Sets sample.settled_body_dir on every body_source == 'settled' sample; returns the number of
+    unique bodies. Serial on purpose: two workers must never settle the same body at once.
+    """
+    sb = _settled_body_module()
+    wanted = [s for s in samples if s.body_source == "settled"]
+    if not wanted:
+        return 0
+    pdem = _particle_dem_module()
+    tmpl_rho = float(pdem._setup_value(Path(template_setup).read_text(encoding="utf-8"), "scale_rho") or 1.0)
+    tools = None if dry_run else sb.resolve_dem_tools(Path(phantom_dir))
+    built: Dict[object, object] = {}
+    for s in wanted:
+        spec = sb.SettleSpec(
+            np_apophis=int(s.np_apophis),
+            scale_rho=float(s.scale_rho if s.scale_rho is not None else tmpl_rho),
+            shape_file=str(Path(shape_file).resolve()),
+            settle_tdyn=settle_tdyn,
+            relax_tdyn=relax_tdyn,
+        )
+        if spec not in built:
+            if dry_run:
+                built[spec] = None
+            else:
+                print(f"[INFO] settled body np={spec.np_apophis} scale_rho={spec.scale_rho:g}: "
+                      f"building or reusing under {cache_root}", flush=True)
+                built[spec] = sb.build_settled_body(
+                    spec, Path(cache_root), Path(template_setup), Path(phantomsetup_bin),
+                    Path(phantom_bin), tools, ephemeris_cache_dir)
+        body = built[spec]
+        s.settled_body_dir = str(body.dir) if body is not None else None
+    return len(built)
+
+
 def _resolve_kt_fixed(args: argparse.Namespace) -> Optional[float]:
     """Return fixed kt value from --kt-fixed or deprecated --kc-fixed."""
     kt = getattr(args, "kt_fixed", None)
@@ -1313,6 +1449,12 @@ def _apply_fixed_run_sample_overrides(
         _ensure_coh_gap(s, args)
     if getattr(args, "spin_period_fixed", None) is not None:
         s.apophis_spin_period = args.spin_period_fixed
+    s.body_source = getattr(args, "body_source", "lattice")
+    s.encounter = getattr(args, "encounter", "ephemeris")
+    for dest in ("flyby_rp_km", "flyby_vinf_kms", "flyby_start_sep_km", "flyby_perturber_earth_masses"):
+        v = getattr(args, dest, None)
+        if v is not None and getattr(s, dest) is None:
+            setattr(s, dest, v)
 
 
 def _apply_np_list_fixed_flags(s: RunSample, args: argparse.Namespace) -> None:
@@ -1542,6 +1684,11 @@ def canonical_sweep_descriptor(args: argparse.Namespace) -> str:
     spin_list = getattr(args, "spin_period_list", None)
     if spin_list is not None:
         parts.append(f"spin_period_list={spin_list}")
+    parts.append(f"body_source={getattr(args, 'body_source', 'lattice')}")
+    parts.append(f"encounter={getattr(args, 'encounter', 'ephemeris')}")
+    for dest in ("flyby_rp_km", "flyby_vinf_kms", "flyby_start_sep_km", "settle_tdyn", "relax_tdyn"):
+        if getattr(args, dest, None) is not None:
+            parts.append(f"{dest}={getattr(args, dest)}")
     parts.append(f"vary_use_dem={args.vary_use_dem}")
     parts.append(f"dem_model={getattr(args, 'dem_model', 'particle')}")
     parts.append(f"vary_use_shape_crop={args.vary_use_shape_crop}")
@@ -2864,6 +3011,22 @@ def _particle_dem_module():
     return mod
 
 
+def _settled_body_module():
+    try:
+        import settled_body as mod
+    except ImportError:
+        from sobol import settled_body as mod
+    return mod
+
+
+def _encounter_module():
+    try:
+        import encounter as mod
+    except ImportError:
+        from sobol import encounter as mod
+    return mod
+
+
 class RunMetrics(NamedTuple):
     closest_km: float
     closest_au: float
@@ -3227,6 +3390,18 @@ def main() -> int:
             samples = build_run_samples(args.num_samples, args)
 
         base_setup, base_input, phantomsetup_bin, phantom_bin = preflight(args, base_dir, output_root)
+
+        if args.body_source == "settled":
+            cache_root = (Path(args.body_cache_dir).expanduser().resolve() if args.body_cache_dir
+                          else Path(args.output_root).resolve() / "settled_bodies")
+            n_bodies = attach_settled_bodies(
+                samples, template_setup=base_setup,
+                shape_file=Path(args.shape_file) if args.shape_file else resolve_default_shape_file(),
+                settle_tdyn=args.settle_tdyn, relax_tdyn=args.relax_tdyn, cache_root=cache_root,
+                phantomsetup_bin=phantomsetup_bin, phantom_bin=phantom_bin,
+                phantom_dir=Path(args.phantom_dir).resolve(), ephemeris_cache_dir=ephemeris_cache,
+                dry_run=args.dry_run)
+            print(f"[INFO] {n_bodies} settled body spec(s) ready under {cache_root}", flush=True)
 
         if args.saltelli_n is not None and problem is not None and saltelli_meta is not None:
             (output_root / "saltelli_problem.json").write_text(

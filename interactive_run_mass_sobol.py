@@ -115,6 +115,15 @@ DEST_TO_SECTION: Dict[str, str] = {
     "dtmax_hours_max": "Time (optional override / dimension)",
     "vary_use_dem": "Setup toggles",
     "dem_model": "Setup toggles",
+    "body_source": "Body / encounter",
+    "encounter": "Body / encounter",
+    "flyby_rp_km": "Body / encounter",
+    "flyby_vinf_kms": "Body / encounter",
+    "flyby_start_sep_km": "Body / encounter",
+    "flyby_perturber_earth_masses": "Body / encounter",
+    "settle_tdyn": "Body / encounter",
+    "relax_tdyn": "Body / encounter",
+    "body_cache_dir": "Body / encounter",
     "np_apophis": "Setup toggles",
     "vary_use_shape_crop": "Setup toggles",
     "use_shape_crop_fixed": "Setup toggles",
@@ -302,6 +311,21 @@ INTERACTIVE_BRIEF: Dict[str, tuple[str, str]] = {
         "DEM model: particle (Mia tree DEM, default) or sink (legacy all-pairs sink DEM).",
         "particle or sink; or Enter to keep the current value.",
     ),
+    "body_source": (
+        "Apophis body: lattice (phantomsetup fill, default) or settled (Mia settle -> crop -> relax, cached).",
+        "lattice or settled; or Enter to keep the current value.",
+    ),
+    "encounter": (
+        "Encounter: ephemeris (2029 Horizons, default) or hyperbola (phantomflyby; needs settled body, no spin).",
+        "ephemeris or hyperbola; or Enter to keep the current value.",
+    ),
+    "flyby_rp_km": ("Hyperbola pericentre distance in km (hyperbola only).", "Float > 0, or Enter."),
+    "flyby_vinf_kms": ("Hyperbola velocity at infinity in km/s (hyperbola only).", "Float > 0, or Enter."),
+    "flyby_start_sep_km": ("Initial Earth-body separation in km (Mia default 4e5).", "Float > 0, or Enter."),
+    "flyby_perturber_earth_masses": ("Perturber mass in Earth masses (default 1).", "Float > 0, or Enter."),
+    "settle_tdyn": ("Settle length in t_dyn = 1/sqrt(G rho) (settled bodies; default 5).", "Float > 0, or Enter."),
+    "relax_tdyn": ("Relax after crop, in t_dyn (Mia: 0.5; 0 skips).", "Float >= 0, or Enter."),
+    "body_cache_dir": ("Settled-body cache dir (default <output-root>/settled_bodies).", "Path, or Enter."),
     "np_apophis_list": (
         "Space-separated list of np_apophis values: one run per value within a single batch "
         "(e.g. '250 500 1000' → run_0001=250, run_0002=500, run_0003=1000). "
