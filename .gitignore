@@ -5,6 +5,9 @@ __pycache__/
 # PHANTOM binaries and build artefacts
 phantom
 phantomsetup
+phantommoddump
+phantomflyby
+phantomanalysis
 bin/
 tq
 *.o

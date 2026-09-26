@@ -39,6 +39,11 @@ setup:
 	cd ${PHANTOMDIR}; make RUNDIR="${PWD}" SETUP=${SETUP} MAXPTMASS=${MAXPTMASS} setup; cd -; cp ${PHANTOMDIR}/bin/phantomsetup .
 moddump:
 	cd ${PHANTOMDIR}; make RUNDIR="${PWD}" SETUP=${SETUP} moddump; cd -; cp ${PHANTOMDIR}/bin/phantommoddump .
+# Mia's DEM toolchain (phantom runs/apophis/Makefile demall): crop moddump, flyby moddump, shape analysis.
+demtools:
+	cd ${PHANTOMDIR}; make RUNDIR="${PWD}" SETUP=${SETUP} MAXPTMASS=${MAXPTMASS} analysis ANALYSIS=analysis_demshape.f90; cd -; cp ${PHANTOMDIR}/bin/phantomanalysis .
+	cd ${PHANTOMDIR}; make RUNDIR="${PWD}" SETUP=${SETUP} MAXPTMASS=${MAXPTMASS} moddump MODFILE="set_shape.f90 moddump_earthflyby.f90"; cd -; cp ${PHANTOMDIR}/bin/phantommoddump ./phantomflyby
+	cd ${PHANTOMDIR}; make RUNDIR="${PWD}" SETUP=${SETUP} MAXPTMASS=${MAXPTMASS} moddump; cd -; cp ${PHANTOMDIR}/bin/phantommoddump .
 analysis:
 	cd ${PHANTOMDIR}; make RUNDIR="${PWD}" SETUP=${SETUP} analysis; cd -; cp ${PHANTOMDIR}/bin/phantomanalysis .
 phantomlib:
