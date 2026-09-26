@@ -93,3 +93,38 @@ def test_frame_without_velocities_is_skipped(tmp_path, monkeypatch):
     monkeypatch.setattr(pdem, "_read_dump", fake)
     groups, _, _ = pdem.apophis_time_groups_from_dumps(run, "sobol")
     assert len(groups) == len(pdem.list_full_dumps(run, "sobol")) - 1
+
+
+def test_ca_parabolic_refinement_beats_raw_sampling():
+    t = np.arange(0.0, 11.0)
+    b, v, t0 = 10.0, 5.0, 5.3
+    apo = np.column_stack([v * (t - t0), np.full_like(t, b), np.zeros_like(t)])
+    te = np.linspace(-1.0, 12.0, 400)
+    earth = np.zeros((te.size, 3))
+    d, tm = pdem.closest_approach_from_series(te, earth, t, apo)
+    raw = np.min(np.linalg.norm(apo, axis=1))
+    assert abs(d - b) < abs(raw - b)
+    assert d == pytest.approx(b, rel=2e-3)
+    assert tm == pytest.approx(t0, abs=0.02)
+
+
+def test_ca_minimum_at_series_edge_is_not_extrapolated():
+    t = np.arange(0.0, 5.0)
+    apo = np.column_stack([10.0 - t, np.ones_like(t), np.zeros_like(t)])
+    te = np.linspace(0.0, 4.0, 50)
+    d, tm = pdem.closest_approach_from_series(te, np.zeros((50, 3)), t, apo)
+    assert tm == pytest.approx(4.0)
+    assert d == pytest.approx(np.hypot(6.0, 1.0))
+
+
+def test_grain_radius_particle_positive():
+    r = pdem.grain_radius_cm_from_dump(FIX / "particle_np300" / "sobol_00000", "particle")
+    assert 1e3 < r < 1e5   # 10 m .. 1 km
+
+
+@needs_sink_fixture
+def test_grain_radius_particle_and_sink_agree():
+    rp = pdem.grain_radius_cm_from_dump(FIX / "particle_np300" / "sobol_00000", "particle")
+    rs = pdem.grain_radius_cm_from_dump(SINK_FIX / "sobol_00000", "sink")
+    assert 1e3 < rs < 1e5
+    assert rp == pytest.approx(rs, rel=0.15)

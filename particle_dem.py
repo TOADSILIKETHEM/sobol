@@ -103,3 +103,58 @@ def apophis_time_groups_from_dumps(
         time_of_key[key] = t
         n_max = max(n_max, len(arr))
     return groups, time_of_key, n_max
+
+
+def closest_approach_from_series(t_earth, xyz_earth, t_apo, xyz_apo) -> Tuple[float, float]:
+    """Min Earth–Apophis distance with Earth interpolated to Apophis sample times.
+
+    Apophis CoM exists only at dump times, so the raw minimum is refined by a
+    parabola through the three samples around it (interior minima only).
+    Returns ``(d_min, t_min)`` in code units.
+    """
+    te = np.asarray(t_earth, float)
+    order = np.argsort(te)
+    te = te[order]
+    xe = np.asarray(xyz_earth, float)[order]
+    ta = np.asarray(t_apo, float)
+    xa = np.asarray(xyz_apo, float)
+    inside = (ta >= te[0]) & (ta <= te[-1])
+    ta, xa = ta[inside], xa[inside]
+    if ta.size == 0:
+        raise RuntimeError("No Apophis samples inside the Earth .ev time range")
+    earth_at = np.column_stack([np.interp(ta, te, xe[:, k]) for k in range(3)])
+    d = np.linalg.norm(xa - earth_at, axis=1)
+    i = int(np.argmin(d))
+    d_min, t_min = float(d[i]), float(ta[i])
+    if 0 < i < d.size - 1:
+        t0, t1, t2 = ta[i - 1:i + 2]
+        d0, d1, d2 = d[i - 1:i + 2]
+        den = (t0 - t1) * (t0 - t2) * (t1 - t2)
+        a = (t2 * (d1 - d0) + t1 * (d0 - d2) + t0 * (d2 - d1)) / den
+        b = (t2 * t2 * (d0 - d1) + t1 * t1 * (d2 - d0) + t0 * t0 * (d1 - d2)) / den
+        if a > 0.0:
+            tv = -b / (2.0 * a)
+            if t0 <= tv <= t2:
+                c = d1 - a * t1 * t1 - b * t1
+                dv = a * tv * tv + b * tv + c
+                if dv < d_min:
+                    d_min, t_min = float(dv), float(tv)
+    return d_min, t_min
+
+
+def grain_radius_cm_from_dump(dump: Path, model: str) -> float:
+    """Median DEM grain radius in cm: particle R = h (Mia fbc0e4e63); sink R = Reff."""
+    sdf, sinks = _read_dump(Path(dump))
+    udist = float(sdf.params.get("udist", 1.0))
+    if model == "particle":
+        h = sdf["h"].to_numpy()
+        return float(np.median(h[h > 0])) * udist
+    if model == "sink":
+        if sinks is None or "Reff" not in sinks.columns:
+            raise RuntimeError(f"{dump}: no sink Reff column")
+        reff = sinks["Reff"].to_numpy()
+        reff = reff[reff > 0]
+        if reff.size == 0:
+            raise RuntimeError(f"{dump}: no DEM grain sinks (Reff > 0)")
+        return float(np.median(reff)) * udist
+    raise ValueError(f"model must be 'particle' or 'sink', got {model!r}")
