@@ -18,6 +18,7 @@ phantom_version
 sobol_mass_runs/
 *.dump
 *.ev
+!tests/fixtures/particle_np300/*.ev
 *.tmp
 *.dmp
 

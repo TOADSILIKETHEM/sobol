@@ -17,7 +17,7 @@ Output per batch: `sobol_mass_samples.csv` (input parameters), `sobol_mass_outpu
 ### Sweep runner features (May 2026)
 
 - **Incremental CSV:** After each run completes, `sobol_mass_outputs.csv` is rewritten (`--jobs 1` and `--jobs > 1`). Mid-batch WSL kills retain finished rows.
-- **`--no-cleanup`:** Default deletes binary dumps, `.ev`, and `phantom.log` after metrics extraction. Pass `--no-cleanup` to keep files for Blender / `sarracen`.
+- **`--no-cleanup`:** Default deletes binary dumps, `.ev`, and `phantom.log` after metrics extraction. Pass `--no-cleanup` to keep files for Blender / `sarracen`. **Cleanup is default ON everywhere**: runner, torque-align reruns, and `tui_sim_render.py` (raw dumps deleted once npz convert is verified; tick `keep_dumps` to keep).
 - **Parallelism on dev laptop (i7-12650H, WSL2):** 6 P-cores + 4 E-cores, 16 logical CPUs. **`--jobs 2`** with `OMP_NUM_THREADS=1` is the recommended sweet spot (~2× throughput, avoids thermal throttling seen at 3–4 jobs). Optional: `OMP_NUM_THREADS=2` with `--jobs 2` (4 threads total) for modest extra gain. Do not default to `--jobs 4` on this machine.
 
 ## Architecture: interactive wizard
@@ -74,7 +74,7 @@ Dry run (prepares directories and patched `.setup` files, does not execute PHANT
 python3 sobol/run_mass_sobol_phantom.py --dry-run [other flags]
 ```
 
-Torque-align Blender re-runs (two cases, dumps kept; add `--use-shape-crop` for OBJ):
+Torque-align re-runs: `run_torque_align_blender_reruns.py` cleans up after metrics by default (`--no-cleanup` keeps dumps). These campaign wrappers pass `--no-cleanup` (Blender needs dumps; add `--use-shape-crop` for OBJ):
 ```bash
 bash sobol/campaigns/run_torque_align_blender_vis.sh
 bash sobol/campaigns/run_torque_align_blender_vis_obj.sh

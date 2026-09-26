@@ -13,7 +13,7 @@ mkdir -p sobol_mass_runs
 
 echo "[INFO] Starting torque_align_obj_fine_dt_p155_np1000 at $(date -Is)" | tee -a "$LOG"
 
-python3 sobol/run_torque_align_blender_reruns.py \
+python3 sobol/run_torque_align_blender_reruns.py --no-cleanup \
   --use-shape-crop \
   --case opposite \
   --spin-period 1.55 \

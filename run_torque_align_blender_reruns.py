@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Re-run the two torque-align extremes (near +h and near -h) with dumps kept for Blender."""
+"""Re-run the two torque-align extremes (near +h and near -h).
+
+Heavy outputs (dumps, .ev, phantom.log) are deleted after metrics by default;
+pass --no-cleanup to keep them for Blender.
+"""
 
 from __future__ import annotations
 
@@ -17,6 +21,7 @@ if str(_REPO / "sobol") not in sys.path:
 from run_mass_sobol_phantom import (  # noqa: E402
     RunRecord,
     RunSample,
+    _cleanup_run_dir,
     preflight,
     resolve_default_shape_file,
     run_one_case,
@@ -92,6 +97,12 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="N",
         help=f"Number of DEM particles (default: {NP_APOPHIS}).",
     )
+    p.add_argument(
+        "--no-cleanup",
+        action="store_true",
+        dest="no_cleanup",
+        help="Keep dumps, .ev files and phantom.log (needed for Blender). Default: delete after metrics.",
+    )
     return p
 
 
@@ -103,8 +114,8 @@ def _select_cases(which: str) -> Tuple[Tuple[str, float], ...]:
     return (CASES[1],)
 
 
-def main() -> int:
-    args = build_parser().parse_args()
+def main(argv: Optional[List[str]] = None) -> int:
+    args = build_parser().parse_args(argv)
     base_dir = args.base_dir.resolve()
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_root = args.output_root.resolve() / f"sobol_{timestamp}_{args.batch_label}"
@@ -172,7 +183,8 @@ def main() -> int:
     results: List[RunRecord] = []
     n_cases = len(cases)
     for run_id, (label, _deg) in enumerate(cases, start=1):
-        print(f"[INFO] Run {run_id}/{n_cases} ({label}) — no post-run cleanup (dumps kept)", flush=True)
+        keep = "no post-run cleanup (dumps kept)" if args.no_cleanup else "cleanup after metrics"
+        print(f"[INFO] Run {run_id}/{n_cases} ({label}) — {keep}", flush=True)
         # run_one_case uses --maxp=4000 when use_shape_crop (mesh lattice >2000 sites).
         rec = run_one_case(
             run_id=run_id,
@@ -193,8 +205,11 @@ def main() -> int:
         results.append(rec)
         print(f"[INFO]   status={rec.status} run_dir={rec.run_dir}", flush=True)
         if rec.status == "ok" and not args.dry_run:
-            n_dumps = len(list(Path(rec.run_dir).glob(f"{args.prefix}_*")))
-            print(f"[INFO]   kept {n_dumps} binary dump file(s) for Blender", flush=True)
+            if args.no_cleanup:
+                n_dumps = len(list(Path(rec.run_dir).glob(f"{args.prefix}_*")))
+                print(f"[INFO]   kept {n_dumps} binary dump file(s) for Blender", flush=True)
+            else:
+                _cleanup_run_dir(Path(rec.run_dir), args.prefix)
 
     write_summary_csv(output_root / "sobol_mass_outputs.csv", results, col_order)
     manifest = output_root / "README_blender.txt"
@@ -207,7 +222,9 @@ def main() -> int:
                 + (f", shape_file = {shape_path.name}" if shape_path else ""),
                 f"case filter = {args.case}",
                 f"dtmax_hours = {args.dtmax_hours}" if args.dtmax_hours is not None else "dtmax_hours = template (30 min)",
-                "Post-run cleanup disabled — sobol_* dumps and *.ev files are kept.",
+                ("Post-run cleanup disabled (--no-cleanup) — sobol_* dumps and *.ev files are kept."
+                 if args.no_cleanup else
+                 "Post-run cleanup ON — dumps/.ev deleted after metrics; rerun with --no-cleanup for Blender."),
                 "",
                 "run_0001  aligned_near_h   (~11° from +h, intact in original batch)",
                 "run_0002  opposite_near_h  (~177° from +h, breakup in original batch)",

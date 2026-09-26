@@ -29,6 +29,7 @@ from run_mass_sobol_phantom import (  # noqa: E402
     EARTH_SINK_ID_DEFAULT,
     APOPHIS_SINK_ID_DEFAULT,
     DEFAULT_DN_COHES_FACTOR,
+    _cleanup_run_dir,
     preflight,
     run_one_case,
     sanitize_batch_label,
@@ -166,6 +167,8 @@ class SimParams:
     apophis_sink_id: int = APOPHIS_SINK_ID_DEFAULT
     shape_file: Optional[str] = None
     sample: RunSample = field(default_factory=RunSample)
+    # False = delete raw dumps/.ev/phantom.log once convert is verified (npz exist)
+    keep_dumps: bool = False
 
 
 @dataclass
@@ -617,6 +620,10 @@ def run_pipeline(
             ),
             record=record,
         )
+    if not sim_params.keep_dumps:
+        # renders read the converted npz/CSV, never the raw dumps
+        _cleanup_run_dir(run_dir, sim_params.prefix)
+
     n_expected_frames = n_npz
     if render_form.max_frames is not None:
         n_expected_frames = min(n_npz, render_form.max_frames)
@@ -770,6 +777,11 @@ class SimRenderTUIApp(App[None]):
                 Input("", id="shape-file", placeholder="(none — no shape crop)"),
                 "optional path",
             )
+            yield _Row(
+                "keep_dumps",
+                Checkbox("keep raw dumps + .ev after convert", value=False, id="keep-dumps"),
+                "default: delete",
+            )
 
             yield Static("Render", classes="sec")
             yield _Row("resolution", Input("1920x1080", id="resolution"), "WxH")
@@ -894,6 +906,7 @@ class SimRenderTUIApp(App[None]):
             apophis_sink_id=int(self._iv("sink-apophis")),
             shape_file=shape_file_raw or None,
             sample=sample,
+            keep_dumps=self.query_one("#keep-dumps", Checkbox).value,
         )
 
     def _build_render_form(self) -> RenderFormValues:

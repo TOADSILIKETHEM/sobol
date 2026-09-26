@@ -12,7 +12,7 @@ mkdir -p sobol_mass_runs
 
 echo "[INFO] Starting torque_align_obj_breakup_fine_dt at $(date -Is)" | tee -a "$LOG"
 
-python3 sobol/run_torque_align_blender_reruns.py \
+python3 sobol/run_torque_align_blender_reruns.py --no-cleanup \
   --use-shape-crop \
   --case opposite \
   --dtmax-hours "$(python3 -c 'print(5/60)')" \

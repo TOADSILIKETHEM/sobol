@@ -279,3 +279,37 @@ def test_ca_straight_line_flyby_is_exact_at_dump_cadence():
     d, tm = pdem.closest_approach_from_series(te, np.zeros((te.size, 3)), t, apo)
     assert abs(d - b) < 1.0                     # km
     assert tm == pytest.approx(t0, abs=1.0)
+
+
+# --- cleanup default on --------------------------------------------------------
+
+def _fake_run_dir(run_dir):
+    run_dir.mkdir(parents=True, exist_ok=True)
+    for name in ("sobol_00000", "sobol_00001", "sobolSink0012N01.ev", "sobol01.ev", "phantom.log",
+                 "sobol.setup", "sobol.in", "setup.log"):
+        (run_dir / name).write_text("x")
+
+
+def test_torque_reruns_cleanup_default_on():
+    import run_torque_align_blender_reruns as tr
+    assert tr.build_parser().parse_args([]).no_cleanup is False
+    assert tr.build_parser().parse_args(["--no-cleanup"]).no_cleanup is True
+
+
+@pytest.mark.parametrize("flags,kept", [([], False), (["--no-cleanup"], True)])
+def test_torque_reruns_cleans_ok_runs_unless_no_cleanup(tmp_path, monkeypatch, flags, kept):
+    import run_torque_align_blender_reruns as tr
+    monkeypatch.setattr(tr, "preflight", lambda *a, **k: (None, None, None, None))
+
+    def fake_run_one_case(*, run_id, output_root, **kw):
+        run_dir = output_root / f"run_{run_id:04d}"
+        _fake_run_dir(run_dir)
+        return tr.RunRecord(run_id=run_id, mass_input_kg=float("nan"), run_dir=str(run_dir),
+                            status="ok", closest_approach_km=1.0, closest_approach_au=0.01, error="")
+    monkeypatch.setattr(tr, "run_one_case", fake_run_one_case)
+
+    assert tr.main(["--output-root", str(tmp_path), "--batch-label", "t", "--case", "aligned"] + flags) == 0
+    run_dir = next(tmp_path.glob("sobol_*_t")) / "run_0001"
+    assert (run_dir / "sobol_00000").exists() is kept
+    assert (run_dir / "sobolSink0012N01.ev").exists() is kept
+    assert (run_dir / "sobol.setup").exists() and (run_dir / "sobol.in").exists()
