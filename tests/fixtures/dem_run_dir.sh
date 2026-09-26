@@ -23,7 +23,7 @@ cat > sobol.setup <<EOF
                epoch =  2029-04-10
              use_dem =  $use_dem
     use_dem_as_sinks =  $use_sinks
-        apophis_only =           F
+        apophis_only =  ${APOPHIS_ONLY:-F}
       add_mars_moons =           F
            scale_vel =       1.000
            scale_pos =       1.000

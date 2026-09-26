@@ -2921,6 +2921,12 @@ def compute_run_metrics(
     # Read Apophis grains once (sink .ev files or particle dumps) and share across metrics.
     _groups, _time_of_key, _n_sinks, _model = _load_apophis_groups(run_dir, prefix, apophis_sink_id)
     _apophis_only = skip_closest_approach(sample)
+    if sample.use_dem is True and _model == "particle" and _n_sinks == 0:
+        # a pre-merge phantomsetup ignores use_dem_as_sinks/mass_apophis and builds sink DEM
+        raise RuntimeError(
+            f"particle DEM run has no DEM grains in dumps ({run_dir}); "
+            "check `strings sobol/phantomsetup | grep use_dem_as_sinks` (rebuild from DEMsync-mia)"
+        )
 
     nan = float("nan")
     dispersion_ratio = unbound_fraction = nan

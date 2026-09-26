@@ -1,4 +1,6 @@
 import re
+
+import numpy as np
 import sys
 from pathlib import Path
 
@@ -234,3 +236,46 @@ def test_torque_reruns_parser_has_dem_model():
     import run_torque_align_blender_reruns as tr
     assert tr.build_parser().parse_args([]).dem_model == "particle"
     assert tr.build_parser().parse_args(["--dem-model", "sink"]).dem_model == "sink"
+
+
+# --- final-review fixes -------------------------------------------------------
+
+def test_resume_refuses_dem_model_mismatch(tmp_path):
+    import resume_batch as rb
+    run = tmp_path / "run_0001"
+    run.mkdir()
+    (run / "sobol.setup").write_text(" np_apophis = 500\n use_dem = T\n")  # pre-merge = sink
+    with pytest.raises(RuntimeError, match="dem-model"):
+        rb.check_resume_dem_model(tmp_path, "sobol", "particle")
+    rb.check_resume_dem_model(tmp_path, "sobol", "sink")  # matching model is fine
+
+
+def test_particle_run_with_no_grains_raises(tmp_path):
+    # stale pre-merge binary ignores use_dem_as_sinks and builds sink DEM: no idem grains in dumps
+    (tmp_path / "sobol.setup").write_text(" np_apophis = 300\n use_dem = T\n use_dem_as_sinks = F\n")
+    s = RunSample(use_dem=True, dem_model="particle", np_apophis=300, apophis_only=False)
+    with pytest.raises(RuntimeError, match="no DEM grains"):
+        runner.compute_run_metrics(tmp_path, "sobol", s, runner.EARTH_SINK_ID_DEFAULT,
+                                   runner.APOPHIS_SINK_ID_DEFAULT)
+
+
+def test_grain_radius_raises_when_no_particles(tmp_path, monkeypatch):
+    import pandas as pd
+    import particle_dem as pdem
+    empty = pd.DataFrame({"h": np.array([], dtype=float)})
+    empty.params = {"udist": 1e5}
+    monkeypatch.setattr(pdem, "_read_dump", lambda p: (empty, None))
+    with pytest.raises(RuntimeError, match="no DEM grain particles"):
+        pdem.grain_radius_cm_from_dump(tmp_path / "x", "particle")
+
+
+def test_ca_straight_line_flyby_is_exact_at_dump_cadence():
+    import particle_dem as pdem
+    b, v, dt = 38000.0, 7.4, 1800.0            # km, km/s, 30-min dumps
+    t0 = 10.37 * dt                             # CA between dumps
+    t = np.arange(0.0, 20.0) * dt
+    apo = np.column_stack([v * (t - t0), np.full_like(t, b), np.zeros_like(t)])
+    te = np.linspace(-dt, 21 * dt, 2000)
+    d, tm = pdem.closest_approach_from_series(te, np.zeros((te.size, 3)), t, apo)
+    assert abs(d - b) < 1.0                     # km
+    assert tm == pytest.approx(t0, abs=1.0)

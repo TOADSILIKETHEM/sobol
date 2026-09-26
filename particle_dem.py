@@ -109,7 +109,8 @@ def closest_approach_from_series(t_earth, xyz_earth, t_apo, xyz_apo) -> Tuple[fl
     """Min Earth–Apophis distance with Earth interpolated to Apophis sample times.
 
     Apophis CoM exists only at dump times, so the raw minimum is refined by a
-    parabola through the three samples around it (interior minima only).
+    parabola in d**2 through the three samples around it (interior minima only);
+    d**2 is exactly quadratic in t for straight-line relative motion, d is not.
     Returns ``(d_min, t_min)`` in code units.
     """
     te = np.asarray(t_earth, float)
@@ -128,7 +129,7 @@ def closest_approach_from_series(t_earth, xyz_earth, t_apo, xyz_apo) -> Tuple[fl
     d_min, t_min = float(d[i]), float(ta[i])
     if 0 < i < d.size - 1:
         t0, t1, t2 = ta[i - 1:i + 2]
-        d0, d1, d2 = d[i - 1:i + 2]
+        d0, d1, d2 = d[i - 1:i + 2] ** 2
         den = (t0 - t1) * (t0 - t2) * (t1 - t2)
         a = (t2 * (d1 - d0) + t1 * (d0 - d2) + t0 * (d2 - d1)) / den
         b = (t2 * t2 * (d0 - d1) + t1 * t1 * (d2 - d0) + t0 * t0 * (d1 - d2)) / den
@@ -136,7 +137,7 @@ def closest_approach_from_series(t_earth, xyz_earth, t_apo, xyz_apo) -> Tuple[fl
             tv = -b / (2.0 * a)
             if t0 <= tv <= t2:
                 c = d1 - a * t1 * t1 - b * t1
-                dv = a * tv * tv + b * tv + c
+                dv = np.sqrt(max(a * tv * tv + b * tv + c, 0.0))
                 if dv < d_min:
                     d_min, t_min = float(dv), float(tv)
     return d_min, t_min
@@ -148,7 +149,10 @@ def grain_radius_cm_from_dump(dump: Path, model: str) -> float:
     udist = float(sdf.params.get("udist", 1.0))
     if model == "particle":
         h = sdf["h"].to_numpy()
-        return float(np.median(h[h > 0])) * udist
+        h = h[h > 0]
+        if h.size == 0:
+            raise RuntimeError(f"{dump}: no DEM grain particles (stale pre-merge phantomsetup?)")
+        return float(np.median(h)) * udist
     if model == "sink":
         if sinks is None or "Reff" not in sinks.columns:
             raise RuntimeError(f"{dump}: no sink Reff column")

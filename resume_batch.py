@@ -33,6 +33,7 @@ from sobol.run_mass_sobol_phantom import (  # noqa: E402
     RunWorkerPayload,
     _active_scale_variations,
     _apply_fixed_run_sample_overrides,
+    _particle_dem_module,
     _cleanup_run_dir,
     _execute_run_worker,
     _mass_bounds_active,
@@ -90,6 +91,20 @@ def _load_records(summary_csv: Path, col_order: List[str]) -> List[RunRecord]:
                 )
             )
     return records
+
+
+def check_resume_dem_model(batch_dir: Path, prefix: str, dem_model: str) -> None:
+    """Refuse to mix DEM models in one batch (pre-merge batches are sink DEM)."""
+    pdem = _particle_dem_module()
+    for setup in sorted(batch_dir.glob(f"run_*/{prefix}.setup")):
+        existing = pdem.dem_model_from_setup(setup)
+        if existing in ("particle", "sink") and existing != dem_model:
+            raise RuntimeError(
+                f"{batch_dir.name} was run with the {existing} DEM model but --dem-model is "
+                f"{dem_model}; pass --dem-model {existing} (pre-merge sink batches also need "
+                "--phantom-dir sobol/bin_demsync_7a243de and their original Shapes/apophis.shape)"
+            )
+        return
 
 
 def _load_samples_for_resume(
@@ -161,7 +176,8 @@ def main() -> int:
     args = parser.parse_args(remainder)
     try:
         validate_args(args)
-    except (ValueError, SystemExit) as exc:
+        check_resume_dem_model(batch_dir, args.prefix, args.dem_model)
+    except (ValueError, RuntimeError, SystemExit) as exc:
         print(f"[ERROR] {exc}", file=sys.stderr)
         return 1
 
