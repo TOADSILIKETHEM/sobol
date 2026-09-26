@@ -36,61 +36,17 @@ Output per batch: `sobol_mass_samples.csv` (input parameters), `sobol_mass_outpu
 
 Runs the shared wizard once, then for each requested particle count: stages a temp `--base-dir` with `np_apophis` patched in the `.setup` copy, and invokes `run_mass_sobol_phantom.py` as a subprocess. Does **not** re-patch `use_dem` in staging (manage that via wizard flags). Pass `--dem-np N1 N2 ...` before other flags to skip the interactive particle-count prompt.
 
-## Architecture: sim + render pipeline TUI
+## Sim + render pipeline TUI (summary)
 
-Parent: `../CLAUDE.md`. Shared facts: `../docs/SHARED_FACTS.md`. Merge/rename caveats: `../docs/CONTEXT_CHANGELOG.md`.
+`tui_sim_render.py`: **one** DEM run per launch, configure → PHANTOM (`run_one_case`) → convert (`run_demtocsv_batch`) → headless Blender, any mix of render paths `per_sphere`, `composite`, `instance_grains`, `instance_static` (a failed path doesn't stop the rest; result `done` or `partial`). Sweep TUI is `tui_run.py`. Code in WSL `CODE_DIR=/home/mboyle/Honours/Code`; outputs in OneDrive `DATA_DIR/DEMCSVs/<batch>/run_0001_*`. Keep `prefix = sobol` (converter hardcodes `sobol_[0-9]*`). **Set `ephemeris_cache_dir` = `/home/mboyle/Honours/sobol`** — blank triggers a live Horizons download. No mid-run cancel (quitting leaves PHANTOM/Blender running).
 
-`sobol/tui_sim_render.py` is a Textual TUI that takes **one** DEM run from configure → PHANTOM → dump conversion → headless per-sphere Blender render, with no manual steps. It handles one run per launch, not a sweep; `tui_run.py` is the sweep TUI. Windows render-script how-to: `Code/CLAUDE.md`.
-
-**Stages.** `run_pipeline()` calls each stage in order in one worker thread and stops at the first failure. Each stage reuses existing code:
-1. **Sim.** `run_sim_stage()` calls `preflight()` and `run_one_case(run_id=1, ...)` from `run_mass_sobol_phantom.py`. That means DEM `nfulldump=1`, ephemeris copy, and metrics extraction all behave exactly as in a sweep. Any `record.status != "ok"` stops the pipeline; `prepared_only` is reported as a dry-run success.
-2. **Convert.** `run_convert_stage()` calls `Analysis/run_demtocsv_batch.run_dem_dump_convert()` with `min_dem_grains` read automatically from the run's `sobol.setup`, writing Windows `DEMCSVs/<batch>/run_0001_{bodies,grains}_output/`. `DEMDumpConvert.py` never raises on bad or missing dumps, so the pipeline then counts `*.npz` and fails at `convert` if there are 0. The converter hardcodes the `sobol_[0-9]*` dump prefix, so keep `prefix = sobol`.
-3. **Render.** `run_render_stage()` runs Windows `blender.exe` through `/mnt/c` interop: `--background --python C:/.../Code/BlenderConvert/DEMHeadlessRender.py -- --grains-dir … --bodies-dir … --output-dir … --resolution --samples --fps --camera-mode [--max-frames] [--encode-video] [--video-fps]`. Paths are converted with `to_windows_path()`. `DEMHeadlessRender.py` text-patches and `exec()`s `DEMGrainsBlenderEarthCam.py`, assigns World `Deep Dark Space with Stars.001` (repo HDRI, same as `Apophisonly.blend`; see Windows `Code/CLAUDE.md`), enables Cycles **OPTIX** (else CUDA) GPU-only via `setup_cycles_gpu()` (raises if no GPU), and exits 1 on any exception. On a non-zero exit the TUI raises `RenderError` carrying the last 40 lines of stdout+stderr.
-   - **Video encode (optional, off by default).** When `render_form.encode_video` is set, `RenderParams`/`build_render_command()` append `--encode-video` (and `--video-fps N` if given — otherwise `DEMHeadlessRender.py` falls back to `--fps`). `DEMHeadlessRender.py`'s `encode_video()` combines the just-rendered `frame_*.png` sequence into `run_0001_render/animation.mp4` (H264, via Blender's own VSE-scripted ffmpeg — see Windows `Code/CLAUDE.md`), raising if the on-disk frame count doesn't match what was rendered. `run_pipeline()`'s success message reports the mp4 path, or flags it as missing if requested but not found.
-
-**Output layout.** Each launch creates `<output_root>/<prefix>_<YYYYmmdd_HHMMSS>_<batch_label>/run_0001/`; the label defaults to `sim_render` and is sanitised with `sanitize_batch_label()`. Converted data and the PNGs land at Windows `Code/DEMCSVs/<that batch name>/run_0001_{grains_output,bodies_output,render}/`, with frames at `run_0001_render/frame_####.png` and, if `--encode-video` was passed, `run_0001_render/animation.mp4`.
-
-**Form.** Everything is on a single screen, with **Run Pipeline**, **Dry Run** and **Quit** buttons.
-- **Paths:**
-  - `prefix` (`sobol`) and `batch_label`.
-  - `base_dir`, which defaults to `sobol/`.
-  - `phantom_dir`, which defaults to `PHANTOM_DIR` if set, else `sobol/`.
-  - `output_root`, which defaults to `Honours/sobol_mass_runs`. These defaults are computed from `__file__`, so they are the same whatever directory you launch from.
-  - `ephemeris_cache_dir`. Set it to `/home/mboyle/Honours/sobol`. Its placeholder text is misleading: leaving it **blank means PHANTOM attempts a live Horizons download**, because no `*.txt` files get copied.
-- **Sim:**
-  - `np_apophis` (default 500).
-  - `spin_period (hr)` and `spin_torque_align (deg)`.
-  - `kt_cgs`: blank keeps the template value; `0` writes 0.
-  - `dn_cohes_factor` (0.1). It is converted with `coh_gap_max_cgs_from_dn()`, but only when `kt_cgs > 0`.
-  - `tmax`/`dtmax (hr)`.
-  - `sink_earth_id` (4) and `sink_apophis_id` (11).
-  - `shape_file`: a non-blank value turns on `use_shape_crop`.
-  - `use_dem` is hardcoded to `T`, because the convert and render stages need DEM grains.
-- **Render:**
-  - `resolution` (1920x1080), `samples` (500), `fps` (24).
-  - `max_frames` (blank means all).
-  - `camera_mode` (`auto` | `grain_only`, which patches `CAMERA_MODE`).
-  - `encode_video` checkbox (off by default) + `video_fps` (blank = same as `fps`) — optional final MP4-encode stage.
-  - Render fields are validated when you click, before the sim starts.
-
-**Behaviour.**
-- At startup it checks `blender.exe` exists at `/mnt/c/Program Files/Blender Foundation/Blender 5.2/blender.exe`.
-- The status bar updates about every 2 s. During sim it counts `<prefix>_[0-9]*` dump files (`Running sim...`). When PHANTOM exits it flips to `Converting... N/M npz`, then `Rendering... N/M frame(s)` (`frame_*.png` under the Windows render dir). The last dump count no longer freezes the bar.
-- The final status is one of: `[Ns] Done (done): converted N frame(s); rendered M frame(s) to …`, `Failed at sim|convert|render: …`, or `Failed at error: <Type>: …` for an unexpected exception.
-- Only one pipeline can run at a time: the buttons are disabled and a second launch is refused.
-- `np_apophis > 2000` prepends a non-blocking warning, because the per-sphere path is meant for ≤~2000 grains.
-
-**Limits (v1).**
-- No mid-run cancel. Quitting mid-run leaves PHANTOM or Blender child processes running.
-- No streamed Blender log.
-
-**Tests.** `sobol/tests/test_tui_sim_render.py` mocks PHANTOM, the converter and Blender, and includes Textual pilot tests run via `asyncio.run` (no pytest-asyncio needed). `sobol/tests/test_dem_headless_world.py` checks the TUI World HDRI (including a blender.exe smoke). `sobol/tests/test_dem_headless_gpu.py` checks Cycles OPTIX/CUDA GPU-only (CPU hybrid off). `sobol/tests/test_dem_headless_video.py` checks the optional `--encode-video`/`encode_video()` stage (arg parsing, frame-count-mismatch guard, and a blender.exe smoke that encodes 2 dummy frames to mp4). A real sim→render run through the UI is still to be verified by hand.
+Form fields, stages, status strings, output layout, limits, tests: `docs/tui_sim_render.md`.
 
 ## Key commands
 
 Install Python dependencies (run once, from repo root):
 ```bash
-pip install -r sobol/requirements.txt   # numpy, scipy (multi-d Sobol), SALib (Saltelli)
+pip install --user --break-system-packages -r sobol/requirements.txt   # numpy, scipy, SALib, textual, matplotlib, pytest (Ubuntu 24.04: PEP 668 needs these flags)
 ```
 
 Run a sweep (from repo root):
@@ -100,7 +56,7 @@ python3 sobol/run_mass_sobol_phantom.py \
   --num-samples 50 \
   --mass-min-kg 1e10 --mass-max-kg 1e11 \
   --scale-vel-min 0.9 --scale-vel-max 1.1 \
-  --jobs 4
+  --jobs 2          # with OMP_NUM_THREADS=1; not 4 on this laptop
 ```
 
 Interactive mode (prompts for all parameters; CLI flags set defaults):
@@ -136,7 +92,8 @@ Single run end-to-end: sim → convert → headless Blender render (Textual TUI,
 cd /home/mboyle/Honours && python3 sobol/tui_sim_render.py
 # quick real test: np_apophis 500, tmax 1, dtmax 0.5, ephemeris_cache_dir /home/mboyle/Honours/sobol,
 #                  resolution 640x360, samples 16, max_frames 2  (Dry Run first)
-cd sobol && python3 -m pytest tests/test_tui_sim_render.py   # 51 mocked tests
+# all four paths: tick every render path box, max_frames 3 → four run_0001_render_<path>/ folders
+cd sobol && python3 -m pytest tests   # full suite (TUI tests mocked; headless tests launch blender.exe)
 ```
 
 Sensitivity analysis — classic (correlation stats from a completed sweep):
@@ -188,4 +145,3 @@ python3 sobol/Analysis/plot_spin_disruption_threshold.py
 
 - `sobol/run_mass_sobol_phantomThisWorks.py` — snapshot kept as a reference; keep in sync with `run_mass_sobol_phantom.py` if changing behavior.
 - `sobol/run_mass_sobol_phantomGIT.py` — another variant; treat similarly.
-- `solarsystem/run_mass_sobol_phantom.py` — independent runner for the solarsystem setup; different CLI/behavior from the sobol one.

@@ -51,7 +51,7 @@ Example metrics (`sobol_mass_outputs.csv`):
 
 ## Blender pipeline
 
-1. Convert dumps (WSL): `sobol/Analysis/run_demtocsv_batch.py` → `Code/DEMCSVs/torque_align_obj/run_0001_*` and `run_0002_*`.
-2. Blender: `Code/BlenderConvert/DEMGrainsBlender.py` — set `GRAINS_CSV_DIR` / `BODIES_CSV_DIR` to the chosen `run_XXXX_*_output` folder.
+1. Convert dumps (WSL): `sobol/Analysis/run_demtocsv_batch.py` → `Code/DEMCSVs/torque_align_obj/run_0001_*` and `run_0002_*` (bodies CSV + grains `.npz`). These folders were first converted to CSV grains and upgraded to `.npz` on 2026-09-13 with Windows `CSVconvert/grains_csv_to_npz.py`, because the dumps are gone.
+2. Blender: `Code/BlenderConvert/DEMGrainsBlenderEarthCam.py` (or `DEMGrainsBlenderEarth.py` + `DEMCamera.py`) — set `GRAINS_CSV_DIR` / `BODIES_CSV_DIR` to the chosen `run_XXXX_*_output` folder (variable names kept from the CSV era; grains are read as `.npz`).
 
-Full commands: `CLAUDE.md` § *Windows post-processing and visualisation*.
+Full commands: `CLAUDE.md` § *Windows handoff* and Windows `Code/CLAUDE.md`.

@@ -65,4 +65,4 @@ From this batch, Sobol runs **4** and **19** are re-run for visualization (near 
 | `sobol/campaigns/run_torque_align_blender_vis.sh` | Sphere | `torque_align_blender_vis` |
 | `sobol/campaigns/run_torque_align_blender_vis_obj.sh` | OBJ (`--use-shape-crop`) | `torque_align_blender_vis_obj` |
 
-See `sobol/run_torque_align_blender_reruns.py` and `sobol/campaigns/torque_align_blender_vis_obj.md`. Blender CSV handoff: `CLAUDE.md` § *Windows post-processing and visualisation*.
+See `sobol/run_torque_align_blender_reruns.py` and `sobol/campaigns/torque_align_blender_vis_obj.md`. Blender handoff (bodies CSV + grains `.npz`): `CLAUDE.md` § *Windows handoff*.

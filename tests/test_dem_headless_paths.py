@@ -7,14 +7,15 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-CODE = Path("/mnt/c/Users/22boy/OneDrive/Documents/GC-Max_desktop/Honours/Code")
-CODE_WIN = "C:/Users/22boy/OneDrive/Documents/GC-Max_desktop/Honours/Code"
+from tests._paths import CODE, CODE_WIN, DATA, DATA_WIN
+
 BLENDERCONVERT = CODE / "BlenderConvert"
+BLENDERCONVERT_WIN = CODE_WIN + r"\BlenderConvert"
 BLENDER_EXE = Path("/mnt/c/Program Files/Blender Foundation/Blender 5.2/blender.exe")
 WIN_TEMP = Path("/mnt/c/Users/22boy/AppData/Local/Temp")
 WIN_TEMP_WIN = "C:/Users/22boy/AppData/Local/Temp"
-FIXTURE_RUN = CODE / "DEMCSVs/_verify_lattice_fix/sobol_20260705_131545_baseline_58deg"
-FIXTURE_RUN_WIN = CODE_WIN + "/DEMCSVs/_verify_lattice_fix/sobol_20260705_131545_baseline_58deg"
+FIXTURE_RUN = DATA / "DEMCSVs/_verify_lattice_fix/sobol_20260705_131545_baseline_58deg"
+FIXTURE_RUN_WIN = DATA_WIN + "/DEMCSVs/_verify_lattice_fix/sobol_20260705_131545_baseline_58deg"
 
 sys.path.insert(0, str(BLENDERCONVERT))
 import DEMHeadlessRender as dhr  # noqa: E402
@@ -177,7 +178,7 @@ def run_recorded_render(name, obj_name, dhr_args):
     rec_path_win = f"{WIN_TEMP_WIN}/dhr_{name}_records.json"
     script = WIN_TEMP / f"dhr_{name}_recorder.py"
     script.write_text(
-        _RECORDER.format(bc=CODE_WIN + "/BlenderConvert", obj=obj_name, out=rec_path_win),
+        _RECORDER.format(bc=BLENDERCONVERT_WIN, obj=obj_name, out=rec_path_win),
         encoding="utf-8",
     )
     result = subprocess.run(
@@ -258,7 +259,7 @@ def test_blender_build_point_cloud_writes_given_radii():
     script.write_text(
         "\n".join([
             "import sys, traceback",
-            f"sys.path.insert(0, {CODE_WIN + '/BlenderConvert'!r})",
+            f"sys.path.insert(0, {BLENDERCONVERT_WIN!r})",
             "import bpy, numpy as np",
             "import DEMHeadlessRender as dhr",
             "try:",

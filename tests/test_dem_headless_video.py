@@ -5,12 +5,10 @@ from pathlib import Path
 
 import pytest
 
-BLENDERCONVERT = Path(
-    "/mnt/c/Users/22boy/OneDrive/Documents/GC-Max_desktop/Honours/Code/BlenderConvert"
-)
-BLENDERCONVERT_WIN = (
-    "C:/Users/22boy/OneDrive/Documents/GC-Max_desktop/Honours/Code/BlenderConvert"
-)
+from tests._paths import CODE, CODE_WIN
+
+BLENDERCONVERT = CODE / "BlenderConvert"
+BLENDERCONVERT_WIN = CODE_WIN + r"\BlenderConvert"
 BLENDER_EXE = Path("/mnt/c/Program Files/Blender Foundation/Blender 5.2/blender.exe")
 WIN_TEMP = Path("/mnt/c/Users/22boy/AppData/Local/Temp")
 

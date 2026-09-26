@@ -30,6 +30,26 @@ def test_to_windows_path_passthrough_for_windows_style():
     assert result == "C:/Users/22boy/DEMCSVs/run_0001"
 
 
+def test_to_windows_path_home_to_unc(monkeypatch):
+    monkeypatch.setenv("WSL_DISTRO_NAME", "Ubuntu")
+    result = tsr.to_windows_path(Path("/home/mboyle/Honours/Code/BlenderConvert/DEMHeadlessRender.py"))
+    assert result == r"\\wsl.localhost\Ubuntu\home\mboyle\Honours\Code\BlenderConvert\DEMHeadlessRender.py"
+
+
+def test_to_windows_path_home_with_spaces(monkeypatch):
+    monkeypatch.setenv("WSL_DISTRO_NAME", "Ubuntu")
+    result = tsr.to_windows_path(Path("/home/mboyle/Honours/Code/Data analysis/x.py"))
+    assert result == r"\\wsl.localhost\Ubuntu\home\mboyle\Honours\Code\Data analysis\x.py"
+
+
+def test_code_and_data_dirs_split():
+    assert tsr.CODE_DIR == Path("/home/mboyle/Honours/Code")
+    assert tsr.DATA_DIR == Path("/mnt/c/Users/22boy/OneDrive/Documents/GC-Max_desktop/Honours/Code")
+    assert tsr.DEM_HEADLESS_RENDER.startswith("\\\\wsl.localhost\\")
+    assert tsr.WIN_VENV_PYTHON == tsr.DATA_DIR / ".venv" / "Scripts" / "python.exe"
+    assert tsr.DEFAULT_PLACEHOLDER_OBJ.startswith("C:/Users/22boy/OneDrive/")
+
+
 def test_sim_params_defaults():
     p = tsr.SimParams()
     assert p.prefix == "sobol"
@@ -1104,7 +1124,7 @@ def test_composite_preprocess_command():
     ctx = _mnt_ctx(envelope_method="sdf", max_frames=3)
     cmd = tsr.build_composite_preprocess_command(ctx, ctx.batch_dir / "run_0001_viz")
     assert cmd[0] == str(tsr.WIN_VENV_PYTHON)
-    assert cmd[1] == tsr.to_windows_path(tsr._REPO_WIN_CODE / "viz" / "viz_preprocess.py")
+    assert cmd[1] == tsr.to_windows_path(tsr.CODE_DIR / "viz" / "viz_preprocess.py")
     assert cmd[cmd.index("--grains-dir") + 1] == "C:/DEMCSVs/batch/run_0001_grains_output"
     assert cmd[cmd.index("--bodies-dir") + 1] == "C:/DEMCSVs/batch/run_0001_bodies_output"
     assert cmd[cmd.index("--output-dir") + 1] == "C:/DEMCSVs/batch/run_0001_viz"
@@ -1124,7 +1144,7 @@ def test_instance_grains_preprocess_command():
     cmd = tsr.build_instance_grains_preprocess_command(ctx, ctx.batch_dir / "run_0001_viz_instance")
     assert cmd[0] == str(tsr.WIN_VENV_PYTHON)
     assert cmd[1] == tsr.to_windows_path(
-        tsr._REPO_WIN_CODE / "viz" / "viz_preprocess_grains_instance.py"
+        tsr.CODE_DIR / "viz" / "viz_preprocess_grains_instance.py"
     )
     assert cmd[cmd.index("--output-dir") + 1] == "C:/DEMCSVs/batch/run_0001_viz_instance"
     assert cmd[cmd.index("--max-frames") + 1] == "2"
@@ -1139,7 +1159,7 @@ def test_instance_static_preprocess_command():
     assert cmd[0] == tsr.BLENDER_EXE
     assert cmd[1:6] == [
         "--background", "--python-exit-code", "1", "--python",
-        tsr.to_windows_path(tsr._REPO_WIN_CODE / "viz" / "viz_preprocess_lite.py"),
+        tsr.to_windows_path(tsr.CODE_DIR / "viz" / "viz_preprocess_lite.py"),
     ]
     assert cmd[6] == "--"
     assert cmd[cmd.index("--shape-obj") + 1] == "C:/shapes/a.obj"
@@ -1186,7 +1206,7 @@ def test_run_preprocess_stage_failure_raises_with_tail(monkeypatch, tmp_path):
     monkeypatch.setattr(tsr.subprocess, "run", fake_run)
     with pytest.raises(tsr.PreprocessError, match="qhull boom"):
         tsr.run_preprocess_stage(["python.exe"], tmp_path / "viz")
-    assert captured["cwd"] == str(tsr._REPO_WIN_CODE)
+    assert captured["cwd"] == str(tsr.CODE_DIR)
 
 
 def test_run_preprocess_stage_exit_0_without_manifest_raises(monkeypatch, tmp_path):

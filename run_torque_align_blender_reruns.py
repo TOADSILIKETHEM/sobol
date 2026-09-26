@@ -210,7 +210,7 @@ def main() -> int:
                 "run_0002  opposite_near_h  (~177° from +h, breakup in original batch)",
                 "(When --case opposite only, sole run is run_0001 labelled opposite_near_h.)",
                 "",
-                "Point Windows DEMtoCSV.py / Blender scripts at this directory.",
+                "Point Windows DEMDumpConvert.py / Blender scripts at this directory.",
             ]
         )
         + "\n",

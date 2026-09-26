@@ -54,12 +54,11 @@ except ImportError:
         "(sobol/tui_run.py already depends on it, so it should already be present.)"
     )
 
-# Windows-side Code repo root, reached over the WSL /mnt/c/ interop mount —
-# hardcoded the same way sobol/Analysis/run_demtocsv_batch.py hardcodes
-# DEFAULT_DEM_DUMP_CONVERT / DEFAULT_BASE_OUT, not derived.
-_REPO_WIN_CODE = Path(
-    "/mnt/c/Users/22boy/OneDrive/Documents/GC-Max_desktop/Honours/Code"
-)
+# Code (HonoursWin repo) lives in WSL since 2026-09-25; data and Blender
+# assets stayed in OneDrive (reached over /mnt/c) so OneDrive backs them up.
+# Hardcoded like sobol/Analysis/run_demtocsv_batch.py, not derived.
+CODE_DIR = Path("/home/mboyle/Honours/Code")
+DATA_DIR = Path("/mnt/c/Users/22boy/OneDrive/Documents/GC-Max_desktop/Honours/Code")
 BLENDER_EXE = "/mnt/c/Program Files/Blender Foundation/Blender 5.2/blender.exe"
 
 _MNT_DRIVE_RE = re.compile(r"^/mnt/([a-zA-Z])(/.*)?$")
@@ -67,40 +66,41 @@ _RESOLUTION_RE = re.compile(r"^(\d+)x(\d+)$")
 
 
 def to_windows_path(p: Path) -> str:
-    """WSL /mnt/<drive>/... path -> Windows <DRIVE>:/... path string.
+    """WSL path -> path string a Windows program can open.
 
-    Deliberately simpler than shelling out to `wslpath -w` -- the mount is
-    always /mnt/<single-letter>/... in this environment. Only POSIX-absolute
-    inputs (starting with "/") are resolved first (so relative segments like
-    "/mnt/c/foo/../bar" normalize before the drive-letter swap); a string
-    that doesn't start with "/" -- e.g. an already Windows-style path such as
-    "C:/Users/..." -- is returned unchanged, since resolving it would
-    incorrectly prefix the WSL cwd.
+    /mnt/<drive>/... -> <DRIVE>:/...; any other POSIX-absolute path (e.g. the
+    code under /home) -> \\\\wsl.localhost\\<distro>\\... . Only POSIX-absolute
+    inputs are resolved first (so "/mnt/c/foo/../bar" normalizes before the
+    swap); a string that doesn't start with "/" -- e.g. an already
+    Windows-style "C:/Users/..." -- is returned unchanged.
     """
     s = str(p)
-    if s.startswith("/"):
-        s = str(Path(s).resolve())
+    if not s.startswith("/"):
+        return s
+    s = str(Path(s).resolve())
     m = _MNT_DRIVE_RE.match(s)
     if m:
         drive = m.group(1).upper()
         rest = m.group(2) or "/"
         return f"{drive}:{rest}"
-    return s
+    distro = os.environ.get("WSL_DISTRO_NAME", "Ubuntu")
+    return "\\\\wsl.localhost\\" + distro + s.replace("/", "\\")
 
 
 # Windows blender.exe cannot open a /mnt/c path passed to --python, so this
 # must be a Windows-style path (unlike BLENDER_EXE, which WSL executes and
 # therefore stays a /mnt/c path).
-DEM_HEADLESS_RENDER = to_windows_path(_REPO_WIN_CODE / "BlenderConvert" / "DEMHeadlessRender.py")
+DEM_HEADLESS_RENDER = to_windows_path(CODE_DIR / "BlenderConvert" / "DEMHeadlessRender.py")
 
 # Executed directly from WSL like BLENDER_EXE (so a /mnt/c path); runs the
 # composite and real-grain preprocess scripts, which need scipy / numpy that
-# Blender's bundled Python lacks (composite) or that the Windows side owns.
-WIN_VENV_PYTHON = _REPO_WIN_CODE / ".venv" / "Scripts" / "python.exe"
+# Blender's bundled Python lacks. The Windows venv stays in the OneDrive data
+# folder and runs the WSL preprocess scripts via their UNC path.
+WIN_VENV_PYTHON = DATA_DIR / ".venv" / "Scripts" / "python.exe"
 # Static placeholder shape model -- opened by Windows blender.exe, so a
 # Windows-style path.
 DEFAULT_PLACEHOLDER_OBJ = to_windows_path(
-    _REPO_WIN_CODE / "BlenderConvert" / "Shapes"
+    DATA_DIR / "BlenderConvert" / "Shapes"
     / "gbo.ast-apophis.jpl.radar.shape_model_v1.0"
     / "gbo.ast-apophis.jpl.radar.shape_model_v1.0" / "data" / "apophis_v233s7.obj"
 )
@@ -362,7 +362,7 @@ def _max_frames_args(ctx: PathContext) -> List[str]:
 
 def build_composite_preprocess_command(ctx: PathContext, output_dir: Path) -> List[str]:
     return [
-        str(WIN_VENV_PYTHON), to_windows_path(_REPO_WIN_CODE / "viz" / "viz_preprocess.py"),
+        str(WIN_VENV_PYTHON), to_windows_path(CODE_DIR / "viz" / "viz_preprocess.py"),
         "--grains-dir", to_windows_path(ctx.grains_dir),
         "--bodies-dir", to_windows_path(ctx.bodies_dir),
         "--output-dir", to_windows_path(output_dir),
@@ -373,7 +373,7 @@ def build_composite_preprocess_command(ctx: PathContext, output_dir: Path) -> Li
 def build_instance_grains_preprocess_command(ctx: PathContext, output_dir: Path) -> List[str]:
     return [
         str(WIN_VENV_PYTHON),
-        to_windows_path(_REPO_WIN_CODE / "viz" / "viz_preprocess_grains_instance.py"),
+        to_windows_path(CODE_DIR / "viz" / "viz_preprocess_grains_instance.py"),
         "--grains-dir", to_windows_path(ctx.grains_dir),
         "--bodies-dir", to_windows_path(ctx.bodies_dir),
         "--output-dir", to_windows_path(output_dir),
@@ -389,7 +389,7 @@ def build_instance_static_preprocess_command(ctx: PathContext, output_dir: Path)
     # "wrote no manifest" and never the real error.
     return [
         BLENDER_EXE, "--background", "--python-exit-code", "1", "--python",
-        to_windows_path(_REPO_WIN_CODE / "viz" / "viz_preprocess_lite.py"), "--",
+        to_windows_path(CODE_DIR / "viz" / "viz_preprocess_lite.py"), "--",
         "--grains-dir", to_windows_path(ctx.grains_dir),
         "--bodies-dir", to_windows_path(ctx.bodies_dir),
         "--output-dir", to_windows_path(output_dir),
@@ -402,7 +402,7 @@ def run_preprocess_stage(cmd: List[str], output_dir: Path) -> Path:
     """Run one preprocess subprocess from the Windows repo root; return its manifest path."""
     try:
         result = subprocess.run(
-            cmd, capture_output=True, text=True, errors="replace", cwd=str(_REPO_WIN_CODE),
+            cmd, capture_output=True, text=True, errors="replace", cwd=str(CODE_DIR),
         )
     except OSError as exc:
         raise PreprocessError(f"could not start {cmd[0]}: {exc}") from exc
@@ -994,7 +994,7 @@ class SimRenderTUIApp(App[None]):
         self._set_buttons_disabled(True)
         self._pipeline_start = time.monotonic()
         self._pipeline_run_dir = sim_params.output_root / "run_0001"
-        demcsvs = _REPO_WIN_CODE / "DEMCSVs"
+        demcsvs = DATA_DIR / "DEMCSVs"
         grains_dir, _bodies_dir = _grains_and_bodies_dirs(
             self._pipeline_run_dir, demcsvs, sim_params.output_root,
         )
@@ -1073,7 +1073,7 @@ class SimRenderTUIApp(App[None]):
 
         try:
             result = run_pipeline(
-                sim_params, render_form, _REPO_WIN_CODE / "DEMCSVs", on_stage=on_stage,
+                sim_params, render_form, DATA_DIR / "DEMCSVs", on_stage=on_stage,
             )
         except Exception as exc:  # an uncaught exception here must never kill the app
             result = PipelineResult(

@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-CODE = Path("/mnt/c/Users/22boy/OneDrive/Documents/GC-Max_desktop/Honours/Code")
+from tests._paths import CODE
 _spec = importlib.util.spec_from_file_location(
     "viz_preprocess_grains_instance", CODE / "viz" / "viz_preprocess_grains_instance.py"
 )
