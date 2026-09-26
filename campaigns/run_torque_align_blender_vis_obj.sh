@@ -12,7 +12,7 @@ mkdir -p sobol_mass_runs
 
 echo "[INFO] Starting torque_align_blender_vis_obj at $(date -Is)" | tee -a "$LOG"
 
-python3 sobol/run_torque_align_blender_reruns.py \
+python3 sobol/run_torque_align_blender_reruns.py --no-cleanup \
   --use-shape-crop \
   --batch-label torque_align_blender_vis_obj \
   "$@" 2>&1 | tee -a "$LOG"

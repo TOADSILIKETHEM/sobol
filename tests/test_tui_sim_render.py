@@ -1654,3 +1654,45 @@ def test_report_result_partial_is_error_status():
     assert "Finished with failures:" in text
     assert "composite: failed at preprocess: boom" in text
     assert is_err is True
+
+
+# --- raw dumps cleaned after a verified convert (default on) --------------------
+
+def _pipeline_with_run_dir(monkeypatch, tmp_path, npz_frames=1):
+    run_dir = tmp_path / "sobol_mass_runs" / "batch" / "run_0001"
+    run_dir.mkdir(parents=True)
+    for name in ("sobol_00000", "sobol_00001", "sobolSink0012N01.ev", "sobol.setup", "sobol.in"):
+        (run_dir / name).write_text("x")
+    monkeypatch.setattr(tsr, "run_sim_stage", lambda params: _ok_record(str(run_dir)))
+    base_output_dir = tmp_path / "DEMCSVs"
+    grains_dir = base_output_dir / "batch" / "run_0001_grains_output"
+    monkeypatch.setattr(tsr, "run_convert_stage",
+                        lambda rec, out: _write_fake_npz(grains_dir, npz_frames) if npz_frames else None)
+
+    def fake_render(params):
+        _write_fake_pngs(params.output_dir, 1)
+        return _ok_completed()
+    monkeypatch.setattr(tsr, "run_render_stage", fake_render)
+    return run_dir, base_output_dir
+
+
+def test_sim_params_keep_dumps_default_off():
+    assert tsr.SimParams().keep_dumps is False
+
+
+@pytest.mark.parametrize("keep", [False, True])
+def test_run_pipeline_cleans_raw_dumps_after_convert(monkeypatch, tmp_path, keep):
+    run_dir, base_output_dir = _pipeline_with_run_dir(monkeypatch, tmp_path)
+    sim_params = tsr.SimParams(output_root=run_dir.parent, keep_dumps=keep)
+    result = tsr.run_pipeline(sim_params, tsr.RenderFormValues(), base_output_dir)
+    assert result.ok is True
+    assert (run_dir / "sobol_00000").exists() is keep
+    assert (run_dir / "sobolSink0012N01.ev").exists() is keep
+    assert (run_dir / "sobol.setup").exists()
+
+
+def test_run_pipeline_keeps_dumps_when_convert_produced_nothing(monkeypatch, tmp_path):
+    run_dir, base_output_dir = _pipeline_with_run_dir(monkeypatch, tmp_path, npz_frames=0)
+    result = tsr.run_pipeline(tsr.SimParams(output_root=run_dir.parent), tsr.RenderFormValues(), base_output_dir)
+    assert result.ok is False
+    assert (run_dir / "sobol_00000").exists()
