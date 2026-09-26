@@ -29,7 +29,6 @@ from run_mass_sobol_phantom import (  # noqa: E402
     EARTH_SINK_ID_DEFAULT,
     APOPHIS_SINK_ID_DEFAULT,
     DEFAULT_DN_COHES_FACTOR,
-    coh_gap_max_cgs_from_dn,
     preflight,
     run_one_case,
     sanitize_batch_label,
@@ -854,10 +853,8 @@ class SimRenderTUIApp(App[None]):
         dn = float(self._iv("dn-cohes-factor") or DEFAULT_DN_COHES_FACTOR)
         kt_cgs_raw = self._iv("kt-cgs")
         kt_cgs = float(kt_cgs_raw) if kt_cgs_raw else None
-        coh_gap_max_cgs = (
-            coh_gap_max_cgs_from_dn(dn=dn, np_apophis=np_apophis)
-            if kt_cgs is not None and kt_cgs > 0 else None
-        )
+        # cohesion gap = dn * grain diameter, resolved after phantomsetup (run_one_case)
+        dn_cohes_factor = dn if kt_cgs is not None and kt_cgs > 0 else None
         shape_file_raw = self._iv("shape-file")
         sample = RunSample(
             use_dem=True,
@@ -867,7 +864,7 @@ class SimRenderTUIApp(App[None]):
                 float(self._iv("spin-torque-align")) if self._iv("spin-torque-align") else None
             ),
             kt_cgs=kt_cgs,
-            coh_gap_max_cgs=coh_gap_max_cgs,
+            dn_cohes_factor=dn_cohes_factor,
             tmax_hours=float(self._iv("tmax-hours")) if self._iv("tmax-hours") else None,
             dtmax_hours=float(self._iv("dtmax-hours")) if self._iv("dtmax-hours") else None,
             use_shape_crop=True if shape_file_raw else None,

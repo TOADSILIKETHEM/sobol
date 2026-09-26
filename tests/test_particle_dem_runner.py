@@ -85,3 +85,59 @@ def test_template_setup_has_merged_keys():
     for key in ("use_dem_as_sinks", "mass_apophis", "pack_settle", "pack_expand", "pack_phi"):
         assert re.search(rf"^\s*{key}\s*=", text, re.M), key
     assert not re.search(r"^\s*m_apophis_in\s*=", text, re.M)
+
+
+import shutil  # noqa: E402
+
+FIX = Path(__file__).parent / "fixtures"
+
+
+def test_in_patch_applies_without_isink_potential_2(tmp_path):
+    p = tmp_path / "sobol.in"
+    p.write_text("isink_potential = 0\nkn_cgs = 1e7\nkt_cgs = 0\ncoh_gap_max_cgs = 0\n")
+    cols = runner.apply_run_sample_to_in(p, RunSample(kt_cgs=2e7))
+    assert "kt_cgs" in cols
+    assert float(_val(p.read_text(), "kt_cgs")) == pytest.approx(2e7)
+
+
+def test_in_patch_noop_when_dem_keys_absent(tmp_path):
+    p = tmp_path / "sobol.in"
+    p.write_text("isink_potential = 0\n")
+    assert runner.apply_run_sample_to_in(p, RunSample(kt_cgs=2e7)) == {}
+
+
+def test_setup_log_torque_fallback_raises(tmp_path):
+    log = tmp_path / "setup.log"
+    log.write_text(" WARNING! setup_solarsystem: torque-align spin needs a sink index range;"
+                   " using apophis_spin_axis instead\n")
+    with pytest.raises(RuntimeError, match="torque-align"):
+        runner.check_setup_log(log, RunSample(use_dem=True, apophis_spin_torque_align_deg=10.0))
+
+
+def test_setup_log_spin_not_applied_raises(tmp_path):
+    log = tmp_path / "setup.log"
+    log.write_bytes(b"\x00 WARNING! setup_solarsystem: could not resolve Apophis spin axis; spin not applied\n")
+    with pytest.raises(RuntimeError, match="spin not applied"):
+        runner.check_setup_log(log, RunSample(use_dem=True, apophis_spin_period=2.0))
+
+
+def test_setup_log_clean_passes(tmp_path):
+    log = tmp_path / "setup.log"
+    log.write_text(" Apophis spin axis  =  0.1 0.2 0.97\n")
+    runner.check_setup_log(log, RunSample(use_dem=True, apophis_spin_period=2.0))
+
+
+def test_coh_gap_from_dump_particle(tmp_path):
+    run = tmp_path / "run"
+    shutil.copytree(FIX / "particle_np300", run)
+    s = RunSample(use_dem=True, dem_model="particle", kt_cgs=1e7, dn_cohes_factor=0.1)
+    runner.resolve_coh_gap_after_setup(run, "sobol", s)
+    import particle_dem as pdem
+    r = pdem.grain_radius_cm_from_dump(run / "sobol_00000", "particle")
+    assert s.coh_gap_max_cgs == pytest.approx(0.1 * 2.0 * r)
+
+
+def test_coh_gap_explicit_value_wins(tmp_path):
+    s = RunSample(use_dem=True, kt_cgs=1e7, dn_cohes_factor=0.1, coh_gap_max_cgs=123.0)
+    runner.resolve_coh_gap_after_setup(tmp_path, "sobol", s)
+    assert s.coh_gap_max_cgs == 123.0

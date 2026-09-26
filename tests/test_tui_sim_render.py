@@ -1057,9 +1057,10 @@ def test_build_sim_params_kt_cgs_blank_maps_to_none():
 
     assert params.sample.kt_cgs is None
     assert params.sample.coh_gap_max_cgs is None
+    assert params.sample.dn_cohes_factor is None
 
 
-def test_build_sim_params_kt_cgs_positive_computes_coh_gap_max():
+def test_build_sim_params_kt_cgs_positive_carries_dn_for_coh_gap():
     async def _scenario():
         app = tsr.SimRenderTUIApp()
         async with app.run_test():
@@ -1069,7 +1070,9 @@ def test_build_sim_params_kt_cgs_positive_computes_coh_gap_max():
     params = asyncio.run(_scenario())
 
     assert params.sample.kt_cgs == 1e7
-    assert params.sample.coh_gap_max_cgs is not None
+    # gap is resolved after phantomsetup from the real grain radius
+    assert params.sample.coh_gap_max_cgs is None
+    assert params.sample.dn_cohes_factor == tsr.DEFAULT_DN_COHES_FACTOR
 
 
 def test_build_sim_params_kt_cgs_zero_does_not_compute_coh_gap_max():
@@ -1083,6 +1086,7 @@ def test_build_sim_params_kt_cgs_zero_does_not_compute_coh_gap_max():
 
     assert params.sample.kt_cgs == 0.0
     assert params.sample.coh_gap_max_cgs is None
+    assert params.sample.dn_cohes_factor is None
 
 
 # --- Bulk render paths: commands, preprocess stage, partial failure -------

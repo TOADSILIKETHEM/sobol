@@ -71,20 +71,6 @@ def kt_from_kc(kc: float) -> float:
     return float(kc)
 
 
-def coh_gap_max_cgs_from_dn(
-    *,
-    dn: float,
-    np_apophis: int,
-    scale_r_apophis: float = 1.0,
-    r_apophis_km: float = HORIZONS_APOPHIS_RADIUS_KM,
-) -> float:
-    if np_apophis <= 0:
-        raise ValueError("np_apophis must be positive")
-    r_apophis_cm = r_apophis_km * scale_r_apophis * 1.0e5
-    r_grain_cm = r_apophis_cm / (np_apophis ** (1.0 / 3.0))
-    return dn * 2.0 * r_grain_cm
-
-
 def read_kt_cgs(row: dict) -> str:
     return (row.get("kt_cgs") or row.get("kc_cgs") or "").strip()
 
@@ -318,9 +304,11 @@ class RunSample:
     apophis_spin_obliquity: Optional[float] = None  # degrees from ecliptic north
     apophis_spin_azimuth:   Optional[float] = None  # degrees in ecliptic plane
     apophis_spin_torque_align_deg: Optional[float] = None  # 0=+h, 180=-h; <0 uses obl/az
-    # DEM contact params: patched into the .in file after phantomsetup; only active when isink_potential=2.
+    # DEM contact params: patched into the .in file after phantomsetup when its DEM keys exist
+    # (sink DEM isink_potential=2, or idem particles present).
     kt_cgs:        Optional[float] = None  # tensile spring constant (dyne/cm); 0 = no cohesion
     coh_gap_max_cgs: Optional[float] = None  # max surface gap (cm) for cohesive bond; 0 = Daniel default
+    dn_cohes_factor: Optional[float] = None  # coh gap = dn * grain diameter, resolved after phantomsetup
     ct_dem:        Optional[float] = None  # tangential damping coefficient
     epsilon_n_dem: Optional[float] = None  # normal restitution coefficient [0,1]
     kn_cgs:        Optional[float] = None  # normal spring constant (dyne/cm)
@@ -1183,7 +1171,7 @@ def apply_run_sample_to_setup(
 def apply_run_sample_to_in(in_path: Path, sample: RunSample) -> Dict[str, str]:
     """Patch DEM contact parameters into a run's .in file; returns column map for CSV.
 
-    Only patches when the .in file contains isink_potential = 2 (DEM mode active) AND at
+    Only patches when the .in file contains the DEM contact keys (kn_cgs present) AND at
     least one in-file parameter is set on the sample.  No-op otherwise — safe to call
     unconditionally after phantomsetup.
     """
@@ -1195,8 +1183,10 @@ def apply_run_sample_to_in(in_path: Path, sample: RunSample) -> Dict[str, str]:
         return columns
 
     text = in_path.read_text(encoding="utf-8")
-    if not re.search(r"^\s*isink_potential\s*=\s*2\b", text, re.MULTILINE):
-        return columns  # not DEM mode; DEM keys absent from .in
+    # DEM keys are written for sink DEM (isink_potential=2) and particle DEM (idem present);
+    # their presence, not isink_potential, says DEM is active (Mia e35012803).
+    if not re.search(r"^\s*kn_cgs\s*=", text, re.MULTILINE):
+        return columns
 
     for param, v in active:
         tok = format_real_token(v)
@@ -1213,6 +1203,36 @@ def apply_run_sample_to_in(in_path: Path, sample: RunSample) -> Dict[str, str]:
 
     in_path.write_text(text, encoding="utf-8")
     return columns
+
+
+_SETUP_LOG_FATAL = (
+    ("torque-align spin needs a sink index range", "torque-align fell back to apophis_spin_axis"),
+    ("could not resolve Apophis spin axis; spin not applied", "spin not applied"),
+)
+
+
+def check_setup_log(setup_log: Path, sample: RunSample) -> None:
+    """Refuse runs whose setup silently skipped requested spin physics."""
+    if not setup_log.is_file() or not sample.use_dem:
+        return
+    text = setup_log.read_bytes().replace(b"\x00", b"").decode("utf-8", errors="replace")
+    for needle, why in _SETUP_LOG_FATAL:
+        if needle in text:
+            raise RuntimeError(f"phantomsetup: {why} ({setup_log}); rebuild from DEMsync-mia?")
+
+
+def resolve_coh_gap_after_setup(run_dir: Path, prefix: str, sample: RunSample) -> None:
+    """Set coh_gap_max_cgs = dn * 2 * R_grain from the setup dump (explicit gap wins)."""
+    if sample.coh_gap_max_cgs is not None or sample.dn_cohes_factor is None:
+        return
+    if not sample.use_dem:
+        return
+    import particle_dem as pdem
+    dump = run_dir / f"{prefix}_00000.tmp"
+    if not dump.is_file():
+        dump = run_dir / f"{prefix}_00000"
+    r_cm = pdem.grain_radius_cm_from_dump(dump, sample.dem_model)
+    sample.coh_gap_max_cgs = sample.dn_cohes_factor * 2.0 * r_cm
 
 
 def _resolve_kt_fixed(args: argparse.Namespace) -> Optional[float]:
@@ -1271,12 +1291,7 @@ def _ensure_coh_gap(s: RunSample, args: argparse.Namespace) -> None:
     n = s.np_apophis
     if n is None:
         return
-    dn = getattr(args, "dn_cohes_factor", DEFAULT_DN_COHES_FACTOR)
-    s.coh_gap_max_cgs = coh_gap_max_cgs_from_dn(
-        dn=dn,
-        np_apophis=n,
-        scale_r_apophis=s.scale_r_apophis or 1.0,
-    )
+    s.dn_cohes_factor = getattr(args, "dn_cohes_factor", DEFAULT_DN_COHES_FACTOR)
 
 
 def _apply_fixed_run_sample_overrides(
@@ -2890,7 +2905,7 @@ def run_one_case(
 
     # Warn before starting if np_apophis is high enough that lattice overshoot will likely push
     # the actual sink count above the compiled MAXPTMASS limit (default 1000).
-    maxptmass_warn = _np_apophis_maxptmass_warning(sample)
+    maxptmass_warn = _np_apophis_maxptmass_warning(sample) if sample.dem_model == "sink" else None
     if maxptmass_warn:
         print(f"[WARN] Run {run_id}: {maxptmass_warn}", file=sys.stderr, flush=True)
 
@@ -2926,11 +2941,13 @@ def run_one_case(
             raise RuntimeError(
                 diag or f"phantomsetup failed (returncode != 0); see {run_dir / 'setup.log'}"
             ) from None
+        check_setup_log(run_dir / "setup.log", sample)
         if sample.use_dem is True:
             in_text = run_input.read_text()
             in_text = replace_setup_assignment(in_text, "nfulldump", f"{1:>10}")
             run_input.write_text(in_text)
             print(f"[INFO] Run {run_id}: DEM enabled — set nfulldump=1 in {run_input.name}", flush=True)
+        resolve_coh_gap_after_setup(run_dir, prefix, sample)
         in_param_cols = apply_run_sample_to_in(run_input, sample)
         param_columns.update(in_param_cols)
         run_command([str(phantom_bin), f"{prefix}.in"] + maxp_flag, cwd=run_dir, log_path=run_dir / "phantom.log")

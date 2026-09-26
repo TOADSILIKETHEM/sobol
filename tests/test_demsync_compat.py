@@ -22,11 +22,6 @@ def test_ecliptic_spin_axis_unit_reference():
     assert abs(n - 1.0) < 1e-6
 
 
-def test_coh_gap_max_cgs_from_dn_np500():
-    gap = runner.coh_gap_max_cgs_from_dn(dn=0.1, np_apophis=500)
-    assert 400.0 < gap < 470.0
-
-
 def test_kt_from_kc_identity():
     assert runner.kt_from_kc(1e7) == 1e7
 

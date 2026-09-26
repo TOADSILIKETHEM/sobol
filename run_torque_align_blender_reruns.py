@@ -131,7 +131,7 @@ def main() -> int:
                 apophis_spin_period=spin_period,
                 apophis_spin_torque_align_deg=align_deg,
                 kt_cgs=KT_CGS,
-                coh_gap_max_cgs=runner.coh_gap_max_cgs_from_dn(dn=DN_COHES, np_apophis=np_apophis),
+                dn_cohes_factor=DN_COHES,
                 use_shape_crop=True if args.use_shape_crop else None,
                 dtmax_hours=args.dtmax_hours,
             )
