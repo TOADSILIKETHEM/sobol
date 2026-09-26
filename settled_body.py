@@ -27,6 +27,8 @@ G_CGS = 6.674e-8
 RHO_0_CGS = 2.7  # eos_tillotson.f90:34 rho_0; setup bulk density = rho_0 * scale_rho
 SETTLE_PREFIX = "settle"
 CROP_PREFIX = "cropped"
+# a settled random packing is ~0.6-0.66; a loose cloud cut by the crop (settle_tdyn too short) is ~0.1-0.3
+MIN_SETTLED_PACKING = 0.5
 
 
 @dataclass(frozen=True)
@@ -233,6 +235,11 @@ def build_settled_body(
     _run([tools.moddump, settle_dumps[-1].name, CROP_PREFIX, "0", *maxp], work, work / "crop.log",
          stdin_text=f"{shape_name}\n{rho:.6g}\n")  # prompts: shape file, bulk density g/cm^3
     n_kept, n_settled, phi = parse_crop_log((work / "crop.log").read_text(errors="replace"))
+    if phi < MIN_SETTLED_PACKING:
+        raise RuntimeError(
+            f"settle did not converge: n_kept={n_kept}, n_settled={n_settled}, packing_fraction={phi} "
+            f"< {MIN_SETTLED_PACKING} (loose cloud never collapsed); raise --settle-tdyn"
+        )
     dump, infile = f"{CROP_PREFIX}_00000", f"{CROP_PREFIX}.in"
 
     if spec.relax_tdyn > 0.0:
