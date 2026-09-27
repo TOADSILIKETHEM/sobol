@@ -265,7 +265,7 @@ def run_sim_stage(params: SimParams) -> RunRecord:
             phantomsetup_bin=phantomsetup_bin, phantom_bin=phantom_bin,
             phantom_dir=Path(params.phantom_dir), ephemeris_cache_dir=params.ephemeris_cache_dir,
             dry_run=params.dry_run)
-        if not params.dry_run:
+        if not params.dry_run and sample.encounter == "hyperbola":
             import settled_body
             flyby_bin = settled_body.resolve_dem_tools(Path(params.phantom_dir)).flyby
     if sample.encounter == "hyperbola" and earth_sink_id == EARTH_SINK_ID_DEFAULT:
@@ -825,7 +825,7 @@ class SimRenderTUIApp(App[None]):
                 "encounter",
                 Select([("ephemeris", "ephemeris"), ("hyperbola", "hyperbola")], value="ephemeris",
                        id="encounter", allow_blank=False),
-                "hyperbola needs settled; no spin",
+                "hyperbola needs settled; ephemeris + settled uses packing_file",
             )
             yield _Row("flyby_rp_km", Input(DEFAULT_FLYBY_RP_KM, id="flyby-rp"), "km")
             yield _Row("flyby_vinf_kms", Input(DEFAULT_FLYBY_VINF_KMS, id="flyby-vinf"), "km/s")
@@ -923,6 +923,7 @@ class SimRenderTUIApp(App[None]):
         shape_file_raw = self._iv("shape-file")
         body_source = self.query_one("#body-source", Select).value
         encounter = self.query_one("#encounter", Select).value
+        hyper = encounter == "hyperbola"
         sample = RunSample(
             use_dem=True,
             dem_model="particle",
@@ -935,13 +936,13 @@ class SimRenderTUIApp(App[None]):
             dn_cohes_factor=dn_cohes_factor,
             tmax_hours=float(self._iv("tmax-hours")) if self._iv("tmax-hours") else None,
             dtmax_hours=float(self._iv("dtmax-hours")) if self._iv("dtmax-hours") else None,
-            use_shape_crop=True if shape_file_raw else None,
+            use_shape_crop=True if shape_file_raw and body_source != "settled" else None,
             body_source=body_source,
             encounter=encounter,
-            flyby_rp_km=float(self._iv("flyby-rp")) if self._iv("flyby-rp") else None,
-            flyby_vinf_kms=float(self._iv("flyby-vinf")) if self._iv("flyby-vinf") else None,
-            flyby_start_sep_km=float(self._iv("flyby-sep") or 4e5),
-            flyby_perturber_earth_masses=1.0,
+            flyby_rp_km=float(self._iv("flyby-rp")) if hyper and self._iv("flyby-rp") else None,
+            flyby_vinf_kms=float(self._iv("flyby-vinf")) if hyper and self._iv("flyby-vinf") else None,
+            flyby_start_sep_km=float(self._iv("flyby-sep") or 4e5) if hyper else None,
+            flyby_perturber_earth_masses=1.0 if hyper else None,
         )
         if encounter == "hyperbola":
             if body_source != "settled":
@@ -970,8 +971,6 @@ class SimRenderTUIApp(App[None]):
                 raise ValueError(
                     f"tmax {sample.tmax_hours:g} hr ends before the body is back out to its "
                     f"start separation; need >= {2.0 * t_peri:.3g} hr (2 x time to pericentre)")
-        if body_source == "settled" and encounter == "ephemeris":
-            raise ValueError("settled + ephemeris needs Mia's packing_file (not pushed yet)")
         eph_cache_raw = self._iv("eph-cache")
         prefix = self._iv("prefix")
         # <sim_name> (spec Component 2) is a timestamped batch dir the TUI

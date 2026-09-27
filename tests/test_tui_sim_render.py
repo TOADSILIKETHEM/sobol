@@ -1842,3 +1842,45 @@ def test_build_sim_params_hyperbola_step5_settings_pass():
     assert params.sample.flyby_vinf_kms == 5.9
     assert params.sample.flyby_start_sep_km == 1e5
     assert params.sample.tmax_hours == 8.0
+
+
+# --- settled body on the ephemeris (packing_file) ------------------------
+
+
+def test_build_sim_params_settled_ephemeris_allowed_and_drops_flyby():
+    async def _scenario():
+        app = tsr.SimRenderTUIApp()
+        async with app.run_test():
+            app.query_one("#body-source", tsr.Select).value = "settled"
+            app.query_one("#encounter", tsr.Select).value = "ephemeris"
+            app.query_one("#shape-file", tsr.Input).value = str(tsr.resolve_default_shape_file())
+            return app._build_sim_params(False)
+
+    p = asyncio.run(_scenario())
+    assert (p.sample.body_source, p.sample.encounter) == ("settled", "ephemeris")
+    assert p.sample.flyby_rp_km is None and p.sample.flyby_vinf_kms is None
+    assert p.sample.flyby_start_sep_km is None
+    assert p.sample.use_shape_crop is None  # the body carries its own shape
+    assert p.earth_sink_id == tsr.EARTH_SINK_ID_DEFAULT
+
+
+def test_run_sim_stage_settled_ephemeris_keeps_earth_4_and_no_flyby(tmp_path, monkeypatch):
+    import tui_sim_render as t
+    from run_mass_sobol_phantom import RunSample
+    seen = {}
+
+    def fake_attach(samples, **kw):
+        samples[0].settled_body_dir = str(tmp_path / "body")
+        return 1
+
+    monkeypatch.setattr(t, "preflight", lambda a, b, o: (tmp_path / "s", tmp_path / "i",
+                                                         tmp_path / "ps", tmp_path / "p"))
+    monkeypatch.setattr(t, "attach_settled_bodies", fake_attach)
+    monkeypatch.setattr(t, "run_one_case", lambda **kw: seen.setdefault("run", kw) and "record")
+    import settled_body as sb
+    monkeypatch.setattr(sb, "resolve_dem_tools", lambda d: pytest.fail("phantomflyby not needed"))
+    sample = RunSample(use_dem=True, np_apophis=300, body_source="settled", encounter="ephemeris")
+    p = t.SimParams(output_root=tmp_path / "out", sample=sample, shape_file=None)
+    t.run_sim_stage(p)
+    assert seen["run"]["earth_sink_id"] == t.EARTH_SINK_ID_DEFAULT
+    assert seen["run"]["phantomflyby_bin"] is None
