@@ -30,7 +30,10 @@ from run_mass_sobol_phantom import (  # noqa: E402
     APOPHIS_SINK_ID_DEFAULT,
     DEFAULT_DN_COHES_FACTOR,
     _cleanup_run_dir,
+    attach_settled_bodies,
     preflight,
+    resolve_default_shape_file,
+    resolve_phantom_executable,
     run_one_case,
     sanitize_batch_label,
     _DEFAULT_PHANTOM_DIR as _RMS_DEFAULT_PHANTOM_DIR,
@@ -166,6 +169,9 @@ class SimParams:
     earth_sink_id: int = EARTH_SINK_ID_DEFAULT
     apophis_sink_id: int = APOPHIS_SINK_ID_DEFAULT
     shape_file: Optional[str] = None
+    settle_tdyn: float = 5.0
+    relax_tdyn: float = 0.5
+    body_cache_dir: Optional[Path] = None  # None = <output_root parent>/settled_bodies
     sample: RunSample = field(default_factory=RunSample)
     # False = delete raw dumps/.ev/phantom.log once convert is verified (npz exist)
     keep_dumps: bool = False
@@ -236,9 +242,27 @@ def run_sim_stage(params: SimParams) -> RunRecord:
         params.base_dir,
         params.output_root,
     )
+    sample = params.sample
+    earth_sink_id = params.earth_sink_id
+    flyby_bin = None
+    if sample.body_source == "settled":
+        cache_root = params.body_cache_dir or Path(params.output_root).parent / "settled_bodies"
+        attach_settled_bodies(
+            [sample], template_setup=base_setup,
+            shape_file=Path(params.shape_file) if params.shape_file else resolve_default_shape_file(),
+            settle_tdyn=params.settle_tdyn, relax_tdyn=params.relax_tdyn, cache_root=cache_root,
+            phantomsetup_bin=phantomsetup_bin, phantom_bin=phantom_bin,
+            phantom_dir=Path(params.phantom_dir), ephemeris_cache_dir=params.ephemeris_cache_dir,
+            dry_run=params.dry_run)
+        if not params.dry_run:
+            import settled_body
+            flyby_bin = settled_body.resolve_dem_tools(Path(params.phantom_dir)).flyby
+    if sample.encounter == "hyperbola" and earth_sink_id == EARTH_SINK_ID_DEFAULT:
+        earth_sink_id = 1  # phantomflyby: Earth is the only sink
+    analysis_bin = resolve_phantom_executable(Path(params.phantom_dir), "phantomanalysis", must_exist=False)
     return run_one_case(
         run_id=1,
-        sample=params.sample,
+        sample=sample,
         base_setup=base_setup,
         base_input=base_input,
         output_root=params.output_root,
@@ -247,10 +271,12 @@ def run_sim_stage(params: SimParams) -> RunRecord:
         phantom_bin=phantom_bin,
         ref_mass_kg=None,
         dry_run=params.dry_run,
-        earth_sink_id=params.earth_sink_id,
+        earth_sink_id=earth_sink_id,
         apophis_sink_id=params.apophis_sink_id,
         ephemeris_cache_dir=params.ephemeris_cache_dir,
         shape_file=params.shape_file,
+        phantomflyby_bin=flyby_bin,
+        phantomanalysis_bin=analysis_bin if analysis_bin.is_file() else None,
     )
 
 
@@ -777,6 +803,22 @@ class SimRenderTUIApp(App[None]):
                 Input("", id="shape-file", placeholder="(none — no shape crop)"),
                 "optional path",
             )
+            yield Static("Sim — body / encounter", classes="sec")
+            yield _Row(
+                "body_source",
+                Select([("lattice", "lattice"), ("settled", "settled")], value="lattice",
+                       id="body-source", allow_blank=False),
+                "settled = settle → crop → relax (cached)",
+            )
+            yield _Row(
+                "encounter",
+                Select([("ephemeris", "ephemeris"), ("hyperbola", "hyperbola")], value="ephemeris",
+                       id="encounter", allow_blank=False),
+                "hyperbola needs settled; no spin",
+            )
+            yield _Row("flyby_rp_km", Input("", id="flyby-rp", placeholder="e.g. 38000"), "km")
+            yield _Row("flyby_vinf_kms", Input("", id="flyby-vinf", placeholder="e.g. 5.9"), "km/s")
+            yield _Row("flyby_start_sep_km", Input("4e5", id="flyby-sep"), "km")
             yield _Row(
                 "keep_dumps",
                 Checkbox("keep raw dumps + .ev after convert", value=False, id="keep-dumps"),
@@ -868,6 +910,8 @@ class SimRenderTUIApp(App[None]):
         # cohesion gap = dn * grain diameter, resolved after phantomsetup (run_one_case)
         dn_cohes_factor = dn if kt_cgs is not None and kt_cgs > 0 else None
         shape_file_raw = self._iv("shape-file")
+        body_source = self.query_one("#body-source", Select).value
+        encounter = self.query_one("#encounter", Select).value
         sample = RunSample(
             use_dem=True,
             dem_model="particle",
@@ -881,7 +925,24 @@ class SimRenderTUIApp(App[None]):
             tmax_hours=float(self._iv("tmax-hours")) if self._iv("tmax-hours") else None,
             dtmax_hours=float(self._iv("dtmax-hours")) if self._iv("dtmax-hours") else None,
             use_shape_crop=True if shape_file_raw else None,
+            body_source=body_source,
+            encounter=encounter,
+            flyby_rp_km=float(self._iv("flyby-rp")) if self._iv("flyby-rp") else None,
+            flyby_vinf_kms=float(self._iv("flyby-vinf")) if self._iv("flyby-vinf") else None,
+            flyby_start_sep_km=float(self._iv("flyby-sep") or 4e5),
+            flyby_perturber_earth_masses=1.0,
         )
+        if encounter == "hyperbola":
+            if body_source != "settled":
+                raise ValueError("hyperbola needs body_source = settled")
+            if sample.flyby_rp_km is None or sample.flyby_vinf_kms is None:
+                raise ValueError("hyperbola needs flyby_rp_km and flyby_vinf_kms")
+            if sample.tmax_hours is None or sample.dtmax_hours is None:
+                raise ValueError("hyperbola needs tmax (hr) and dtmax (hr)")
+            if sample.apophis_spin_period is not None or sample.apophis_spin_torque_align_deg is not None:
+                raise ValueError("hyperbola has no spin; clear spin_period and spin_torque_align")
+        if body_source == "settled" and encounter == "ephemeris":
+            raise ValueError("settled + ephemeris needs Mia's packing_file (not pushed yet)")
         eph_cache_raw = self._iv("eph-cache")
         prefix = self._iv("prefix")
         # <sim_name> (spec Component 2) is a timestamped batch dir the TUI

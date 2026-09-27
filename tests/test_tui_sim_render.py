@@ -1696,3 +1696,38 @@ def test_run_pipeline_keeps_dumps_when_convert_produced_nothing(monkeypatch, tmp
     result = tsr.run_pipeline(tsr.SimParams(output_root=run_dir.parent), tsr.RenderFormValues(), base_output_dir)
     assert result.ok is False
     assert (run_dir / "sobol_00000").exists()
+
+
+# --- settled body / hyperbola encounter (Task 10) --------------------------
+
+
+def test_run_sim_stage_builds_settled_body_and_uses_earth_1(tmp_path, monkeypatch):
+    import tui_sim_render as t
+    from run_mass_sobol_phantom import RunSample
+    seen = {}
+
+    def fake_attach(samples, **kw):
+        samples[0].settled_body_dir = str(tmp_path / "body")
+        seen["attach"] = kw
+        return 1
+
+    def fake_run_one_case(**kw):
+        seen["run"] = kw
+        return "record"
+
+    monkeypatch.setattr(t, "preflight", lambda a, b, o: (tmp_path / "s", tmp_path / "i",
+                                                         tmp_path / "ps", tmp_path / "p"))
+    monkeypatch.setattr(t, "attach_settled_bodies", fake_attach)
+    monkeypatch.setattr(t, "run_one_case", fake_run_one_case)
+    import settled_body as sb
+    monkeypatch.setattr(sb, "resolve_dem_tools",
+                        lambda d: sb.DemTools(tmp_path / "m", tmp_path / "f", tmp_path / "a"))
+    sample = RunSample(use_dem=True, np_apophis=300, body_source="settled", encounter="hyperbola",
+                       flyby_rp_km=38000.0, flyby_vinf_kms=5.9, flyby_start_sep_km=1e5,
+                       flyby_perturber_earth_masses=1.0, tmax_hours=8.0, dtmax_hours=0.25)
+    p = t.SimParams(output_root=tmp_path / "out", sample=sample, shape_file=None)
+    assert t.run_sim_stage(p) == "record"
+    assert seen["run"]["earth_sink_id"] == 1
+    assert seen["run"]["phantomflyby_bin"] == tmp_path / "f"
+    assert seen["run"]["sample"].settled_body_dir == str(tmp_path / "body")
+    assert seen["attach"]["cache_root"] == (tmp_path / "out").parent / "settled_bodies"
