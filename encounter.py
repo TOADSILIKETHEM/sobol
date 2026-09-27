@@ -47,6 +47,12 @@ def patch_encounter_in(in_path: Path, *, tmax_code: float, dtmax_code: float) ->
                      ("dtmax", r.format_real_token(dtmax_code)),
                      ("nfulldump", f"{1:>10}")):
         text = r.replace_setup_assignment(text, key, val)
+    # phantomflyby (moddump) copies the settle .in forward verbatim, so the freshly-written
+    # sobol.in still carries the settle's idamp=2 at this point; this line is what zeroes it.
+    # Do not "simplify" this away because committed run dirs show no idamp line at all — that
+    # is PHANTOM's own .in rewrite on exit (damping.f90: `if (idamp <= 0) return`) dropping the
+    # whole damping block *after* this guard already zeroed it, not evidence the block was
+    # already absent.
     if re.search(r"^\s*idamp\s*=", text, re.MULTILINE):
         text = r.replace_setup_assignment(text, "idamp", f"{0:>10}")
     Path(in_path).write_text(text, encoding="utf-8")
