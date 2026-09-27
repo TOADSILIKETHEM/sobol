@@ -191,6 +191,12 @@ _TIME_VARIATION_SPEC: Tuple[Tuple[str, str, str, str], ...] = (
     ("dtmax_hours", "dtmax_hours_min", "dtmax_hours_max", "dtmx"),
 )
 
+# Hyperbola encounter (--encounter hyperbola only): swept like the other optional dimensions.
+_FLYBY_VARIATION_SPEC: Tuple[Tuple[str, str, str, str], ...] = (
+    ("flyby_rp_km",    "flyby_rp_km_min",    "flyby_rp_km_max",    "rp"),
+    ("flyby_vinf_kms", "flyby_vinf_kms_min", "flyby_vinf_kms_max", "vinf"),
+)
+
 
 def _active_scale_variations(args: argparse.Namespace) -> List[Tuple[str, float, float, str]]:
     """Scale dimensions that are active (both bounds set), in canonical order."""
@@ -218,6 +224,17 @@ def _active_time_variations(args: argparse.Namespace) -> List[Tuple[str, float, 
     """Timeframe dimensions that are being swept (both min and max set), in canonical order."""
     out: List[Tuple[str, float, float, str]] = []
     for param, lo_attr, hi_attr, slug_tok in _TIME_VARIATION_SPEC:
+        lo = getattr(args, lo_attr, None)
+        hi = getattr(args, hi_attr, None)
+        if lo is not None and hi is not None:
+            out.append((param, lo, hi, slug_tok))
+    return out
+
+
+def _active_flyby_variations(args: argparse.Namespace) -> List[Tuple[str, float, float, str]]:
+    """Hyperbola dimensions that are being swept (both min and max set), in canonical order."""
+    out: List[Tuple[str, float, float, str]] = []
+    for param, lo_attr, hi_attr, slug_tok in _FLYBY_VARIATION_SPEC:
         lo = getattr(args, lo_attr, None)
         hi = getattr(args, hi_attr, None)
         if lo is not None and hi is not None:
@@ -642,6 +659,11 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Hyperbola pericentre distance (km), fixed for every run.")
     parser.add_argument("--flyby-vinf-kms", type=float, default=None, metavar="KM_S",
                         help="Hyperbola velocity at infinity (km/s), fixed for every run.")
+    for dest_flag, unit in (("flyby-rp-km", "KM"), ("flyby-vinf-kms", "KM_S")):
+        parser.add_argument(f"--{dest_flag}-min", type=float, default=None, metavar=unit,
+                            help=f"Sweep lower bound for --{dest_flag} (hyperbola only; set -max too).")
+        parser.add_argument(f"--{dest_flag}-max", type=float, default=None, metavar=unit,
+                            help=f"Sweep upper bound for --{dest_flag} (hyperbola only; set -min too).")
     parser.add_argument("--flyby-start-sep-km", type=float, default=4.0e5, metavar="KM",
                         help="Initial Earth-body separation on the incoming leg (km; Mia default 4e5).")
     parser.add_argument("--flyby-perturber-earth-masses", type=float, default=1.0, metavar="M",
@@ -1025,6 +1047,8 @@ def _validate_body_encounter(args: argparse.Namespace) -> None:
     """Settled bodies / hyperbola encounters: reject combinations the PHANTOM tools cannot do."""
     settled = args.body_source == "settled"
     hyper = args.encounter == "hyperbola"
+    if _active_flyby_variations(args) and args.encounter != "hyperbola":
+        raise ValueError("--flyby-*-min/max need --encounter hyperbola")
     if not (settled or hyper):
         return
     if args.dem_model != "particle":
@@ -1048,10 +1072,19 @@ def _validate_body_encounter(args: argparse.Namespace) -> None:
     if args.np_apophis is None and getattr(args, "np_apophis_list", None) is None:
         raise ValueError("--body-source settled needs --np-apophis or --np-apophis-list "
                          "(grains kept after the crop)")
-    for flag, dest in (("--flyby-rp-km", "flyby_rp_km"), ("--flyby-vinf-kms", "flyby_vinf_kms")):
-        if getattr(args, dest) is None:
-            raise ValueError(f"--encounter hyperbola needs {flag} (no silent default)")
-        if getattr(args, dest) <= 0:
+    for param, lo_attr, hi_attr, _ in _FLYBY_VARIATION_SPEC:
+        lo, hi = getattr(args, lo_attr), getattr(args, hi_attr)
+        flag = "--" + param.replace("_", "-")
+        if (lo is None) ^ (hi is None):
+            raise ValueError(f"{flag}: set both {flag}-min and {flag}-max, or neither")
+        if lo is not None:
+            if getattr(args, param) is not None:
+                raise ValueError(f"{flag} and {flag}-min/max are mutually exclusive")
+            if not 0 < lo < hi:
+                raise ValueError(f"{flag} bounds must satisfy 0 < min < max")
+        elif getattr(args, param) is None:
+            raise ValueError(f"--encounter hyperbola needs {flag} or {flag}-min/max (no silent default)")
+        elif getattr(args, param) <= 0:
             raise ValueError(f"{flag} must be > 0")
     if args.tmax_hours is None or args.dtmax_hours is None:
         raise ValueError("--encounter hyperbola needs --tmax-hours and --dtmax-hours "
@@ -1063,8 +1096,11 @@ def _validate_body_encounter(args: argparse.Namespace) -> None:
         raise ValueError("phantomflyby sets no spin (moddump_earthflyby.f90); drop the spin flags")
     if args.vary_apophis_only or getattr(args, "apophis_only_fixed", None) is not None:
         raise ValueError("--encounter hyperbola always has the Earth perturber; drop apophis_only flags")
+    # slowest corner (smallest rp, smallest v_inf) has the longest approach
+    rp = args.flyby_rp_km if args.flyby_rp_km is not None else args.flyby_rp_km_min
+    vinf = args.flyby_vinf_kms if args.flyby_vinf_kms is not None else args.flyby_vinf_kms_min
     t_peri = _encounter_module().time_to_pericentre_hr(
-        args.flyby_rp_km, args.flyby_vinf_kms, args.flyby_start_sep_km, args.flyby_perturber_earth_masses)
+        rp, vinf, args.flyby_start_sep_km, args.flyby_perturber_earth_masses)
     if args.tmax_hours < 2.0 * t_peri:
         raise ValueError(f"--tmax-hours {args.tmax_hours:g} ends before the body is back out to its "
                          f"start separation; need >= {2.0 * t_peri:.3g} hr (2 x time to pericentre)")
@@ -1081,6 +1117,7 @@ def count_dimensions(args: argparse.Namespace) -> int:
     n += len(_active_scale_variations(args))
     n += len(_active_in_variations(args))
     n += len(_active_time_variations(args))
+    n += len(_active_flyby_variations(args))
     if args.vary_use_dem:
         n += 1
     if args.vary_use_shape_crop:
@@ -1518,6 +1555,9 @@ def build_run_samples(num_samples: int, args: argparse.Namespace) -> List[RunSam
         for param, lo, hi, _ in _active_time_variations(args):
             setattr(s, param, lo + row[di] * (hi - lo))
             di += 1
+        for param, lo, hi, _ in _active_flyby_variations(args):
+            setattr(s, param, lo + row[di] * (hi - lo))
+            di += 1
         _apply_fixed_run_sample_overrides(s, args)
         _ensure_coh_gap(s, args)
         if args.vary_use_dem:
@@ -1554,6 +1594,8 @@ def sample_column_order(args: argparse.Namespace) -> List[str]:
         order.append(param)
     for param, _, _, _ in _active_time_variations(args):
         order.append(param)
+    for param, _, _, _ in _active_flyby_variations(args):
+        order.append(param)
     if args.vary_use_dem:
         order.append("use_dem")
     if args.vary_use_shape_crop:
@@ -1587,6 +1629,9 @@ def build_salib_problem(args: argparse.Namespace) -> Dict[str, object]:
     for param, lo, hi, _ in _active_time_variations(args):
         names.append(param)
         bounds.append([float(lo), float(hi)])
+    for param, lo, hi, _ in _active_flyby_variations(args):
+        names.append(param)
+        bounds.append([float(lo), float(hi)])
     if args.vary_use_dem:
         names.append("use_dem")
         bounds.append([0.0, 1.0])
@@ -1616,6 +1661,9 @@ def run_sample_from_salib_row(row: Sequence[float], args: argparse.Namespace) ->
         setattr(s, param, float(row[i]))
         i += 1
     for param, _, _, _ in _active_time_variations(args):
+        setattr(s, param, float(row[i]))
+        i += 1
+    for param, _, _, _ in _active_flyby_variations(args):
         setattr(s, param, float(row[i]))
         i += 1
     _apply_fixed_run_sample_overrides(s, args)
@@ -1670,6 +1718,8 @@ def canonical_sweep_descriptor(args: argparse.Namespace) -> str:
     for param, lo, hi, _ in _active_in_variations(args):
         parts.append(f"{param}={lo}:{hi}")
     for param, lo, hi, _ in _active_time_variations(args):
+        parts.append(f"{param}={lo}:{hi}")
+    for param, lo, hi, _ in _active_flyby_variations(args):
         parts.append(f"{param}={lo}:{hi}")
     for param, _, _, _ in _TIME_VARIATION_SPEC:
         fixed_val = getattr(args, param, None)
@@ -1731,6 +1781,8 @@ def build_auto_batch_sweep_slug(args: argparse.Namespace, max_len: int) -> str:
     for _, lo, hi, slug_tok in _active_in_variations(args):
         tokens.append(f"{slug_tok}{_fmt_slug_float(lo)}-{_fmt_slug_float(hi)}")
     for _, lo, hi, slug_tok in _active_time_variations(args):
+        tokens.append(f"{slug_tok}{_fmt_slug_float(lo)}-{_fmt_slug_float(hi)}")
+    for _, lo, hi, slug_tok in _active_flyby_variations(args):
         tokens.append(f"{slug_tok}{_fmt_slug_float(lo)}-{_fmt_slug_float(hi)}")
     for param, _, _, slug_tok in _TIME_VARIATION_SPEC:
         fixed_val = getattr(args, param, None)

@@ -105,3 +105,47 @@ def test_attach_settled_bodies_builds_each_spec_once(tmp_path, monkeypatch):
     assert n == 2 and len(built) == 2
     assert samples[0].settled_body_dir == samples[1].settled_body_dir != samples[2].settled_body_dir
     assert samples[3].settled_body_dir is None
+
+
+SWEEP = ["--body-source", "settled", "--encounter", "hyperbola",
+         "--flyby-rp-km-min", "20000", "--flyby-rp-km-max", "40000",
+         "--flyby-vinf-kms-min", "5", "--flyby-vinf-kms-max", "7",
+         "--flyby-start-sep-km", "1e5", "--tmax-hours", "12", "--dtmax-hours", "0.25",
+         "--np-apophis", "300", "--use-dem-fixed", "true", "--num-samples", "4"]
+
+
+def test_flyby_sweep_dims_fill_samples():
+    a = runner.parse_args(SWEEP)
+    runner.validate_args(a)
+    assert runner.count_dimensions(a) == 2
+    assert runner.sample_column_order(a) == ["flyby_rp_km", "flyby_vinf_kms"]
+    ss = runner.build_run_samples(4, a)
+    assert all(20000 <= s.flyby_rp_km <= 40000 and 5 <= s.flyby_vinf_kms <= 7 for s in ss)
+    assert len({s.flyby_rp_km for s in ss}) == 4
+
+
+def test_flyby_sweep_saltelli_roundtrip():
+    a = runner.parse_args(SWEEP)
+    runner.validate_args(a)
+    prob = runner.build_salib_problem(a)
+    assert prob["names"] == ["flyby_rp_km", "flyby_vinf_kms"]
+    s = runner.run_sample_from_salib_row([25000.0, 6.0], a)
+    assert (s.flyby_rp_km, s.flyby_vinf_kms) == (25000.0, 6.0)
+
+
+def test_flyby_fixed_and_sweep_are_exclusive():
+    with pytest.raises(ValueError, match="flyby-rp-km"):
+        runner.validate_args(runner.parse_args([*SWEEP, "--flyby-rp-km", "30000"]))
+
+
+def test_flyby_sweep_needs_hyperbola():
+    argv = [a for a in SWEEP if a not in ("--encounter", "hyperbola", "--body-source", "settled")]
+    with pytest.raises(ValueError, match="hyperbola"):
+        runner.validate_args(runner.parse_args(argv))
+
+
+def test_flyby_sweep_tmax_checked_at_slowest_corner():
+    argv = list(SWEEP)
+    argv[argv.index("--tmax-hours") + 1] = "3"
+    with pytest.raises(ValueError, match="tmax"):
+        runner.validate_args(runner.parse_args(argv))
