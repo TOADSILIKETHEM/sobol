@@ -149,3 +149,16 @@ def test_flyby_sweep_tmax_checked_at_slowest_corner():
     argv[argv.index("--tmax-hours") + 1] = "3"
     with pytest.raises(ValueError, match="tmax"):
         runner.validate_args(runner.parse_args(argv))
+
+
+def test_flyby_sweep_tmax_checked_at_true_max_not_corner():
+    # t_peri(rp) has an interior max: at v_inf=5, start_sep=1e5, the (rp_min=20000) corner gives
+    # 4.4947 hr (2x = 8.99, passes tmax=9.0), but the true max over [20000, 40000] is 4.5215 hr
+    # at rp~27000 (2x = 9.04, fails tmax=9.0). This must be caught, not just the corner.
+    argv = ["--body-source", "settled", "--encounter", "hyperbola",
+            "--flyby-rp-km-min", "20000", "--flyby-rp-km-max", "40000",
+            "--flyby-vinf-kms", "5",
+            "--flyby-start-sep-km", "1e5", "--tmax-hours", "9.0", "--dtmax-hours", "0.25",
+            "--np-apophis", "300", "--use-dem-fixed", "true", "--num-samples", "4"]
+    with pytest.raises(ValueError, match="tmax"):
+        runner.validate_args(runner.parse_args(argv))

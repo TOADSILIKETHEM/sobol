@@ -1096,11 +1096,14 @@ def _validate_body_encounter(args: argparse.Namespace) -> None:
         raise ValueError("phantomflyby sets no spin (moddump_earthflyby.f90); drop the spin flags")
     if args.vary_apophis_only or getattr(args, "apophis_only_fixed", None) is not None:
         raise ValueError("--encounter hyperbola always has the Earth perturber; drop apophis_only flags")
-    # slowest corner (smallest rp, smallest v_inf) has the longest approach
-    rp = args.flyby_rp_km if args.flyby_rp_km is not None else args.flyby_rp_km_min
-    vinf = args.flyby_vinf_kms if args.flyby_vinf_kms is not None else args.flyby_vinf_kms_min
-    t_peri = _encounter_module().time_to_pericentre_hr(
-        rp, vinf, args.flyby_start_sep_km, args.flyby_perturber_earth_masses)
+    # time_to_pericentre_hr(rp) is not monotonic (interior max, falls to 0 as rp -> start_sep);
+    # grid the whole swept rp x v_inf range rather than trusting a corner.
+    rp_lo = args.flyby_rp_km if args.flyby_rp_km is not None else args.flyby_rp_km_min
+    rp_hi = args.flyby_rp_km if args.flyby_rp_km is not None else args.flyby_rp_km_max
+    vinf_lo = args.flyby_vinf_kms if args.flyby_vinf_kms is not None else args.flyby_vinf_kms_min
+    vinf_hi = args.flyby_vinf_kms if args.flyby_vinf_kms is not None else args.flyby_vinf_kms_max
+    t_peri = _encounter_module()._max_time_to_pericentre_hr(
+        rp_lo, rp_hi, vinf_lo, vinf_hi, args.flyby_start_sep_km, args.flyby_perturber_earth_masses)
     if args.tmax_hours < 2.0 * t_peri:
         raise ValueError(f"--tmax-hours {args.tmax_hours:g} ends before the body is back out to its "
                          f"start separation; need >= {2.0 * t_peri:.3g} hr (2 x time to pericentre)")

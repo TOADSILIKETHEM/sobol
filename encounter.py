@@ -25,6 +25,29 @@ def time_to_pericentre_hr(rp_km: float, vinf_kms: float, start_sep_km: float,
     return mean_anom / math.sqrt(mu / a_abs ** 3) / 3600.0
 
 
+def _max_time_to_pericentre_hr(rp_lo_km: float, rp_hi_km: float, vinf_lo_kms: float, vinf_hi_kms: float,
+                               start_sep_km: float, perturber_earth_masses: float,
+                               n_rp: int = 65, n_vinf: int = 9) -> float:
+    """Worst-case (longest) time to pericentre over a swept rp x v_inf range.
+
+    time_to_pericentre_hr(rp) is NOT monotonic in rp: it has an interior maximum and falls back
+    to 0 as rp approaches start_sep_km, so the (rp_min, vinf_min) corner can understate the true
+    worst case. Grid both dimensions (endpoints included; a fixed value collapses to a single
+    point) and take the max, rather than trusting a corner.
+    """
+    def _grid(lo: float, hi: float, n: int):
+        if lo == hi:
+            return [lo]
+        return [lo + i * (hi - lo) / (n - 1) for i in range(n)]
+
+    rp_vals = _grid(rp_lo_km, rp_hi_km, n_rp)
+    vinf_vals = _grid(vinf_lo_kms, vinf_hi_kms, n_vinf)
+    return max(
+        time_to_pericentre_hr(rp, vinf, start_sep_km, perturber_earth_masses)
+        for rp in rp_vals for vinf in vinf_vals
+    )
+
+
 def _runner():
     try:
         import run_mass_sobol_phantom as mod
