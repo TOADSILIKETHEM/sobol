@@ -144,10 +144,11 @@ class DemTools:
     analysis: Path  # analysis_demshape.f90 build
 
 
-def resolve_dem_tools(phantom_dir: Path) -> DemTools:
+def resolve_dem_tools(phantom_dir: Path, required: Sequence[str] = DEM_TOOL_NAMES) -> DemTools:
+    """Paths of the DEM tools; only those named in `required` must exist."""
     r = _runner()
     try:
-        paths = [r.resolve_phantom_executable(Path(phantom_dir), n, must_exist=True)
+        paths = [r.resolve_phantom_executable(Path(phantom_dir), n, must_exist=n in required)
                  for n in DEM_TOOL_NAMES]
     except FileNotFoundError as exc:
         raise FileNotFoundError(f"{exc}. Build them with: cd sobol && make demtools") from None

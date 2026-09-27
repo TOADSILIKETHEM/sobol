@@ -1187,7 +1187,8 @@ def hours_to_phantom_time_string(h: float) -> str:
 
 
 def replace_setup_assignment(setup_text: str, key: str, value_str: str) -> str:
-    pattern = re.compile(rf"^(\s*{re.escape(key)}\s*=\s*)([^!\n]*)(!.*)?$", re.MULTILINE)
+    # [ \t]* not \s*: a blank value with no comment must not swallow the newline and the next line
+    pattern = re.compile(rf"^([ \t]*{re.escape(key)}[ \t]*=[ \t]*)([^!\n]*)(!.*)?$", re.MULTILINE)
     matches = list(pattern.finditer(setup_text))
     if not matches:
         raise RuntimeError(f"Setup key {key!r} not found in .setup file")
@@ -1197,14 +1198,15 @@ def replace_setup_assignment(setup_text: str, key: str, value_str: str) -> str:
         )
     match = matches[0]
     comment = match.group(3) if match.group(3) is not None else ""
-    updated_line = f"{match.group(1)}{value_str}"
+    lead = match.group(1)
+    updated_line = f"{lead}{value_str}" if lead[-1] in " \t" else f"{lead} {value_str}"
     if comment:
         updated_line += f" {comment.strip()}"
     return pattern.sub(updated_line, setup_text, count=1)
 
 
 def validate_assignment(setup_text: str, key: str, expected: str) -> None:
-    pattern = re.compile(rf"^\s*{re.escape(key)}\s*=\s*([^!\n]*?)\s*(?:!.*)?$", re.MULTILINE)
+    pattern = re.compile(rf"^[ \t]*{re.escape(key)}[ \t]*=[ \t]*([^!\n]*?)[ \t]*(?:!.*)?$", re.MULTILINE)
     match = pattern.search(setup_text)
     if not match:
         raise RuntimeError(f"{key} missing after setup update")
@@ -1412,7 +1414,8 @@ def attach_settled_bodies(
         return 0
     pdem = _particle_dem_module()
     tmpl_rho = float(pdem._setup_value(Path(template_setup).read_text(encoding="utf-8"), "scale_rho") or 1.0)
-    tools = None if dry_run else sb.resolve_dem_tools(Path(phantom_dir))
+    # settling only needs the crop moddump; phantomflyby is resolved later, for hyperbola only
+    tools = None if dry_run else sb.resolve_dem_tools(Path(phantom_dir), required=("phantommoddump",))
     built: Dict[object, object] = {}
     for s in wanted:
         spec = sb.SettleSpec(
@@ -1876,11 +1879,13 @@ def run_command(cmd: Sequence[str], cwd: Path, log_path: Path, *, append: bool =
         raise RuntimeError(f"Command failed ({proc.returncode}): {' '.join(cmd)}")
 
 
-def _phantomsetup_needs_rerun(log_path: Path) -> bool:
-    """True when phantomsetup rewrote .setup and asked for a second pass."""
+def _phantomsetup_needs_rerun(log_path: Path, offset: int = 0) -> bool:
+    """True when phantomsetup rewrote .setup and asked for a second pass (log text from byte offset on)."""
     if not log_path.is_file():
         return False
-    return "rerun phantomsetup" in log_path.read_text(encoding="utf-8", errors="replace")
+    with log_path.open("rb") as f:
+        f.seek(offset)
+        return b"rerun phantomsetup" in f.read()
 
 
 def run_phantomsetup(
@@ -1900,8 +1905,9 @@ def run_phantomsetup(
         )
         with log_path.open("a", encoding="utf-8") as log_file:
             log_file.write("\n--- phantomsetup retry after .setup amend ---\n")
+        second_pass = log_path.stat().st_size
         run_command(cmd, cwd=run_dir, log_path=log_path, append=True)
-        if _phantomsetup_needs_rerun(log_path):
+        if _phantomsetup_needs_rerun(log_path, second_pass):
             raise RuntimeError(
                 f"phantomsetup still requests rerun after second pass; see {log_path}"
             )

@@ -201,7 +201,7 @@ def test_attach_settled_bodies_builds_each_spec_once(tmp_path, monkeypatch):
                               utime_s=2.745e-6, key=f"k{len(built)}")
 
     monkeypatch.setattr(sb, "build_settled_body", fake_build)
-    monkeypatch.setattr(sb, "resolve_dem_tools", lambda d: None)
+    monkeypatch.setattr(sb, "resolve_dem_tools", lambda d, **k: None)
     samples = [RunSample(np_apophis=300, body_source="settled"),
                RunSample(np_apophis=300, body_source="settled"),
                RunSample(np_apophis=500, body_source="settled"),
@@ -414,3 +414,71 @@ def test_slug_has_settled_token_for_settled_body_source():
     runner.validate_args(a)
     slug = runner.build_auto_batch_sweep_slug(a, max_len=200)
     assert "settled" in slug.split("_")
+
+
+# --- final-review fixes ---------------------------------------------------
+
+
+def test_attach_settled_bodies_needs_only_moddump(tmp_path, monkeypatch):
+    # ephemeris/resume batches must not demand phantomflyby (or phantomanalysis) to settle a body
+    import settled_body as sb
+    tool = tmp_path / "phantommoddump"
+    tool.write_text("#!/bin/sh\n")
+    tool.chmod(0o755)
+    seen = {}
+
+    def fake_build(spec, cache_root, template_setup, psetup, phantom, tools, eph):
+        seen["tools"] = tools
+        return sb.SettledBody(dir=tmp_path / "body", dump="d", infile="i", n_kept=310, n_settled=800,
+                              packing_fraction=0.65, utime_s=1.0, key="k")
+
+    monkeypatch.setattr(sb, "build_settled_body", fake_build)
+    samples = [RunSample(use_dem=True, np_apophis=300, body_source="settled")]
+    n = runner.attach_settled_bodies(
+        samples, template_setup=Path(runner.__file__).parent / "sobol.setup",
+        shape_file=runner.resolve_default_shape_file(), settle_tdyn=5.0, relax_tdyn=0.5,
+        cache_root=tmp_path / "cache", phantomsetup_bin=tmp_path / "ps", phantom_bin=tmp_path / "p",
+        phantom_dir=tmp_path, ephemeris_cache_dir=None, dry_run=False)
+    assert n == 1
+    assert seen["tools"].moddump.name == "phantommoddump"
+    assert samples[0].settled_body_dir == str(tmp_path / "body")
+
+
+def test_run_phantomsetup_retry_judges_second_pass_only(tmp_path, monkeypatch):
+    # a template missing a new key: pass 1 rewrites .setup and STOPs, pass 2 succeeds
+    calls = []
+
+    def fake_run(cmd, cwd, log_path, append=False):
+        calls.append(append)
+        with open(log_path, "a" if append else "w") as f:
+            f.write(" ERROR: packing_file not found\n STOP rerun phantomsetup after editing .setup file\n"
+                    if len(calls) == 1 else " writing sobol_00000.tmp\n")
+
+    monkeypatch.setattr(runner, "run_command", fake_run)
+    runner.run_phantomsetup(Path("ps"), "sobol", [], tmp_path, tmp_path / "setup.log")
+    assert calls == [False, True]
+
+
+def test_run_phantomsetup_retry_still_fails_when_second_pass_stops(tmp_path, monkeypatch):
+    def fake_run(cmd, cwd, log_path, append=False):
+        with open(log_path, "a" if append else "w") as f:
+            f.write(" STOP rerun phantomsetup after editing .setup file\n")
+
+    monkeypatch.setattr(runner, "run_command", fake_run)
+    with pytest.raises(RuntimeError, match="second pass"):
+        runner.run_phantomsetup(Path("ps"), "sobol", [], tmp_path, tmp_path / "setup.log")
+
+
+BLANK_NO_COMMENT = ("         pack_settle =           F    ! settle\n"
+                    "        packing_file =\n"
+                    "         pack_expand =       1.800    ! initial cloud radius\n")
+
+
+def test_replace_setup_assignment_blank_value_without_comment_keeps_next_line():
+    out = runner.replace_setup_assignment(BLANK_NO_COMMENT, "packing_file", "settled_body")
+    assert "packing_file = settled_body\n" in out
+    assert "         pack_expand =       1.800    ! initial cloud radius\n" in out
+
+
+def test_validate_assignment_blank_value_does_not_read_next_line():
+    runner.validate_assignment(BLANK_NO_COMMENT, "packing_file", "")
