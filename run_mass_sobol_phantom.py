@@ -3485,6 +3485,44 @@ def _print_run_progress(result: RunRecord, samples: List[RunSample], total: int)
     print(f"[INFO]   status={result.status} run_dir={result.run_dir}", flush=True)
 
 
+def prepare_settled_bodies_and_dem_tools(
+    args: argparse.Namespace,
+    samples: List[RunSample],
+    base_setup: Path,
+    phantomsetup_bin: Path,
+    phantom_bin: Path,
+    ephemeris_cache_dir: Optional[Path],
+) -> Tuple[Optional[Path], Optional[Path]]:
+    """Settle/crop/relax bodies for --body-source settled samples (mutates `samples` in place,
+    setting settled_body_dir), then resolve phantomflyby / phantomanalysis.
+
+    Shared by main() and resume_batch.main() so a resumed batch gets the same treatment as a
+    fresh one: a resumed hyperbola run needs phantomflyby_bin (_run_hyperbola_case refuses to run
+    without it), and a resumed particle-DEM run needs phantomanalysis_bin to keep computing shape
+    metrics (_shape_metrics_or_nan silently no-ops without it).
+    """
+    if args.body_source == "settled":
+        cache_root = (Path(args.body_cache_dir).expanduser().resolve() if args.body_cache_dir
+                      else Path(args.output_root).resolve() / "settled_bodies")
+        n_bodies = attach_settled_bodies(
+            samples, template_setup=base_setup,
+            shape_file=Path(args.shape_file) if args.shape_file else resolve_default_shape_file(),
+            settle_tdyn=args.settle_tdyn, relax_tdyn=args.relax_tdyn, cache_root=cache_root,
+            phantomsetup_bin=phantomsetup_bin, phantom_bin=phantom_bin,
+            phantom_dir=Path(args.phantom_dir).resolve(), ephemeris_cache_dir=ephemeris_cache_dir,
+            dry_run=args.dry_run)
+        print(f"[INFO] {n_bodies} settled body spec(s) ready under {cache_root}", flush=True)
+
+    flyby_bin: Optional[Path] = None
+    if args.body_source == "settled" and not args.dry_run:
+        flyby_bin = _settled_body_module().resolve_dem_tools(Path(args.phantom_dir).resolve()).flyby
+
+    analysis_bin = resolve_phantom_executable(Path(args.phantom_dir).resolve(), "phantomanalysis",
+                                              must_exist=False)
+    analysis_bin = analysis_bin if analysis_bin.is_file() else None
+    return flyby_bin, analysis_bin
+
+
 def main() -> int:
     argv_cli, interactive = _strip_interactive_flags(sys.argv[1:])
     if interactive:
@@ -3561,17 +3599,8 @@ def main() -> int:
 
         base_setup, base_input, phantomsetup_bin, phantom_bin = preflight(args, base_dir, output_root)
 
-        if args.body_source == "settled":
-            cache_root = (Path(args.body_cache_dir).expanduser().resolve() if args.body_cache_dir
-                          else Path(args.output_root).resolve() / "settled_bodies")
-            n_bodies = attach_settled_bodies(
-                samples, template_setup=base_setup,
-                shape_file=Path(args.shape_file) if args.shape_file else resolve_default_shape_file(),
-                settle_tdyn=args.settle_tdyn, relax_tdyn=args.relax_tdyn, cache_root=cache_root,
-                phantomsetup_bin=phantomsetup_bin, phantom_bin=phantom_bin,
-                phantom_dir=Path(args.phantom_dir).resolve(), ephemeris_cache_dir=ephemeris_cache,
-                dry_run=args.dry_run)
-            print(f"[INFO] {n_bodies} settled body spec(s) ready under {cache_root}", flush=True)
+        flyby_bin, analysis_bin = prepare_settled_bodies_and_dem_tools(
+            args, samples, base_setup, phantomsetup_bin, phantom_bin, ephemeris_cache)
 
         if args.saltelli_n is not None and problem is not None and saltelli_meta is not None:
             (output_root / "saltelli_problem.json").write_text(
@@ -3583,14 +3612,6 @@ def main() -> int:
     except Exception as exc:
         print(f"[ERROR] {exc}", file=sys.stderr)
         return 1
-
-    flyby_bin: Optional[Path] = None
-    if args.body_source == "settled" and not args.dry_run:
-        flyby_bin = _settled_body_module().resolve_dem_tools(Path(args.phantom_dir).resolve()).flyby
-
-    analysis_bin = resolve_phantom_executable(Path(args.phantom_dir).resolve(), "phantomanalysis",
-                                              must_exist=False)
-    analysis_bin = analysis_bin if analysis_bin.is_file() else None
 
     col_order = sample_column_order(args)
     samples_csv = output_root / "sobol_mass_samples.csv"

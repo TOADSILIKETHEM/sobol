@@ -43,6 +43,7 @@ from sobol.run_mass_sobol_phantom import (  # noqa: E402
     build_np_spin_grid_samples,
     build_run_samples,
     preflight,
+    prepare_settled_bodies_and_dem_tools,
     sample_column_order,
     validate_args,
     write_summary_csv,
@@ -222,6 +223,12 @@ def main() -> int:
 
     ref_mass_kg = args.apophis_ref_mass_kg if _mass_bounds_active(args) else None
 
+    # Same settled-body attach + DEM tool resolution as a fresh main() run, so a resumed
+    # hyperbola batch gets phantomflyby_bin and a resumed particle-DEM batch keeps computing
+    # shape metrics via phantomanalysis_bin.
+    flyby_bin, analysis_bin = prepare_settled_bodies_and_dem_tools(
+        args, samples, base_setup, phantomsetup_bin, phantom_bin, ephemeris_cache)
+
     payloads = [
         RunWorkerPayload(
             run_id=rid,
@@ -238,6 +245,8 @@ def main() -> int:
             apophis_sink_id=args.sink_apophis_id,
             ephemeris_cache_dir=str(ephemeris_cache) if ephemeris_cache else None,
             shape_file=args.shape_file if args.shape_file else None,
+            phantomflyby_bin=str(flyby_bin) if flyby_bin else None,
+            phantomanalysis_bin=str(analysis_bin) if analysis_bin else None,
         )
         for rid in todo_ids
     ]
