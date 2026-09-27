@@ -47,10 +47,40 @@ Output per batch: `sobol_mass_samples.csv` (input parameters), `sobol_mass_outpu
   `--tmax-hours` must be at least 2× the **true max** time to pericentre over the whole swept rp/v_inf range —
   `encounter._max_time_to_pericentre_hr()` grids both dimensions (65×9) because `time_to_pericentre_hr(rp)` has an
   interior maximum and falls to 0 as `rp` approaches `--flyby-start-sep-km`, so the worst case is not at a sweep
-  corner.
-- **`--body-source settled --encounter ephemeris`** (Mia's Option 2 step 4, the real 2029 flyby with a settled
-  body): **blocked as of 2026-09-27** — Mia's `packing_file` setup key is on no pushed branch. See
-  `../docs/MIA_PACKING_WORKFLOW.md`.
+  corner. Pericentre must satisfy `R_EARTH_KM` (6371) `< rp < --flyby-start-sep-km` over the whole swept range (CLI
+  and TUI).
+- **Rejected with settled/hyperbola** (`_validate_body_encounter()`): `--dem-model sink`, varied `use_dem`,
+  `--mass-min/max-kg`, `--scale-r-apophis-*`, a kn sweep, `--scale-rho-*` sweeps (one settle per sample; a fixed
+  template `scale_rho` is fine), `use_shape_crop` flags (the body carries its shape). **Hyperbola only:**
+  `--scale-vel-*`/`--scale-pos-*` (the hyperbola path never runs `phantomsetup`), spin flags, `apophis_only` flags.
+  `--flyby-rp-km`/`--flyby-vinf-kms` without `--encounter hyperbola` are rejected.
+- **Outputs:** hyperbola rows fill `np_apophis`/`scale_rho` from the sample (written when those columns are in
+  `sample_column_order()`) and every settled-body batch (hyperbola or ephemeris) adds **`np_kept`** (grains kept after the crop, `body.json`
+  `n_kept` — not `np_apophis`; np=300 kept 391 of 923 settled), blank on dry-run rows. Column detail:
+  `../docs/METRICS.md`. Batch slug gains `hyp` / `settled` tokens.
+- **Resume:** `resume_batch.py` calls the same `prepare_settled_bodies_and_dem_tools()` as `main()` (settled bodies
+  + `phantomflyby` for hyperbola only / `phantomanalysis`). Pass the original `--output-root`/`--body-cache-dir`, else the cache misses and
+  the body is rebuilt.
+- **Known gaps (Sep 2026):** CLI + TUI building the same new cache key at the same time is unguarded; the cache is
+  never pruned; a settle failure during resume prints a traceback; `Analysis/Analysis.py` classic mode has no
+  `flyby_rp_km`/`flyby_vinf_kms` in `INPUT_CANDIDATES`.
+- **TUI:** `tui_sim_render.py` has the same `body_source`/`encounter`/flyby fields — `docs/tui_sim_render.md`.
+- **`--body-source settled --encounter ephemeris`** (Mia's Option 2 step 4: settled body on the real 2029 flyby;
+  wired 2026-09-27). `run_one_case` → `encounter.apply_settled_body_to_setup()` copies the cached dump to
+  `run_XXXX/settled_body`, stages the body's own shape (`body.json` `spec.shape_file`; body mass = shape volume ×
+  `rho_0*scale_rho`), patches `packing_file = settled_body`, `pack_settle = F`, `apophis_shape_file`, `np_apophis =
+  n_kept`, then the normal `phantomsetup` → `phantom` path. Earth stays sink 4. Spin and `--scale-vel-*`/`--scale-pos-*`
+  apply here. `check_packing_setup_log()` fails the run unless `setup.log` says `placed <n_kept> pre-built grains`
+  and has no sphere-volume fallback. Preflight refuses a `phantomsetup` without the `packing_file` string. Needs
+  phantom `DEMsync-mia` ≥ `464ea28fa` (Mia `853b86818` + `get_conserv` reset; not pushed) — without the reset,
+  `phantom` dies at step 2 with "Large error in angular momentum conservation". Semantics:
+  `../docs/MIA_PACKING_WORKFLOW.md`. Example (np300, 30 hr spin, 12 hr):
+  `OMP_NUM_THREADS=1 python3 sobol/run_mass_sobol_phantom.py --base-dir sobol --prefix sobol --phantom-dir
+  /home/mboyle/Honours/sobol --ephemeris-cache-dir sobol --use-dem-fixed true --np-apophis-list 300 --body-source
+  settled --spin-period-fixed 30 --tmax-hours 12 --dtmax-hours 1 --num-samples 1 --jobs 1`
+- **Template `packing_file =` (blank)** in `sobol/sobol.setup` is required: `phantomsetup` since `853b86818` counts a
+  missing key as a read error, rewrites the `.setup` and stops. Any other `.setup` template (campaign `--base-dir`,
+  old run dirs) needs the line too. Pre-merge binaries (`bin_demsync_7a243de`) ignore it.
 - **Tools:** `cd sobol && make demtools` builds `phantommoddump` (crop, default build), `phantomflyby`
   (`moddump_earthflyby.f90`), `phantomanalysis` (`analysis_demshape.f90`); binaries land at `sobol/<name>` (repo
   root) — `resolve_dem_tools()` prefers a `bin/<name>` copy if one exists. `phantomflyby` needs phantom
@@ -167,6 +197,7 @@ cd sobol && make demtools
 Hyperbola sweep over pericentre and v_inf (settled np=300 body, built once, reused across the sweep):
 ```bash
 OMP_NUM_THREADS=1 python3 sobol/run_mass_sobol_phantom.py --phantom-dir /home/mboyle/Honours/sobol \
+  --base-dir sobol --prefix sobol \
   --ephemeris-cache-dir sobol --use-dem-fixed true --np-apophis 300 --body-source settled \
   --encounter hyperbola --flyby-rp-km-min 20000 --flyby-rp-km-max 40000 \
   --flyby-vinf-kms-min 5 --flyby-vinf-kms-max 7 --tmax-hours 48 --dtmax-hours 0.5 \
