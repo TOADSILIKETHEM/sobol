@@ -941,6 +941,20 @@ class SimRenderTUIApp(App[None]):
                 raise ValueError("hyperbola needs tmax (hr) and dtmax (hr)")
             if sample.apophis_spin_period is not None or sample.apophis_spin_torque_align_deg is not None:
                 raise ValueError("hyperbola has no spin; clear spin_period and spin_torque_align")
+            if sample.flyby_rp_km <= 0:
+                raise ValueError("flyby_rp_km must be > 0")
+            if sample.flyby_vinf_kms <= 0:
+                raise ValueError("flyby_vinf_kms must be > 0")
+            if sample.flyby_start_sep_km <= 0:
+                raise ValueError("flyby_start_sep_km must be > 0")
+            import encounter as enc
+            t_peri = enc.time_to_pericentre_hr(
+                sample.flyby_rp_km, sample.flyby_vinf_kms, sample.flyby_start_sep_km,
+                sample.flyby_perturber_earth_masses)
+            if sample.tmax_hours < 2.0 * t_peri:
+                raise ValueError(
+                    f"tmax {sample.tmax_hours:g} hr ends before the body is back out to its "
+                    f"start separation; need >= {2.0 * t_peri:.3g} hr (2 x time to pericentre)")
         if body_source == "settled" and encounter == "ephemeris":
             raise ValueError("settled + ephemeris needs Mia's packing_file (not pushed yet)")
         eph_cache_raw = self._iv("eph-cache")

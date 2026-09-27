@@ -1731,3 +1731,55 @@ def test_run_sim_stage_builds_settled_body_and_uses_earth_1(tmp_path, monkeypatc
     assert seen["run"]["phantomflyby_bin"] == tmp_path / "f"
     assert seen["run"]["sample"].settled_body_dir == str(tmp_path / "body")
     assert seen["attach"]["cache_root"] == (tmp_path / "out").parent / "settled_bodies"
+
+
+# --- _build_sim_params hyperbola validation (Task 10 fix round 1) ----------
+
+
+def _set_hyperbola_form(app, *, rp="38000", vinf="5.9", sep="1e5", tmax="8", dtmax="0.5"):
+    app.query_one("#body-source", tsr.Select).value = "settled"
+    app.query_one("#encounter", tsr.Select).value = "hyperbola"
+    app.query_one("#flyby-rp", tsr.Input).value = rp
+    app.query_one("#flyby-vinf", tsr.Input).value = vinf
+    app.query_one("#flyby-sep", tsr.Input).value = sep
+    app.query_one("#tmax-hours", tsr.Input).value = tmax
+    app.query_one("#dtmax-hours", tsr.Input).value = dtmax
+
+
+def test_build_sim_params_hyperbola_rejects_too_short_tmax():
+    async def _scenario():
+        app = tsr.SimRenderTUIApp()
+        async with app.run_test():
+            _set_hyperbola_form(app, rp="38000", vinf="5.9", sep="4e5", tmax="1")
+            with pytest.raises(ValueError, match="tmax"):
+                app._build_sim_params(False)
+
+    asyncio.run(_scenario())
+
+
+def test_build_sim_params_hyperbola_rejects_non_positive_rp():
+    async def _scenario():
+        app = tsr.SimRenderTUIApp()
+        async with app.run_test():
+            _set_hyperbola_form(app, rp="-1000")
+            with pytest.raises(ValueError, match="flyby_rp_km must be > 0"):
+                app._build_sim_params(False)
+
+    asyncio.run(_scenario())
+
+
+def test_build_sim_params_hyperbola_step5_settings_pass():
+    async def _scenario():
+        app = tsr.SimRenderTUIApp()
+        async with app.run_test():
+            _set_hyperbola_form(app, rp="38000", vinf="5.9", sep="1e5", tmax="8", dtmax="0.5")
+            return app._build_sim_params(False)
+
+    params = asyncio.run(_scenario())
+
+    assert params.sample.body_source == "settled"
+    assert params.sample.encounter == "hyperbola"
+    assert params.sample.flyby_rp_km == 38000.0
+    assert params.sample.flyby_vinf_kms == 5.9
+    assert params.sample.flyby_start_sep_km == 1e5
+    assert params.sample.tmax_hours == 8.0
