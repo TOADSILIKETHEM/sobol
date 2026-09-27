@@ -74,3 +74,14 @@ def test_sink_run_without_setup_file_still_converts(tmp_path):
     # no setup -> legacy MIN_DEM_GRAINS default 450 > 307 fixture grains; pass it explicitly
     run_dem_dump_convert(run, CONVERT, out, 250)
     assert len(sorted((out / "batch" / "run_0001_grains_output").glob("*.npz"))) >= 4
+
+
+def test_flyby_run_bodies_are_earth_and_apophis(tmp_path):
+    import pandas as pd
+    out = _convert(tmp_path, "particle_flyby_np300")
+    csvs = sorted((out / "run_0001_bodies_output").glob("*.csv"))
+    assert csvs
+    for c in csvs:
+        assert list(pd.read_csv(c)["name"]) == ["Earth", "Apophis"]
+    g = np.load(sorted((out / "run_0001_grains_output").glob("*.npz"))[0])
+    assert len(g["x_vis"]) >= 250
