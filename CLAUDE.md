@@ -20,6 +20,47 @@ Output per batch: `sobol_mass_samples.csv` (input parameters), `sobol_mass_outpu
 - **`--no-cleanup`:** Default deletes binary dumps, `.ev`, and `phantom.log` after metrics extraction. Pass `--no-cleanup` to keep files for Blender / `sarracen`. **Cleanup is default ON everywhere**: runner, torque-align reruns, and `tui_sim_render.py` (raw dumps deleted once npz convert is verified; tick `keep_dumps` to keep).
 - **Parallelism on dev laptop (i7-12650H, WSL2):** 6 P-cores + 4 E-cores, 16 logical CPUs. **`--jobs 2`** with `OMP_NUM_THREADS=1` is the recommended sweet spot (~2× throughput, avoids thermal throttling seen at 3–4 jobs). Optional: `OMP_NUM_THREADS=2` with `--jobs 2` (4 threads total) for modest extra gain. Do not default to `--jobs 4` on this machine.
 
+### Settled bodies and hyperbola encounters (Sep 2026)
+
+- **`--body-source {lattice,settled}`** (default `lattice`). `settled`: `settled_body.py` settles (`pack_settle=T`,
+  `apophis_only=T`; the settle `.setup` sets `idamp=2`), crops (`phantommoddump`, default/crop build) and relaxes
+  (`--relax-tdyn`, default 0.5 t_dyn) one body per `(np_apophis, scale_rho, shape_file, binaries)` into
+  `<cache-root>/<key>/` (`body.json`; `<cache-root>` = `--body-cache-dir` or `<output-root>/settled_bodies`). Built
+  serially in `attach_settled_bodies()` (called from `main()`, before workers start) so two workers never settle the
+  same body at once; the cache key is content-hashed (spec + shape/mesh + binary SHA256s), so a rebuilt
+  `phantom`/`phantomsetup`/`phantommoddump` or an edited shape file invalidates it automatically. A `<key>.partial`
+  dir (crash/Ctrl-C, or an unconverged settle) is discarded and rebuilt on the next call.
+  `build_settled_body()` refuses to cache a settle with `packing_fraction < MIN_SETTLED_PACKING = 0.5` (raises
+  `RuntimeError`, tells you to raise `--settle-tdyn`) — a loose cloud needs its full free-fall time to collapse.
+  **Measured 2026-09-27 at np=300:** `--settle-tdyn 5` (the default) converges; a real build kept 391/923 grains at
+  `packing_fraction 0.834` in ~13 s. `kn_cgs=1e7` (Mia's default) under self-gravity at this N gives ~13% grain
+  overlap, so `packing_phi` runs above Mia's ~0.66 at 10k grains (overlap falls as N⁻¹/³, worse at small N) — expect
+  `packing_phi` and kept-grain counts above nominal at low `np_apophis`.
+- **`--encounter {ephemeris,hyperbola}`** (default `ephemeris`; `hyperbola` needs `--body-source settled`):
+  `encounter.py` runs `phantomflyby` on the cached body with `--flyby-rp-km`/`--flyby-vinf-kms` (fixed), or swept as
+  an optional Sobol/Saltelli dimension pair via `--flyby-rp-km-min/-max` and `--flyby-vinf-kms-min/-max` (both bounds
+  required together, mutually exclusive with the fixed flag per parameter), and `--flyby-start-sep-km` (default
+  4e5). `patch_encounter_in()` forces `idamp = 0` in the flyby `.in` — load-bearing: `phantomflyby` copies the
+  settle's `idamp = 2` forward verbatim, and without this the settle's damping would leak into every hyperbola run.
+  Writes `encounter.json` and a record `sobol.setup` (never read by `phantomsetup`, just a manifest for the
+  converter). Earth = sink 1 (`--sink-earth-id` auto-set). No spin (the flyby moddump sets none).
+  `--tmax-hours` must be at least 2× the **true max** time to pericentre over the whole swept rp/v_inf range —
+  `encounter._max_time_to_pericentre_hr()` grids both dimensions (65×9) because `time_to_pericentre_hr(rp)` has an
+  interior maximum and falls to 0 as `rp` approaches `--flyby-start-sep-km`, so the worst case is not at a sweep
+  corner.
+- **`--body-source settled --encounter ephemeris`** (Mia's Option 2 step 4, the real 2029 flyby with a settled
+  body): **blocked as of 2026-09-27** — Mia's `packing_file` setup key is on no pushed branch. See
+  `../docs/MIA_PACKING_WORKFLOW.md`.
+- **Tools:** `cd sobol && make demtools` builds `phantommoddump` (crop, default build), `phantomflyby`
+  (`moddump_earthflyby.f90`), `phantomanalysis` (`analysis_demshape.f90`); binaries land at `sobol/<name>` (repo
+  root) — `resolve_dem_tools()` prefers a `bin/<name>` copy if one exists. **Needs phantom `DEMsync-mia` commit
+  `0c3f4b06d` (not pushed):** `moddump_earthflyby.f90`'s `set_binary` call previously omitted
+  `posang_ascnode`/`arg_peri`/`incl`, so the true anomaly was silently ignored and the body was placed at a fixed
+  "apastron" formula point instead of the requested incoming-hyperbola point — every `phantomflyby` run (including
+  Mia's) got the wrong orbit. Rebuild `demtools` after pulling that commit.
+- With `phantomanalysis` present, every particle-DEM run (ephemeris or hyperbola) also gets **`shape_b_on_a`**,
+  **`shape_c_on_a`**, **`packing_phi`**, **`f_unbound_energy`** in the CSV (see `../docs/METRICS.md`).
+
 ## Architecture: interactive wizard
 
 `sobol/interactive_run_mass_sobol.py` — imported by the runner when `-i` is passed.
@@ -118,6 +159,20 @@ python3 sobol/Analysis/Analysis.py --method saltelli \
 Parallel jobs with OpenMP PHANTOM (prevent thread oversubscription on shared laptops):
 ```bash
 OMP_NUM_THREADS=1 python3 sobol/run_mass_sobol_phantom.py --jobs 2 [flags]
+```
+
+Build the DEM crop/flyby/shape tools once (needed for `--body-source settled`):
+```bash
+cd sobol && make demtools
+```
+
+Hyperbola sweep over pericentre and v_inf (settled np=300 body, built once, reused across the sweep):
+```bash
+OMP_NUM_THREADS=1 python3 sobol/run_mass_sobol_phantom.py --phantom-dir /home/mboyle/Honours/sobol \
+  --ephemeris-cache-dir sobol --use-dem-fixed true --np-apophis 300 --body-source settled \
+  --encounter hyperbola --flyby-rp-km-min 20000 --flyby-rp-km-max 40000 \
+  --flyby-vinf-kms-min 5 --flyby-vinf-kms-max 7 --tmax-hours 48 --dtmax-hours 0.5 \
+  --num-samples 16 --jobs 2 --no-cleanup
 ```
 
 Keep dumps for visualisation (default auto-deletes heavy files after each run):
