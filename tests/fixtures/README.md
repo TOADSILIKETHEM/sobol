@@ -16,3 +16,8 @@ were deleted after the run.
 
 PHANTOM deletes `sobol_00000.tmp` when the run starts; use `sobol_00000` (t=0).
 Grain mass is `params['massoftype_2']` in sarracen (`params['mass']` is the gas type, 0).
+
+- `particle_flyby_np300/` (committed): settled np=300 body (settle 5 t_dyn, relax 0.25 t_dyn) on a
+  phantomflyby hyperbola, rp 38000 km, v_inf 5.9 km/s, start 1e5 km, 8 hr, dumps every 2 hr.
+  Earth is the only sink (sink 1). Regenerate with the runner command in
+  `docs/superpowers/plans/2026-09-26-settled-body-pipeline.md` Task 5 Step 7.

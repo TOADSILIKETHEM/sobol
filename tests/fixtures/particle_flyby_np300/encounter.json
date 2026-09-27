@@ -1,0 +1,10 @@
+{
+  "mode": "hyperbola",
+  "rp_km": 38000.0,
+  "vinf_kms": 5.9,
+  "start_sep_km": 100000.0,
+  "perturber_earth_masses": 1.0,
+  "body_dir": "/home/mboyle/.claude/jobs/abc922b6/tmp/fx/settled_bodies/np300_srho1_1d571f920e94",
+  "body_key": "np300_srho1_1d571f920e94",
+  "n_kept": 391
+}

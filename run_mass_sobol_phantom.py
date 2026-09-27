@@ -342,6 +342,8 @@ class RunWorkerPayload(NamedTuple):
     apophis_sink_id: int
     ephemeris_cache_dir: Optional[str]
     shape_file: Optional[str]
+    phantomflyby_bin: Optional[str] = None
+    phantomanalysis_bin: Optional[str] = None
 
 
 def _shape_crop_may_be_enabled(args: argparse.Namespace) -> bool:
@@ -3144,6 +3146,47 @@ def compute_run_metrics(
     )
 
 
+def _run_hyperbola_case(
+    run_id: int, sample: RunSample, base_setup: Path, run_dir: Path, prefix: str, phantom_bin: Path,
+    dry_run: bool, earth_sink_id: int, apophis_sink_id: int,
+    phantomflyby_bin: Optional[Path], phantomanalysis_bin: Optional[Path],
+) -> RunRecord:
+    """Settled body on a phantomflyby hyperbola: no phantomsetup; Earth is sink 1."""
+    enc = _encounter_module()
+    nan = float("nan")
+    param_columns: Dict[str, str] = {"body_source": "settled", "encounter": "hyperbola"}
+    if dry_run:
+        enc.write_record_setup(base_setup, run_dir / f"{prefix}.setup", int(sample.np_apophis))
+        return RunRecord(run_id=run_id, mass_input_kg=nan, run_dir=str(run_dir), status="prepared_only",
+                         closest_approach_km=nan, closest_approach_au=nan, error="",
+                         param_columns=param_columns)
+    try:
+        if not sample.settled_body_dir or phantomflyby_bin is None:
+            raise RuntimeError("hyperbola run without a settled body or phantomflyby (make demtools)")
+        body = _settled_body_module().SettledBody.load(Path(sample.settled_body_dir))
+        param_columns.update(enc.prepare_hyperbola_run(
+            run_dir, prefix, sample, body, Path(phantomflyby_bin), base_setup))
+        maxp_flag = [f"--maxp={max(2000, 4 * body.n_kept)}"]
+        resolve_coh_gap_after_setup(run_dir, prefix, sample)
+        param_columns.update(apply_run_sample_to_in(run_dir / f"{prefix}.in", sample))
+        run_command([str(phantom_bin), f"{prefix}.in", *maxp_flag], cwd=run_dir,
+                    log_path=run_dir / "phantom.log")
+        m = compute_run_metrics(run_dir, prefix, sample, earth_sink_id, apophis_sink_id)
+        return RunRecord(
+            run_id=run_id, mass_input_kg=nan, run_dir=str(run_dir), status="ok",
+            closest_approach_km=m.closest_km, closest_approach_au=m.closest_au, error="",
+            dispersion_ratio=m.dispersion_ratio, unbound_fraction=m.unbound_fraction,
+            intrinsic_spin_period_hr=m.intrinsic_spin_period_hr,
+            approach_spin_period_hr=m.approach_spin_period_hr,
+            post_flyby_spin_period_hr=m.post_flyby_spin_period_hr,
+            param_columns=param_columns,
+        )
+    except Exception as exc:  # pragma: no cover - runtime path
+        return RunRecord(run_id=run_id, mass_input_kg=nan, run_dir=str(run_dir), status="failed",
+                         closest_approach_km=nan, closest_approach_au=nan, error=str(exc),
+                         param_columns=param_columns)
+
+
 def run_one_case(
     run_id: int,
     sample: RunSample,
@@ -3159,9 +3202,14 @@ def run_one_case(
     apophis_sink_id: int,
     ephemeris_cache_dir: Optional[Path] = None,
     shape_file: Optional[str] = None,
+    phantomflyby_bin: Optional[Path] = None,
+    phantomanalysis_bin: Optional[Path] = None,
 ) -> RunRecord:
     run_dir = output_root / f"run_{run_id:04d}"
     run_dir.mkdir(parents=True, exist_ok=True)
+    if sample.encounter == "hyperbola":
+        return _run_hyperbola_case(run_id, sample, base_setup, run_dir, prefix, phantom_bin, dry_run,
+                                   earth_sink_id, apophis_sink_id, phantomflyby_bin, phantomanalysis_bin)
     run_setup = run_dir / f"{prefix}.setup"
     run_input = run_dir / f"{prefix}.in"
     shutil.copy2(base_setup, run_setup)
@@ -3286,6 +3334,8 @@ def _execute_run_worker(payload: RunWorkerPayload) -> RunRecord:
         payload.apophis_sink_id,
         Path(payload.ephemeris_cache_dir) if payload.ephemeris_cache_dir else None,
         payload.shape_file,
+        Path(payload.phantomflyby_bin) if payload.phantomflyby_bin else None,
+        Path(payload.phantomanalysis_bin) if payload.phantomanalysis_bin else None,
     )
 
 
@@ -3414,6 +3464,10 @@ def main() -> int:
         print(f"[ERROR] {exc}", file=sys.stderr)
         return 1
 
+    flyby_bin: Optional[Path] = None
+    if args.body_source == "settled" and not args.dry_run:
+        flyby_bin = _settled_body_module().resolve_dem_tools(Path(args.phantom_dir).resolve()).flyby
+
     col_order = sample_column_order(args)
     samples_csv = output_root / "sobol_mass_samples.csv"
     summary_csv = output_root / "sobol_mass_outputs.csv"
@@ -3449,6 +3503,7 @@ def main() -> int:
             apophis_sink_id=args.sink_apophis_id,
             ephemeris_cache_dir=str(ephemeris_cache) if ephemeris_cache is not None else None,
             shape_file=args.shape_file if args.shape_file else None,
+            phantomflyby_bin=str(flyby_bin) if flyby_bin else None,
         )
         for idx, sample in enumerate(samples, start=1)
     ]
