@@ -53,11 +53,9 @@ Output per batch: `sobol_mass_samples.csv` (input parameters), `sobol_mass_outpu
   `../docs/MIA_PACKING_WORKFLOW.md`.
 - **Tools:** `cd sobol && make demtools` builds `phantommoddump` (crop, default build), `phantomflyby`
   (`moddump_earthflyby.f90`), `phantomanalysis` (`analysis_demshape.f90`); binaries land at `sobol/<name>` (repo
-  root) — `resolve_dem_tools()` prefers a `bin/<name>` copy if one exists. **Needs phantom `DEMsync-mia` commit
-  `0c3f4b06d` (not pushed):** `moddump_earthflyby.f90`'s `set_binary` call previously omitted
-  `posang_ascnode`/`arg_peri`/`incl`, so the true anomaly was silently ignored and the body was placed at a fixed
-  "apastron" formula point instead of the requested incoming-hyperbola point — every `phantomflyby` run (including
-  Mia's) got the wrong orbit. Rebuild `demtools` after pulling that commit.
+  root) — `resolve_dem_tools()` prefers a `bin/<name>` copy if one exists. `phantomflyby` needs phantom
+  `DEMsync-mia` commit `0c3f4b06d` (orbit fix, not pushed); see `../docs/CONTEXT_CHANGELOG.md` 2026-09-27.
+  Rebuild with `make demtools` after pulling it.
 - With `phantomanalysis` present, every particle-DEM run (ephemeris or hyperbola) also gets **`shape_b_on_a`**,
   **`shape_c_on_a`**, **`packing_phi`**, **`f_unbound_energy`** in the CSV (see `../docs/METRICS.md`).
 
