@@ -117,3 +117,49 @@ def test_main_success_returns_0(tmp_path):
     assert rc == 0
     m = json.loads((out / "manifest.json").read_text())
     assert (m["sim_name"], m["run_name"]) == ("S", "R")
+
+
+def test_rotations_match_per_sphere_draw(tmp_path):
+    # DEMGrainsBlenderEarthCam.py draws one Euler triple per grain in frame 0's
+    # stored order; the sorted points must carry each grain's own triple.
+    grains, bodies, out = _run_dirs(tmp_path)
+    _write_grain_npz(grains / "sobol_00000.npz", [2, 0, 1])
+    _write_grain_npz(grains / "sobol_00001.npz", [0, 1, 2])
+
+    vgi.build_grains_instance(grains, bodies, out, rotation_seed=0)
+
+    per_sphere = np.random.default_rng(0).uniform(0.0, 2.0 * np.pi, size=(3, 3))
+    by_gid = {2: per_sphere[0], 0: per_sphere[1], 1: per_sphere[2]}
+    for fid in ("00000", "00001"):
+        f = np.load(out / "points" / f"{fid}.npz")
+        assert f["rot"].dtype == np.float32
+        assert list(f["grain_id"]) == [0, 1, 2]
+        for i, gid in enumerate(f["grain_id"]):
+            assert np.allclose(f["rot"][i], by_gid[int(gid)])
+
+
+def test_handles_follow_fcurve_solve(tmp_path):
+    from viz.fcurve_handles import right_handle_offsets
+
+    grains, bodies, out = _run_dirs(tmp_path)
+    for i, off in enumerate([0.0, 1.0, 5.0, 4.0]):
+        _write_grain_npz(grains / f"sobol_{i:05d}.npz", [1, 0], offset=off)
+
+    m = json.loads(vgi.build_grains_instance(grains, bodies, out).read_text())
+
+    pos = np.stack([np.load(out / "points" / f"{fid}.npz")["pos"] for fid in m["frame_ids"]])
+    h = np.stack([np.load(out / "points" / f"{fid}.npz")["handle"] for fid in m["frame_ids"]])
+    assert np.allclose(h, right_handle_offsets(pos.astype(np.float64)), atol=1e-6)
+    assert m["interpolation"] == {"mode": "bezier", "auto_smoothing": "CONT_ACCEL", "handle_key": "handle"}
+    assert m["rotation_seed"] == 0
+
+
+def test_grain_id_set_change_exits_1(tmp_path, capsys):
+    grains, bodies, out = _run_dirs(tmp_path)
+    _write_grain_npz(grains / "sobol_00000.npz", [0, 1, 2])
+    _write_grain_npz(grains / "sobol_00001.npz", [0, 1, 3])
+
+    rc = vgi.main(["--grains-dir", str(grains), "--bodies-dir", str(bodies), "--output-dir", str(out)])
+
+    assert rc == 1
+    assert "different grain ids" in capsys.readouterr().err

@@ -1736,6 +1736,43 @@ def test_run_sim_stage_builds_settled_body_and_uses_earth_1(tmp_path, monkeypatc
 # --- _build_sim_params hyperbola validation (Task 10 fix round 1) ----------
 
 
+def test_flyby_and_time_inputs_are_prefilled():
+    async def _scenario():
+        app = tsr.SimRenderTUIApp()
+        async with app.run_test():
+            return {
+                "tmax": app.query_one("#tmax-hours", tsr.Input).value,
+                "dtmax": app.query_one("#dtmax-hours", tsr.Input).value,
+                "rp": app.query_one("#flyby-rp", tsr.Input).value,
+                "vinf": app.query_one("#flyby-vinf", tsr.Input).value,
+            }
+
+    values = asyncio.run(_scenario())
+
+    assert values == {
+        "tmax": tsr.DEFAULT_TMAX_HOURS,
+        "dtmax": tsr.DEFAULT_DTMAX_HOURS,
+        "rp": tsr.DEFAULT_FLYBY_RP_KM,
+        "vinf": tsr.DEFAULT_FLYBY_VINF_KMS,
+    }
+
+
+def test_hyperbola_accepts_prefilled_flyby_and_time_defaults():
+    async def _scenario():
+        app = tsr.SimRenderTUIApp()
+        async with app.run_test():
+            app.query_one("#body-source", tsr.Select).value = "settled"
+            app.query_one("#encounter", tsr.Select).value = "hyperbola"
+            return app._build_sim_params(False)
+
+    params = asyncio.run(_scenario())
+
+    assert params.sample.flyby_rp_km == 38000.0
+    assert params.sample.flyby_vinf_kms == 5.9
+    assert params.sample.tmax_hours == 108.0
+    assert params.sample.dtmax_hours == 0.5
+
+
 def _set_hyperbola_form(app, *, rp="38000", vinf="5.9", sep="1e5", tmax="8", dtmax="0.5"):
     app.query_one("#body-source", tsr.Select).value = "settled"
     app.query_one("#encounter", tsr.Select).value = "hyperbola"

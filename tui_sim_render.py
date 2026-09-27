@@ -109,6 +109,16 @@ DEFAULT_PLACEHOLDER_OBJ = to_windows_path(
     / "gbo.ast-apophis.jpl.radar.shape_model_v1.0" / "data" / "apophis_v233s7.obj"
 )
 
+# Form defaults. tmax/dtmax match sobol/sobol.setup (4.5 days, 30 min) so a
+# filled box does not shorten an ephemeris run. 108 hr also clears the
+# hyperbola rule tmax >= 2 * time-to-pericentre at the flyby defaults below
+# (~35.4 hr when start separation is 4e5 km). Flyby pair is the 2029-like
+# geocentric pass (rp 38000 km, v_inf 5.9 km/s).
+DEFAULT_TMAX_HOURS = "108"
+DEFAULT_DTMAX_HOURS = "0.5"
+DEFAULT_FLYBY_RP_KM = "38000"
+DEFAULT_FLYBY_VINF_KMS = "5.9"
+
 _WIN_DRIVE_RE = re.compile(r"^([a-zA-Z]):[\\/](.*)$")
 
 
@@ -795,8 +805,8 @@ class SimRenderTUIApp(App[None]):
                 "kt_cgs", Input("", id="kt-cgs", placeholder="(template default)"), "dyne/cm",
             )
             yield _Row("dn_cohes_factor", Input(str(DEFAULT_DN_COHES_FACTOR), id="dn-cohes-factor"), "float")
-            yield _Row("tmax (hr)", Input("", id="tmax-hours", placeholder="(template default)"), "hr")
-            yield _Row("dtmax (hr)", Input("", id="dtmax-hours", placeholder="(template default)"), "hr")
+            yield _Row("tmax (hr)", Input(DEFAULT_TMAX_HOURS, id="tmax-hours"), "hr")
+            yield _Row("dtmax (hr)", Input(DEFAULT_DTMAX_HOURS, id="dtmax-hours"), "hr")
             yield _Row("sink_earth_id", Input(str(EARTH_SINK_ID_DEFAULT), id="sink-earth"), "int")
             yield _Row("sink_apophis_id", Input(str(APOPHIS_SINK_ID_DEFAULT), id="sink-apophis"), "int")
             yield _Row(
@@ -817,8 +827,8 @@ class SimRenderTUIApp(App[None]):
                        id="encounter", allow_blank=False),
                 "hyperbola needs settled; no spin",
             )
-            yield _Row("flyby_rp_km", Input("", id="flyby-rp", placeholder="e.g. 38000"), "km")
-            yield _Row("flyby_vinf_kms", Input("", id="flyby-vinf", placeholder="e.g. 5.9"), "km/s")
+            yield _Row("flyby_rp_km", Input(DEFAULT_FLYBY_RP_KM, id="flyby-rp"), "km")
+            yield _Row("flyby_vinf_kms", Input(DEFAULT_FLYBY_VINF_KMS, id="flyby-vinf"), "km/s")
             yield _Row("flyby_start_sep_km", Input("4e5", id="flyby-sep"), "km")
             yield _Row(
                 "keep_dumps",
