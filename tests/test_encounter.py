@@ -11,7 +11,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 import encounter as enc
 import settled_body as sb
-from run_mass_sobol_phantom import RunSample
+from run_mass_sobol_phantom import RunSample, resolve_default_shape_file
 
 TEMPLATE = Path(__file__).parent.parent / "sobol.setup"
 
@@ -113,3 +113,90 @@ def test_real_hyperbola_run_hits_pericentre(tmp_path):
     assert row["status"] == "ok", row["error"]
     assert float(row["closest_approach_km"]) == pytest.approx(38000.0, rel=0.02)
     assert row["unbound_fraction"] != ""
+
+SHAPE = resolve_default_shape_file()
+
+
+def _ephem_body(tmp_path):
+    d = tmp_path / "ebody"
+    d.mkdir()
+    (d / "cropped_00002").write_text("dump")
+    (d / "cropped.in").write_text(BODY_IN)
+    (d / "body.json").write_text(json.dumps({
+        "key": "np300_srho1_abc", "dump": "cropped_00002", "infile": "cropped.in", "n_kept": 310,
+        "n_settled": 812, "packing_fraction": 0.651, "utime_s": 2.745e-6,
+        "spec": {"np_apophis": 300, "scale_rho": 1.0, "shape_file": str(SHAPE)}}))
+    return sb.SettledBody.load(d)
+
+
+def _ephem_run(tmp_path):
+    run = tmp_path / "run_0001"
+    run.mkdir()
+    (run / "sobol.setup").write_text(TEMPLATE.read_text())
+    return run
+
+
+def test_settled_body_load_reads_shape_file_from_spec(tmp_path):
+    assert _ephem_body(tmp_path).shape_file == str(SHAPE)
+    assert _body(tmp_path).shape_file == ""  # manifests without a spec block still load
+
+
+def test_template_setup_has_no_packing_file_key():
+    # old binaries (bin_demsync_7a243de) must keep reading the template
+    assert "packing_file" not in TEMPLATE.read_text()
+
+
+def test_apply_settled_body_to_setup(tmp_path):
+    run = _ephem_run(tmp_path)
+    cols = enc.apply_settled_body_to_setup(run, "sobol", _ephem_body(tmp_path))
+    s = (run / "sobol.setup").read_text()
+    assert _val(s, "packing_file") == "settled_body"
+    assert len(re.findall(r"^\s*packing_file\s*=", s, re.M)) == 1
+    assert _val(s, "pack_settle") == "F"
+    assert _val(s, "np_apophis") == "310"
+    assert _val(s, "apophis_shape_file") == SHAPE.name
+    assert (run / "settled_body").read_text() == "dump"
+    assert (run / SHAPE.name).is_file()
+    assert cols == {"body_source": "settled", "np_kept": "310"}
+
+
+def test_apply_settled_body_to_setup_twice_keeps_one_key(tmp_path):
+    run = _ephem_run(tmp_path)
+    body = _ephem_body(tmp_path)
+    enc.apply_settled_body_to_setup(run, "sobol", body)
+    enc.apply_settled_body_to_setup(run, "sobol", body)
+    s = (run / "sobol.setup").read_text()
+    assert len(re.findall(r"^\s*packing_file\s*=", s, re.M)) == 1
+
+
+def test_apply_settled_body_refuses_body_without_shape(tmp_path):
+    with pytest.raises(RuntimeError, match="shape_file"):
+        enc.apply_settled_body_to_setup(_ephem_run(tmp_path), "sobol", _body(tmp_path))
+
+
+def test_check_packing_setup_log_ok(tmp_path):
+    log = tmp_path / "setup.log"
+    log.write_bytes(b" loaded 310 grains from settled_body\n\x00 placed 310 pre-built grains on the ephemeris orbit\n")
+    enc.check_packing_setup_log(log, 310)
+
+
+def test_check_packing_setup_log_stale_binary(tmp_path):
+    log = tmp_path / "setup.log"
+    log.write_text(" particles kept: 300\n")
+    with pytest.raises(RuntimeError, match="packing_file"):
+        enc.check_packing_setup_log(log, 310)
+
+
+def test_check_packing_setup_log_sphere_fallback(tmp_path):
+    log = tmp_path / "setup.log"
+    log.write_text(" placed 310 pre-built grains on the ephemeris orbit\n"
+                   " WARNING! apophis: could not read shape for packing_file volume: using a sphere\n")
+    with pytest.raises(RuntimeError, match="sphere"):
+        enc.check_packing_setup_log(log, 310)
+
+
+def test_check_packing_setup_log_wrong_count(tmp_path):
+    log = tmp_path / "setup.log"
+    log.write_text(" placed 300 pre-built grains on the ephemeris orbit\n")
+    with pytest.raises(RuntimeError, match="310"):
+        enc.check_packing_setup_log(log, 310)

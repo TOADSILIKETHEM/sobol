@@ -126,3 +126,55 @@ def prepare_hyperbola_run(run_dir: Path, prefix: str, sample, body, phantomflyby
     return {"body_source": "settled", "encounter": "hyperbola",
             "flyby_rp_km": f"{sample.flyby_rp_km:.12g}", "flyby_vinf_kms": f"{sample.flyby_vinf_kms:.12g}",
             "np_kept": str(body.n_kept)}
+
+
+PACKING_FILE_NAME = "settled_body"
+_PACKING_FILE_LINE = (f"{'packing_file':>20} = {PACKING_FILE_NAME:<12}"
+                      "! dump holding a pre-built body (settled+cropped); blank = build one\n")
+
+
+def _set_packing_file(text: str) -> str:
+    """Point packing_file at the staged body; insert the key after pack_settle when absent
+    (kept out of the template so pre-merge binaries never see it)."""
+    r = _runner()
+    if re.search(r"^\s*packing_file\s*=", text, re.M):
+        return r.replace_setup_assignment(text, "packing_file", PACKING_FILE_NAME)
+    m = re.search(r"^\s*pack_settle\s*=.*\n", text, re.M)
+    at = m.end() if m else len(text)
+    return text[:at] + _PACKING_FILE_LINE + text[at:]
+
+
+def apply_settled_body_to_setup(run_dir: Path, prefix: str, body) -> Dict[str, str]:
+    """Stage the cached body and its shape, and point the run's .setup at them (Mia Option 2 step 4).
+
+    phantomsetup takes the body volume, hence its mass, from apophis_shape_file; a blank one only
+    warns and falls back to a sphere, so the body's own shape is always staged.
+    """
+    r = _runner()
+    run_dir = Path(run_dir)
+    if not body.shape_file:
+        raise RuntimeError(f"settled body {body.dir} has no shape_file in body.json; delete it and rebuild")
+    shutil.copy2(Path(body.dir) / body.dump, run_dir / PACKING_FILE_NAME)
+    shape_name = r.stage_shape_assets(Path(body.shape_file), run_dir)
+    setup = run_dir / f"{prefix}.setup"
+    text = _set_packing_file(setup.read_text(encoding="utf-8"))
+    for key, val in (("pack_settle", r.format_logical_token(False)), ("apophis_shape_file", shape_name)):
+        text = r.replace_setup_assignment(text, key, val)
+        r.validate_assignment(text, key, val)
+    text = r._NP_APOPHIS_RE.sub(lambda m: m.group(1) + str(int(body.n_kept)), text, count=1)
+    setup.write_text(text, encoding="utf-8")
+    return {"body_source": "settled", "np_kept": str(body.n_kept)}
+
+
+def check_packing_setup_log(setup_log: Path, n_kept: int) -> None:
+    """Refuse a settled-ephemeris run whose phantomsetup did not load the body as asked."""
+    text = Path(setup_log).read_bytes().replace(b"\x00", b"").decode("utf-8", errors="replace")
+    if "could not read shape for packing_file volume" in text:
+        raise RuntimeError(f"phantomsetup sized the packing_file body as a sphere (shape unreadable); "
+                           f"body mass is wrong. See {setup_log}")
+    m = re.search(r"placed\s+(\d+)\s+pre-built grains", text)
+    if m is None:
+        raise RuntimeError(f"phantomsetup never loaded packing_file (binary without phantom 853b86818? "
+                           f"cd sobol && make setup && make). See {setup_log}")
+    if int(m.group(1)) != int(n_kept):
+        raise RuntimeError(f"phantomsetup placed {m.group(1)} grains but the body has {n_kept}. See {setup_log}")

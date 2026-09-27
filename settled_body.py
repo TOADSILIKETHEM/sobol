@@ -164,13 +164,15 @@ class SettledBody:
     packing_fraction: float
     utime_s: float          # seconds per code time unit
     key: str
+    shape_file: str = ""    # resolved .shape/.obj the body was cropped to (from body.json spec)
 
     @classmethod
     def load(cls, body_dir: Path) -> "SettledBody":
         m = json.loads((Path(body_dir) / "body.json").read_text(encoding="utf-8"))
         return cls(dir=Path(body_dir), dump=m["dump"], infile=m["infile"], n_kept=int(m["n_kept"]),
                    n_settled=int(m["n_settled"]), packing_fraction=float(m["packing_fraction"]),
-                   utime_s=float(m["utime_s"]), key=m["key"])
+                   utime_s=float(m["utime_s"]), key=m["key"],
+                   shape_file=str(m.get("spec", {}).get("shape_file", "")))
 
 
 def settle_maxp(np_apophis: int) -> int:
