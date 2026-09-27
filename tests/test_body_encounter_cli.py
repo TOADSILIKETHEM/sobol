@@ -118,7 +118,7 @@ def test_flyby_sweep_dims_fill_samples():
     a = runner.parse_args(SWEEP)
     runner.validate_args(a)
     assert runner.count_dimensions(a) == 2
-    assert runner.sample_column_order(a) == ["flyby_rp_km", "flyby_vinf_kms"]
+    assert runner.sample_column_order(a) == ["flyby_rp_km", "flyby_vinf_kms", "np_kept"]
     ss = runner.build_run_samples(4, a)
     assert all(20000 <= s.flyby_rp_km <= 40000 and 5 <= s.flyby_vinf_kms <= 7 for s in ss)
     assert len({s.flyby_rp_km for s in ss}) == 4
@@ -162,3 +162,74 @@ def test_flyby_sweep_tmax_checked_at_true_max_not_corner():
             "--np-apophis", "300", "--use-dem-fixed", "true", "--num-samples", "4"]
     with pytest.raises(ValueError, match="tmax"):
         runner.validate_args(runner.parse_args(argv))
+
+
+# --- Fix 1: hyperbola CSV rows carry np_apophis / scale_rho / np_kept ------
+
+
+def test_hyperbola_dry_run_fills_np_apophis(tmp_path):
+    a = runner.parse_args(["--np-apophis-list", "300", "500", "--use-dem-fixed", "true", *HYPER])
+    runner.validate_args(a)
+    for np_val, sample in zip((300, 500), runner.build_np_list_samples(a)):
+        run_dir = tmp_path / f"run_{np_val}"
+        run_dir.mkdir()
+        rec = runner._run_hyperbola_case(
+            run_id=1, sample=sample, base_setup=Path(runner.__file__).parent / "sobol.setup",
+            run_dir=run_dir, prefix="sobol", phantom_bin=Path("phantom"), dry_run=True,
+            earth_sink_id=1, apophis_sink_id=2, phantomflyby_bin=None, phantomanalysis_bin=None)
+        assert rec.param_columns["np_apophis"] == str(np_val)
+
+
+def test_sample_column_order_always_has_np_kept_for_hyperbola():
+    a = _args(*HYPER)
+    runner.validate_args(a)
+    assert "np_kept" in runner.sample_column_order(a)
+
+
+def test_hyperbola_real_run_fills_np_kept(tmp_path, monkeypatch):
+    import json
+    import stat
+    import settled_body as sb
+
+    body_dir = tmp_path / "body"
+    body_dir.mkdir()
+    (body_dir / "cropped_00002").write_text("dump")
+    (body_dir / "cropped.in").write_text(
+        "                tmax =   1.000E+09    ! end time\n"
+        "               dtmax =   1.000E+08    ! time between dumps\n"
+        "           nfulldump =           1    ! full dump every n dumps\n"
+        "              kn_cgs =   1.000E+07    ! DEM normal spring constant\n"
+        "               idamp =           2    ! artificial damping of velocities\n"
+    )
+    (body_dir / "body.json").write_text(json.dumps({
+        "key": "np300_srho1_abc", "dump": "cropped_00002", "infile": "cropped.in", "n_kept": 310,
+        "n_settled": 812, "packing_fraction": 0.651, "utime_s": 2.745e-6}))
+
+    flyby_bin = tmp_path / "phantomflyby"
+    flyby_bin.write_text(
+        "#!/bin/sh\ncat > flyby_stdin.txt\n: > \"$2_00000\"\ncp body.in \"$2.in\"\n"
+    )
+    flyby_bin.chmod(flyby_bin.stat().st_mode | stat.S_IXUSR)
+
+    phantom_bin = tmp_path / "phantom"
+    phantom_bin.write_text("#!/bin/sh\nexit 0\n")
+    phantom_bin.chmod(phantom_bin.stat().st_mode | stat.S_IXUSR)
+
+    run_dir = tmp_path / "run_0001"
+    run_dir.mkdir()
+
+    sample = runner.RunSample(use_dem=True, dem_model="particle", np_apophis=300,
+                              body_source="settled", encounter="hyperbola",
+                              flyby_rp_km=38000.0, flyby_vinf_kms=5.9, flyby_start_sep_km=4.0e5,
+                              flyby_perturber_earth_masses=1.0, tmax_hours=48.0, dtmax_hours=0.5,
+                              settled_body_dir=str(body_dir))
+    monkeypatch.setattr(runner, "compute_run_metrics",
+                        lambda *a, **k: runner.RunMetrics(38000.0, 0.0, float("nan"), float("nan"),
+                                                          float("nan"), float("nan"), float("nan")))
+    rec = runner._run_hyperbola_case(
+        run_id=1, sample=sample, base_setup=Path(runner.__file__).parent / "sobol.setup",
+        run_dir=run_dir, prefix="sobol", phantom_bin=phantom_bin, dry_run=False,
+        earth_sink_id=1, apophis_sink_id=2, phantomflyby_bin=flyby_bin, phantomanalysis_bin=None)
+    assert rec.status == "ok", rec.error
+    assert rec.param_columns["np_kept"] == "310"
+    assert rec.param_columns["np_apophis"] == "300"

@@ -1617,6 +1617,10 @@ def sample_column_order(args: argparse.Namespace) -> List[str]:
         if _resolve_kt_fixed(args) is not None:
             order.append("kt_cgs")
             order.append("coh_gap_max_cgs")
+    # Grains kept after the crop (only known once the settled body is loaded/built); always
+    # written for a hyperbola batch, blank on dry-run rows.
+    if args.encounter == "hyperbola":
+        order.append("np_kept")
     return order
 
 
@@ -3233,6 +3237,14 @@ def _run_hyperbola_case(
     enc = _encounter_module()
     nan = float("nan")
     param_columns: Dict[str, str] = {"body_source": "settled", "encounter": "hyperbola"}
+    # The lattice path fills np_apophis / scale_rho via apply_run_sample_to_setup, but the
+    # hyperbola path never runs phantomsetup, so fill them here from the sample directly (the
+    # other _SCALE_VARIATION_SPEC / DEM-in-file params either raise in _validate_body_encounter
+    # for settled bodies, or are already filled below via apply_run_sample_to_in).
+    if sample.np_apophis is not None:
+        param_columns["np_apophis"] = str(sample.np_apophis)
+    if sample.scale_rho is not None:
+        param_columns["scale_rho"] = f"{sample.scale_rho:.12g}"
     if dry_run:
         enc.write_record_setup(base_setup, run_dir / f"{prefix}.setup", int(sample.np_apophis))
         return RunRecord(run_id=run_id, mass_input_kg=nan, run_dir=str(run_dir), status="prepared_only",
