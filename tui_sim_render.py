@@ -28,6 +28,7 @@ from run_mass_sobol_phantom import (  # noqa: E402
     RunRecord,
     EARTH_SINK_ID_DEFAULT,
     APOPHIS_SINK_ID_DEFAULT,
+    R_EARTH_KM,
     DEFAULT_DN_COHES_FACTOR,
     _cleanup_run_dir,
     attach_settled_bodies,
@@ -947,6 +948,10 @@ class SimRenderTUIApp(App[None]):
                 raise ValueError("flyby_vinf_kms must be > 0")
             if sample.flyby_start_sep_km <= 0:
                 raise ValueError("flyby_start_sep_km must be > 0")
+            if not (R_EARTH_KM < sample.flyby_rp_km < sample.flyby_start_sep_km):
+                raise ValueError(
+                    f"flyby_rp_km must satisfy R_EARTH_KM ({R_EARTH_KM:g} km) < rp < "
+                    f"flyby_start_sep_km ({sample.flyby_start_sep_km:g} km), got {sample.flyby_rp_km:g}")
             import encounter as enc
             t_peri = enc.time_to_pericentre_hr(
                 sample.flyby_rp_km, sample.flyby_vinf_kms, sample.flyby_start_sep_km,

@@ -1768,6 +1768,28 @@ def test_build_sim_params_hyperbola_rejects_non_positive_rp():
     asyncio.run(_scenario())
 
 
+def test_build_sim_params_hyperbola_rejects_rp_inside_earth():
+    async def _scenario():
+        app = tsr.SimRenderTUIApp()
+        async with app.run_test():
+            _set_hyperbola_form(app, rp="5000")  # < R_EARTH_KM (6371)
+            with pytest.raises(ValueError, match="R_EARTH_KM|Earth"):
+                app._build_sim_params(False)
+
+    asyncio.run(_scenario())
+
+
+def test_build_sim_params_hyperbola_rejects_rp_past_start_sep():
+    async def _scenario():
+        app = tsr.SimRenderTUIApp()
+        async with app.run_test():
+            _set_hyperbola_form(app, rp="150000", sep="100000")
+            with pytest.raises(ValueError, match="start_sep|start-sep"):
+                app._build_sim_params(False)
+
+    asyncio.run(_scenario())
+
+
 def test_build_sim_params_hyperbola_step5_settings_pass():
     async def _scenario():
         app = tsr.SimRenderTUIApp()

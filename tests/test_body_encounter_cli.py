@@ -248,3 +248,36 @@ def test_hyperbola_real_run_fills_np_kept(tmp_path, monkeypatch):
 def test_hyperbola_rejects_setup_only_sweeps(extra, match):
     with pytest.raises(ValueError, match=match):
         runner.validate_args(_args(*HYPER, *extra))
+
+
+# --- Fix 4: pericentre must sit strictly between Earth's radius and start_sep
+
+
+def test_hyperbola_rejects_rp_inside_earth():
+    argv = list(HYPER)
+    argv[argv.index("--flyby-rp-km") + 1] = "5000"  # < R_EARTH_KM (6371)
+    with pytest.raises(ValueError, match="R_EARTH_KM|Earth"):
+        runner.validate_args(_args(*argv))
+
+
+def test_hyperbola_rejects_rp_past_start_sep():
+    argv = list(HYPER)
+    argv[argv.index("--flyby-rp-km") + 1] = "150000"
+    argv[argv.index("--flyby-start-sep-km") + 1] = "100000"
+    with pytest.raises(ValueError, match="start_sep|start-sep"):
+        runner.validate_args(_args(*argv))
+
+
+def test_hyperbola_sweep_rejects_rp_bounds_inside_earth():
+    argv = list(SWEEP)
+    argv[argv.index("--flyby-rp-km-min") + 1] = "5000"
+    with pytest.raises(ValueError, match="R_EARTH_KM|Earth"):
+        runner.validate_args(runner.parse_args(argv))
+
+
+def test_hyperbola_sweep_rejects_rp_bounds_past_start_sep():
+    argv = list(SWEEP)
+    argv[argv.index("--flyby-rp-km-max") + 1] = "150000"
+    argv[argv.index("--flyby-start-sep-km") + 1] = "100000"
+    with pytest.raises(ValueError, match="start_sep|start-sep"):
+        runner.validate_args(runner.parse_args(argv))

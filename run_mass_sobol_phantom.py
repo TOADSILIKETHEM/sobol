@@ -41,6 +41,7 @@ SPIN_INTRINSIC_MAX_CA_FRACTION = 0.3
 SPIN_APPROACH_HOURS_BEFORE_CA = 24.0
 EARTH_SINK_ID_DEFAULT = 4
 APOPHIS_SINK_ID_DEFAULT = 11
+R_EARTH_KM = 6371.0  # mean Earth radius; hyperbola pericentre must clear this and stay short of start_sep
 
 # Literature Apophis shape assets (Shapes/apophis_v233s7.obj longest axis ~0.409741 km).
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -1118,6 +1119,11 @@ def _validate_body_encounter(args: argparse.Namespace) -> None:
     rp_hi = args.flyby_rp_km if args.flyby_rp_km is not None else args.flyby_rp_km_max
     vinf_lo = args.flyby_vinf_kms if args.flyby_vinf_kms is not None else args.flyby_vinf_kms_min
     vinf_hi = args.flyby_vinf_kms if args.flyby_vinf_kms is not None else args.flyby_vinf_kms_max
+    if rp_lo <= R_EARTH_KM or rp_hi >= args.flyby_start_sep_km:
+        raise ValueError(
+            f"flyby pericentre must satisfy R_EARTH_KM ({R_EARTH_KM:g} km) < rp < "
+            f"flyby_start_sep_km ({args.flyby_start_sep_km:g} km) across the whole swept range; "
+            f"got rp in [{rp_lo:g}, {rp_hi:g}]")
     t_peri = _encounter_module()._max_time_to_pericentre_hr(
         rp_lo, rp_hi, vinf_lo, vinf_hi, args.flyby_start_sep_km, args.flyby_perturber_earth_masses)
     if args.tmax_hours < 2.0 * t_peri:
