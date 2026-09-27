@@ -5,6 +5,7 @@
           np_apophis =           1    ! number of particles used to represent apophis (0=none; 1=sink; n=gas)
   apophis_shape_file =                ! shape config file for lattice cropping (blank = sphere)
          pack_settle =           F    ! start from a loose cloud and settle under gravity
+        packing_file =                ! dump holding a pre-built body (settled+cropped); blank = build one
          pack_expand =       1.800    ! initial cloud radius / target radius (settling mode)
             pack_phi =       0.640    ! packing fraction used to size DEM grains (settling mode)
                epoch =  2029-04-10    ! epoch to query ephemeris, YYYY-MMM-DD HH:MM:SS.fff, blank = today

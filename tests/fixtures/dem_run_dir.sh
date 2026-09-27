@@ -33,6 +33,7 @@ cat > sobol.setup <<EOF
         mass_apophis =       0.000
   apophis_shape_file =  apophis.shape
          pack_settle =           F
+        packing_file =
          pack_expand =       1.800
             pack_phi =       0.640
  apophis_spin_period =    7200.000

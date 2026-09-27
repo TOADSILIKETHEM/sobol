@@ -141,9 +141,12 @@ def test_settled_body_load_reads_shape_file_from_spec(tmp_path):
     assert _body(tmp_path).shape_file == ""  # manifests without a spec block still load
 
 
-def test_template_setup_has_no_packing_file_key():
-    # old binaries (bin_demsync_7a243de) must keep reading the template
-    assert "packing_file" not in TEMPLATE.read_text()
+def test_template_setup_has_blank_packing_file_key():
+    # phantomsetup since 853b86818 counts a missing packing_file key as a read error and stops;
+    # blank = build the body as before. Pre-merge binaries (bin_demsync_7a243de) ignore the extra key.
+    s = TEMPLATE.read_text()
+    assert len(re.findall(r"^\s*packing_file\s*=", s, re.M)) == 1
+    assert _val(s, "packing_file") == ""
 
 
 def test_apply_settled_body_to_setup(tmp_path):
