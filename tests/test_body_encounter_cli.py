@@ -25,9 +25,118 @@ def test_defaults_are_lattice_ephemeris():
     assert (s.body_source, s.encounter, s.settled_body_dir) == ("lattice", "ephemeris", None)
 
 
-def test_settled_ephemeris_blocked_until_packing_file():
-    with pytest.raises(ValueError, match="packing_file"):
-        runner.validate_args(_args("--body-source", "settled"))
+EPHEM = ["--body-source", "settled"]
+
+
+def test_settled_ephemeris_allowed_with_packing_file():
+    a = _args(*EPHEM)
+    runner.validate_args(a)
+    assert a.sink_earth_id == runner.EARTH_SINK_ID_DEFAULT
+
+
+@pytest.mark.parametrize("extra", [
+    ("--spin-period-fixed", "30"),
+    ("--scale-vel-min", "0.9", "--scale-vel-max", "1.1"),
+    ("--scale-pos-min", "0.9", "--scale-pos-max", "1.1"),
+])
+def test_settled_ephemeris_allows_spin_and_setup_sweeps(extra):
+    runner.validate_args(_args(*EPHEM, *extra))
+
+
+@pytest.mark.parametrize("extra,match", [
+    (("--scale-rho-min", "0.9", "--scale-rho-max", "1.1"), "scale_rho"),
+    (("--use-shape-crop-fixed", "true"), "use_shape_crop"),
+    (("--flyby-rp-km", "38000"), "--encounter hyperbola"),
+    (("--flyby-vinf-kms", "5.9"), "--encounter hyperbola"),
+])
+def test_settled_ephemeris_rejects(extra, match):
+    with pytest.raises(ValueError, match=match):
+        runner.validate_args(_args(*EPHEM, *extra))
+
+
+def test_settled_ephemeris_column_order_has_np_kept():
+    a = _args(*EPHEM)
+    runner.validate_args(a)
+    assert "np_kept" in runner.sample_column_order(a)
+
+
+def test_prepare_tools_ephemeris_checks_packing_key_and_skips_flyby(tmp_path, monkeypatch):
+    import settled_body as sb
+    a = _args(*EPHEM, "--phantom-dir", str(tmp_path))
+    runner.validate_args(a)
+    monkeypatch.setattr(runner, "attach_settled_bodies", lambda samples, **k: 1)
+    monkeypatch.setattr(sb, "resolve_dem_tools", lambda d: pytest.fail("phantomflyby not needed for ephemeris"))
+    setup_bin = tmp_path / "phantomsetup"
+    setup_bin.write_bytes(b"\x00np_apophis\x00")
+    with pytest.raises(RuntimeError, match="packing_file"):
+        runner.prepare_settled_bodies_and_dem_tools(a, [], tmp_path / "s.setup", setup_bin,
+                                                    tmp_path / "phantom", None)
+    setup_bin.write_bytes(b"\x00packing_file\x00")
+    flyby, _ = runner.prepare_settled_bodies_and_dem_tools(a, [], tmp_path / "s.setup", setup_bin,
+                                                           tmp_path / "phantom", None)
+    assert flyby is None
+
+
+def test_run_one_case_settled_ephemeris_stages_body(tmp_path, monkeypatch):
+    import json
+    body_dir = tmp_path / "body"
+    body_dir.mkdir()
+    (body_dir / "cropped_00002").write_text("dump")
+    (body_dir / "body.json").write_text(json.dumps({
+        "key": "np300_srho1_abc", "dump": "cropped_00002", "infile": "cropped.in", "n_kept": 310,
+        "n_settled": 812, "packing_fraction": 0.651, "utime_s": 2.745e-6,
+        "spec": {"shape_file": str(runner.resolve_default_shape_file())}}))
+    seen = {}
+
+    def fake_setup(bin_, prefix, maxp_flag, run_dir, log):
+        seen["maxp"] = maxp_flag
+        seen["setup"] = (run_dir / f"{prefix}.setup").read_text()
+        (run_dir / "setup.log").write_text(" placed 310 pre-built grains on the ephemeris orbit\n")
+
+    monkeypatch.setattr(runner, "run_phantomsetup", fake_setup)
+    monkeypatch.setattr(runner, "run_command", lambda *a, **k: None)
+    monkeypatch.setattr(runner, "compute_run_metrics",
+                        lambda *a, **k: runner.RunMetrics(38000.0, 0.0, float("nan"), float("nan"),
+                                                          float("nan"), float("nan"), float("nan")))
+    base_in = tmp_path / "sobol.in"
+    base_in.write_text("           nfulldump =           5    ! full dump every n dumps\n")
+    sample = runner.RunSample(use_dem=True, dem_model="particle", np_apophis=300,
+                              body_source="settled", settled_body_dir=str(body_dir))
+    rec = runner.run_one_case(
+        run_id=1, sample=sample, base_setup=Path(runner.__file__).parent / "sobol.setup",
+        base_input=base_in, output_root=tmp_path / "out", prefix="sobol",
+        phantomsetup_bin=Path("x"), phantom_bin=Path("y"), ref_mass_kg=None, dry_run=False,
+        earth_sink_id=4, apophis_sink_id=11)
+    assert rec.status == "ok", rec.error
+    assert rec.param_columns["np_kept"] == "310"
+    assert "settled_body" in seen["setup"]
+    assert seen["maxp"] == ["--maxp=2000"]
+    assert (tmp_path / "out" / "run_0001" / "settled_body").read_text() == "dump"
+
+
+def test_run_one_case_settled_ephemeris_fails_on_stale_binary(tmp_path, monkeypatch):
+    import json
+    body_dir = tmp_path / "body"
+    body_dir.mkdir()
+    (body_dir / "cropped_00002").write_text("dump")
+    (body_dir / "body.json").write_text(json.dumps({
+        "key": "k", "dump": "cropped_00002", "infile": "cropped.in", "n_kept": 310,
+        "n_settled": 812, "packing_fraction": 0.651, "utime_s": 2.745e-6,
+        "spec": {"shape_file": str(runner.resolve_default_shape_file())}}))
+    monkeypatch.setattr(runner, "run_phantomsetup",
+                        lambda b, p, m, d, log: (d / "setup.log").write_text(" particles kept: 300\n"))
+    monkeypatch.setattr(runner, "run_command", lambda *a, **k: pytest.fail("phantom must not run"))
+    base_in = tmp_path / "sobol.in"
+    base_in.write_text("           nfulldump =           5    ! full dump every n dumps\n")
+    sample = runner.RunSample(use_dem=True, dem_model="particle", np_apophis=300,
+                              body_source="settled", settled_body_dir=str(body_dir))
+    rec = runner.run_one_case(
+        run_id=1, sample=sample, base_setup=Path(runner.__file__).parent / "sobol.setup",
+        base_input=base_in, output_root=tmp_path / "out", prefix="sobol",
+        phantomsetup_bin=Path("x"), phantom_bin=Path("y"), ref_mass_kg=None, dry_run=False,
+        earth_sink_id=4, apophis_sink_id=11)
+    assert rec.status == "failed"
+    assert "packing_file" in rec.error
 
 
 def test_hyperbola_needs_settled_body():

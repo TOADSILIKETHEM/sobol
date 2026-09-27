@@ -1054,6 +1054,8 @@ def _validate_body_encounter(args: argparse.Namespace) -> None:
     hyper = args.encounter == "hyperbola"
     if _active_flyby_variations(args) and args.encounter != "hyperbola":
         raise ValueError("--flyby-*-min/max need --encounter hyperbola")
+    if args.encounter != "hyperbola" and (args.flyby_rp_km is not None or args.flyby_vinf_kms is not None):
+        raise ValueError("--flyby-rp-km/--flyby-vinf-kms need --encounter hyperbola")
     if not (settled or hyper):
         return
     if args.dem_model != "particle":
@@ -1064,9 +1066,6 @@ def _validate_body_encounter(args: argparse.Namespace) -> None:
     if hyper and not settled:
         raise ValueError("--encounter hyperbola needs --body-source settled "
                          "(phantomflyby expects a bare body dump with no sinks)")
-    if settled and not hyper:
-        raise ValueError("--body-source settled with --encounter ephemeris needs Mia's packing_file "
-                         "setup key, which is not pushed yet (plan Task 11, docs/MIA_PACKING_WORKFLOW.md)")
     if _mass_bounds_active(args):
         raise ValueError("settled bodies take density from scale_rho (crop needs bulk density); "
                          "drop --mass-min-kg/--mass-max-kg")
@@ -1074,21 +1073,23 @@ def _validate_body_encounter(args: argparse.Namespace) -> None:
         raise ValueError("settled bodies take their size from the shape file; drop --scale-r-apophis-*")
     if getattr(args, "kn_min", None) is not None:
         raise ValueError("a kn sweep would settle one body per run; not supported with settled bodies")
-    if args.scale_vel_min is not None or args.scale_vel_max is not None:
+    if hyper and (args.scale_vel_min is not None or args.scale_vel_max is not None):
         raise ValueError("scale_vel patches the .setup file, which the hyperbola path never runs "
                          "through phantomsetup; drop --scale-vel-min/--scale-vel-max")
-    if args.scale_pos_min is not None or args.scale_pos_max is not None:
+    if hyper and (args.scale_pos_min is not None or args.scale_pos_max is not None):
         raise ValueError("scale_pos patches the .setup file, which the hyperbola path never runs "
                          "through phantomsetup; drop --scale-pos-min/--scale-pos-max")
     if args.vary_use_shape_crop or args.use_shape_crop_fixed is not None:
-        raise ValueError("use_shape_crop patches the .setup file, which the hyperbola path never runs "
-                         "through phantomsetup; drop --vary-use-shape-crop/--use-shape-crop-fixed")
+        raise ValueError("settled bodies carry their own shape (body.json), so use_shape_crop does not "
+                         "apply; drop --vary-use-shape-crop/--use-shape-crop-fixed")
     if args.scale_rho_min is not None or args.scale_rho_max is not None:
         raise ValueError("a scale_rho sweep would settle one body per sample; not supported with "
                          "settled bodies (a fixed scale_rho in the template .setup is fine)")
     if args.np_apophis is None and getattr(args, "np_apophis_list", None) is None:
         raise ValueError("--body-source settled needs --np-apophis or --np-apophis-list "
                          "(grains kept after the crop)")
+    if not hyper:
+        return
     for param, lo_attr, hi_attr, _ in _FLYBY_VARIATION_SPEC:
         lo, hi = getattr(args, lo_attr), getattr(args, hi_attr)
         flag = "--" + param.replace("_", "-")
@@ -1636,8 +1637,8 @@ def sample_column_order(args: argparse.Namespace) -> List[str]:
             order.append("kt_cgs")
             order.append("coh_gap_max_cgs")
     # Grains kept after the crop (only known once the settled body is loaded/built); always
-    # written for a hyperbola batch, blank on dry-run rows.
-    if args.encounter == "hyperbola":
+    # written for a settled-body batch, blank on dry-run rows.
+    if args.body_source == "settled":
         order.append("np_kept")
     return order
 
@@ -3104,6 +3105,10 @@ def _particle_dem_module():
     return mod
 
 
+def _binary_has_string(path: Path, needle: bytes) -> bool:
+    return needle in Path(path).read_bytes()
+
+
 def _settled_body_module():
     try:
         import settled_body as mod
@@ -3362,6 +3367,12 @@ def run_one_case(
         print(f"[WARN] Run {run_id}: {maxptmass_warn}", file=sys.stderr, flush=True)
 
     try:
+        settled = None
+        if sample.body_source == "settled":
+            if not sample.settled_body_dir:
+                raise RuntimeError("settled-body run without a built body (attach_settled_bodies not run)")
+            settled = _settled_body_module().SettledBody.load(Path(sample.settled_body_dir))
+            param_columns.update(_encounter_module().apply_settled_body_to_setup(run_dir, prefix, settled))
         # phantomsetup is caught separately so we can inspect setup.log for the specific
         # MAXPTMASS overflow message before falling back to a generic "command failed" error.
         # For DEM runs (pure-sink, no gas particles after setup), pass --maxp=1000 to both
@@ -3384,6 +3395,8 @@ def run_one_case(
             maxp_flag = [f"--maxp={maxp}"]
         else:
             maxp_flag = []
+        if settled is not None:
+            maxp_flag = [f"--maxp={max(2000, 4 * settled.n_kept)}"]
         try:
             run_phantomsetup(
                 phantomsetup_bin, prefix, maxp_flag, run_dir, run_dir / "setup.log"
@@ -3394,6 +3407,8 @@ def run_one_case(
                 diag or f"phantomsetup failed (returncode != 0); see {run_dir / 'setup.log'}"
             ) from None
         check_setup_log(run_dir / "setup.log", sample)
+        if settled is not None:
+            _encounter_module().check_packing_setup_log(run_dir / "setup.log", settled.n_kept)
         if sample.use_dem is True:
             in_text = run_input.read_text()
             in_text = replace_setup_assignment(in_text, "nfulldump", f"{1:>10}")
@@ -3501,6 +3516,10 @@ def prepare_settled_bodies_and_dem_tools(
     without it), and a resumed particle-DEM run needs phantomanalysis_bin to keep computing shape
     metrics (_shape_metrics_or_nan silently no-ops without it).
     """
+    if (args.body_source == "settled" and args.encounter == "ephemeris" and not args.dry_run
+            and not _binary_has_string(phantomsetup_bin, b"packing_file")):
+        raise RuntimeError(f"{phantomsetup_bin} has no packing_file key; merge Mia's phantom 853b86818 "
+                           "into DEMsync-mia and rebuild (cd sobol && make setup && make)")
     if args.body_source == "settled":
         cache_root = (Path(args.body_cache_dir).expanduser().resolve() if args.body_cache_dir
                       else Path(args.output_root).resolve() / "settled_bodies")
@@ -3514,7 +3533,7 @@ def prepare_settled_bodies_and_dem_tools(
         print(f"[INFO] {n_bodies} settled body spec(s) ready under {cache_root}", flush=True)
 
     flyby_bin: Optional[Path] = None
-    if args.body_source == "settled" and not args.dry_run:
+    if args.encounter == "hyperbola" and not args.dry_run:
         flyby_bin = _settled_body_module().resolve_dem_tools(Path(args.phantom_dir).resolve()).flyby
 
     analysis_bin = resolve_phantom_executable(Path(args.phantom_dir).resolve(), "phantomanalysis",
