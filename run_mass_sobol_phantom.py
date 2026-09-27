@@ -1073,6 +1073,18 @@ def _validate_body_encounter(args: argparse.Namespace) -> None:
         raise ValueError("settled bodies take their size from the shape file; drop --scale-r-apophis-*")
     if getattr(args, "kn_min", None) is not None:
         raise ValueError("a kn sweep would settle one body per run; not supported with settled bodies")
+    if args.scale_vel_min is not None or args.scale_vel_max is not None:
+        raise ValueError("scale_vel patches the .setup file, which the hyperbola path never runs "
+                         "through phantomsetup; drop --scale-vel-min/--scale-vel-max")
+    if args.scale_pos_min is not None or args.scale_pos_max is not None:
+        raise ValueError("scale_pos patches the .setup file, which the hyperbola path never runs "
+                         "through phantomsetup; drop --scale-pos-min/--scale-pos-max")
+    if args.vary_use_shape_crop or args.use_shape_crop_fixed is not None:
+        raise ValueError("use_shape_crop patches the .setup file, which the hyperbola path never runs "
+                         "through phantomsetup; drop --vary-use-shape-crop/--use-shape-crop-fixed")
+    if args.scale_rho_min is not None or args.scale_rho_max is not None:
+        raise ValueError("a scale_rho sweep would settle one body per sample; not supported with "
+                         "settled bodies (a fixed scale_rho in the template .setup is fine)")
     if args.np_apophis is None and getattr(args, "np_apophis_list", None) is None:
         raise ValueError("--body-source settled needs --np-apophis or --np-apophis-list "
                          "(grains kept after the crop)")

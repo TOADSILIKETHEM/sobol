@@ -233,3 +233,18 @@ def test_hyperbola_real_run_fills_np_kept(tmp_path, monkeypatch):
     assert rec.status == "ok", rec.error
     assert rec.param_columns["np_kept"] == "310"
     assert rec.param_columns["np_apophis"] == "300"
+
+
+# --- Fix 3: reject sweeps the hyperbola path never applies -----------------
+
+
+@pytest.mark.parametrize("extra,match", [
+    (("--scale-vel-min", "0.9", "--scale-vel-max", "1.1"), "scale_vel"),
+    (("--scale-pos-min", "0.9", "--scale-pos-max", "1.1"), "scale_pos"),
+    (("--vary-use-shape-crop",), "use_shape_crop"),
+    (("--use-shape-crop-fixed", "true"), "use_shape_crop"),
+    (("--scale-rho-min", "0.9", "--scale-rho-max", "1.1"), "scale_rho"),
+])
+def test_hyperbola_rejects_setup_only_sweeps(extra, match):
+    with pytest.raises(ValueError, match=match):
+        runner.validate_args(_args(*HYPER, *extra))
