@@ -298,6 +298,10 @@ class RunRecord:
     intrinsic_spin_period_hr: float = float("nan")
     approach_spin_period_hr: float = float("nan")
     post_flyby_spin_period_hr: float = float("nan")
+    shape_b_on_a: float = float("nan")
+    shape_c_on_a: float = float("nan")
+    packing_phi: float = float("nan")
+    f_unbound_energy: float = float("nan")
     # Values written for CSV secondary columns (setup-related names e.g. scale_vel; mass uses mass_input_kg).
     param_columns: Dict[str, str] = field(default_factory=dict)
 
@@ -3021,6 +3025,10 @@ def write_summary_csv(path: Path, records: List[RunRecord], param_column_order: 
         "intrinsic_spin_period_hr",
         "approach_spin_period_hr",
         "post_flyby_spin_period_hr",
+        "shape_b_on_a",
+        "shape_c_on_a",
+        "packing_phi",
+        "f_unbound_energy",
         "error",
     ]
     ordered = sorted(records, key=lambda r: r.run_id)
@@ -3049,6 +3057,8 @@ def write_summary_csv(path: Path, records: List[RunRecord], param_column_order: 
                     f"{row.post_flyby_spin_period_hr:.12g}"
                     if not math.isnan(row.post_flyby_spin_period_hr)
                     else "",
+                    *(f"{v:.12g}" if not math.isnan(v) else ""
+                      for v in (row.shape_b_on_a, row.shape_c_on_a, row.packing_phi, row.f_unbound_energy)),
                     row.error,
                 ]
             )
@@ -3130,6 +3140,19 @@ def _closest_approach_for_model(
     if model == "particle":
         return _particle_closest_approach(run_dir, prefix, earth_sink_id, groups, time_of_key)
     return _earth_apophis_closest_approach(run_dir, prefix, earth_sink_id, apophis_sink_id)
+
+
+def _shape_metrics_or_nan(run_dir: Path, prefix: str, sample: RunSample,
+                          analysis_bin: Optional[Path]):
+    """Mia's shape/energy-unbound diagnostics; never fails the run."""
+    pdem = _particle_dem_module()
+    if analysis_bin is None or not sample.use_dem or sample.dem_model != "particle":
+        return pdem.ShapeMetrics.nan()
+    try:
+        return pdem.run_demshape_analysis(run_dir, prefix, Path(analysis_bin))
+    except Exception as exc:
+        print(f"[WARN] {run_dir.name}: shape analysis skipped ({exc})", file=sys.stderr, flush=True)
+        return pdem.ShapeMetrics.nan()
 
 
 def compute_run_metrics(
@@ -3227,6 +3250,7 @@ def _run_hyperbola_case(
         run_command([str(phantom_bin), f"{prefix}.in", *maxp_flag], cwd=run_dir,
                     log_path=run_dir / "phantom.log")
         m = compute_run_metrics(run_dir, prefix, sample, earth_sink_id, apophis_sink_id)
+        sh = _shape_metrics_or_nan(run_dir, prefix, sample, phantomanalysis_bin)
         return RunRecord(
             run_id=run_id, mass_input_kg=nan, run_dir=str(run_dir), status="ok",
             closest_approach_km=m.closest_km, closest_approach_au=m.closest_au, error="",
@@ -3234,6 +3258,8 @@ def _run_hyperbola_case(
             intrinsic_spin_period_hr=m.intrinsic_spin_period_hr,
             approach_spin_period_hr=m.approach_spin_period_hr,
             post_flyby_spin_period_hr=m.post_flyby_spin_period_hr,
+            shape_b_on_a=sh.b_on_a, shape_c_on_a=sh.c_on_a, packing_phi=sh.packing_phi,
+            f_unbound_energy=sh.f_unbound_energy,
             param_columns=param_columns,
         )
     except Exception as exc:  # pragma: no cover - runtime path
@@ -3345,6 +3371,7 @@ def run_one_case(
         run_command([str(phantom_bin), f"{prefix}.in"] + maxp_flag, cwd=run_dir, log_path=run_dir / "phantom.log")
 
         m = compute_run_metrics(run_dir, prefix, sample, earth_sink_id, apophis_sink_id)
+        sh = _shape_metrics_or_nan(run_dir, prefix, sample, phantomanalysis_bin)
         return RunRecord(
             run_id=run_id,
             mass_input_kg=mass_for_record,
@@ -3358,6 +3385,10 @@ def run_one_case(
             intrinsic_spin_period_hr=m.intrinsic_spin_period_hr,
             approach_spin_period_hr=m.approach_spin_period_hr,
             post_flyby_spin_period_hr=m.post_flyby_spin_period_hr,
+            shape_b_on_a=sh.b_on_a,
+            shape_c_on_a=sh.c_on_a,
+            packing_phi=sh.packing_phi,
+            f_unbound_energy=sh.f_unbound_energy,
             param_columns=param_columns,
         )
     except Exception as exc:  # pragma: no cover - runtime path
@@ -3523,6 +3554,10 @@ def main() -> int:
     if args.body_source == "settled" and not args.dry_run:
         flyby_bin = _settled_body_module().resolve_dem_tools(Path(args.phantom_dir).resolve()).flyby
 
+    analysis_bin = resolve_phantom_executable(Path(args.phantom_dir).resolve(), "phantomanalysis",
+                                              must_exist=False)
+    analysis_bin = analysis_bin if analysis_bin.is_file() else None
+
     col_order = sample_column_order(args)
     samples_csv = output_root / "sobol_mass_samples.csv"
     summary_csv = output_root / "sobol_mass_outputs.csv"
@@ -3559,6 +3594,7 @@ def main() -> int:
             ephemeris_cache_dir=str(ephemeris_cache) if ephemeris_cache is not None else None,
             shape_file=args.shape_file if args.shape_file else None,
             phantomflyby_bin=str(flyby_bin) if flyby_bin else None,
+            phantomanalysis_bin=str(analysis_bin) if analysis_bin else None,
         )
         for idx, sample in enumerate(samples, start=1)
     ]

@@ -8,9 +8,10 @@ reader contract in ``run_mass_sobol_phantom._apophis_time_groups``:
 from __future__ import annotations
 
 import re
+import subprocess
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, NamedTuple, Optional, Tuple
 
 import numpy as np
 
@@ -162,3 +163,41 @@ def grain_radius_cm_from_dump(dump: Path, model: str) -> float:
             raise RuntimeError(f"{dump}: no DEM grain sinks (Reff > 0)")
         return float(np.median(reff)) * udist
     raise ValueError(f"model must be 'particle' or 'sink', got {model!r}")
+
+
+class ShapeMetrics(NamedTuple):
+    """analysis_demshape.f90 columns 6, 7, 10, 11 of the last dump analysed."""
+    b_on_a: float
+    c_on_a: float
+    packing_phi: float
+    f_unbound_energy: float  # energy-based, grains only (Earth excluded): valid once Earth is far
+
+    @classmethod
+    def nan(cls) -> "ShapeMetrics":
+        n = float("nan")
+        return cls(n, n, n, n)
+
+
+def parse_demshape_dat(path: Path) -> ShapeMetrics:
+    rows = [ln.split() for ln in Path(path).read_text().splitlines()
+            if ln.strip() and not ln.lstrip().startswith("#")]
+    if not rows:
+        raise RuntimeError(f"{path}: no data rows")
+    c = [float(x) for x in rows[-1]]
+    return ShapeMetrics(c[5], c[6], c[9], c[10])
+
+
+def run_demshape_analysis(run_dir: Path, prefix: str, analysis_bin: Path) -> ShapeMetrics:
+    """Run phantomanalysis (analysis_demshape build) on the last full dump only."""
+    dumps = list_full_dumps(run_dir, prefix)
+    if not dumps:
+        raise RuntimeError(f"no {prefix}_NNNNN dumps in {run_dir}")
+    out = Path(run_dir) / f"{prefix}_shape.dat"
+    if out.exists():
+        out.unlink()
+    with open(Path(run_dir) / "analysis.log", "w", encoding="utf-8") as fh:
+        proc = subprocess.run([str(analysis_bin), dumps[-1].name], cwd=str(run_dir),
+                              stdin=subprocess.DEVNULL, stdout=fh, stderr=subprocess.STDOUT)
+    if proc.returncode != 0:
+        raise RuntimeError(f"phantomanalysis failed ({proc.returncode}); see {run_dir}/analysis.log")
+    return parse_demshape_dat(out)
