@@ -87,6 +87,10 @@ def _load_records(summary_csv: Path, col_order: List[str]) -> List[RunRecord]:
                     intrinsic_spin_period_hr=_ffloat(row.get("intrinsic_spin_period_hr", "")),
                     approach_spin_period_hr=_ffloat(row.get("approach_spin_period_hr", "")),
                     post_flyby_spin_period_hr=_ffloat(row.get("post_flyby_spin_period_hr", "")),
+                    shape_b_on_a=_ffloat(row.get("shape_b_on_a", "")),
+                    shape_c_on_a=_ffloat(row.get("shape_c_on_a", "")),
+                    packing_phi=_ffloat(row.get("packing_phi", "")),
+                    f_unbound_energy=_ffloat(row.get("f_unbound_energy", "")),
                     param_columns=param_columns,
                 )
             )
