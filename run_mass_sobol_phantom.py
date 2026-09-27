@@ -1825,6 +1825,10 @@ def build_auto_batch_sweep_slug(args: argparse.Namespace, max_len: int) -> str:
         tokens.append("ao")
     if getattr(args, "apophis_only_fixed", None) == "true":
         tokens.append("aoT")
+    if args.encounter == "hyperbola":
+        tokens.append("hyp")
+    if args.body_source == "settled":
+        tokens.append("settled")
     slug = "_".join(tokens)
     if len(slug) <= max_len:
         return slug

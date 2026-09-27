@@ -281,3 +281,27 @@ def test_hyperbola_sweep_rejects_rp_bounds_past_start_sep():
     argv[argv.index("--flyby-start-sep-km") + 1] = "100000"
     with pytest.raises(ValueError, match="start_sep|start-sep"):
         runner.validate_args(runner.parse_args(argv))
+
+
+# --- Fix 5: batch slug carries hyp / settled tokens -------------------------
+
+
+def test_slug_lattice_ephemeris_unchanged():
+    a = runner.parse_args(["--mass-min-kg", "1e10", "--mass-max-kg", "1e11",
+                           "--num-samples", "8", "--seed", "42"])
+    runner.validate_args(a)
+    assert runner.build_auto_batch_sweep_slug(a, max_len=200) == "n8_s42_m1e10-1e11"
+
+
+def test_slug_has_hyp_token_for_hyperbola():
+    a = _args(*HYPER)
+    runner.validate_args(a)
+    slug = runner.build_auto_batch_sweep_slug(a, max_len=200)
+    assert "hyp" in slug.split("_")
+
+
+def test_slug_has_settled_token_for_settled_body_source():
+    a = _args(*HYPER)
+    runner.validate_args(a)
+    slug = runner.build_auto_batch_sweep_slug(a, max_len=200)
+    assert "settled" in slug.split("_")
