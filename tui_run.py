@@ -64,7 +64,6 @@ _MASS_GATE_IDS = ("mass-min-kg", "mass-max-kg", "apophis-ref-mass-kg")
 # dest stem follows argparse convention: --kc-min → kc_min, getattr(d, "kc_min", None)
 _IN_DIMS = [
     ("kt",    "kt",    "kt_cgs  — tensile spring constant (dyne/cm; 0=off; DEM only)",       False),
-    ("ct",    "ct",    "ct_dem  — tangential damping coefficient (DEM only)",                   False),
     ("eps-n", "eps_n", "epsilon_n_dem  — normal restitution coeff [0,1] (DEM only)",            False),
     ("kn",    "kn",    "kn_cgs  — normal spring constant (dyne/cm; DEM only)",                  False),
 ]

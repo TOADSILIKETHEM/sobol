@@ -41,7 +41,6 @@ SPIN_INTRINSIC_MAX_CA_FRACTION = 0.3
 SPIN_APPROACH_HOURS_BEFORE_CA = 24.0
 EARTH_SINK_ID_DEFAULT = 4
 APOPHIS_SINK_ID_DEFAULT = 11
-R_EARTH_KM = 6371.0  # mean Earth radius; hyperbola pericentre must clear this and stay short of start_sep
 
 # Literature Apophis shape assets (Shapes/apophis_v233s7.obj longest axis ~0.409741 km).
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -178,7 +177,6 @@ _SCALE_VARIATION_SPEC: Tuple[Tuple[str, str, str, str], ...] = (
 # (RunSample attribute == .in file key, argparse lo/hi dest stems, batch slug token)
 _IN_VARIATION_SPEC: Tuple[Tuple[str, str, str, str], ...] = (
     ("kt_cgs",        "kt_min",    "kt_max",    "kt"),
-    ("ct_dem",        "ct_min",    "ct_max",    "ct"),
     ("epsilon_n_dem", "eps_n_min", "eps_n_max", "eps"),
     ("kn_cgs",        "kn_min",    "kn_max",    "kn"),
 )
@@ -331,7 +329,6 @@ class RunSample:
     kt_cgs:        Optional[float] = None  # tensile spring constant (dyne/cm); 0 = no cohesion
     coh_gap_max_cgs: Optional[float] = None  # max surface gap (cm) for cohesive bond; 0 = Daniel default
     dn_cohes_factor: Optional[float] = None  # coh gap = dn * grain diameter, resolved after phantomsetup
-    ct_dem:        Optional[float] = None  # tangential damping coefficient
     epsilon_n_dem: Optional[float] = None  # normal restitution coefficient [0,1]
     kn_cgs:        Optional[float] = None  # normal spring constant (dyne/cm)
     # Timeframe: patched into the .setup file before phantomsetup as "X hr" strings.
@@ -480,7 +477,6 @@ def build_parser() -> argparse.ArgumentParser:
     # Only active when both min and max are set and the run uses DEM (isink_potential=2).
     for key, helpt in (
         ("kt",    "kt_cgs (tensile spring constant in dyne/cm; DEM only; 0=off)"),
-        ("ct",    "ct_dem (tangential damping coefficient; DEM only)"),
         ("eps-n", "epsilon_n_dem (normal restitution coefficient [0,1]; DEM only)"),
         ("kn",    "kn_cgs (normal spring constant in dyne/cm; DEM only)"),
     ):
@@ -1114,22 +1110,13 @@ def _validate_body_encounter(args: argparse.Namespace) -> None:
         raise ValueError("phantomflyby sets no spin (moddump_earthflyby.f90); drop the spin flags")
     if args.vary_apophis_only or getattr(args, "apophis_only_fixed", None) is not None:
         raise ValueError("--encounter hyperbola always has the Earth perturber; drop apophis_only flags")
-    # time_to_pericentre_hr(rp) is not monotonic (interior max, falls to 0 as rp -> start_sep);
-    # grid the whole swept rp x v_inf range rather than trusting a corner.
     rp_lo = args.flyby_rp_km if args.flyby_rp_km is not None else args.flyby_rp_km_min
     rp_hi = args.flyby_rp_km if args.flyby_rp_km is not None else args.flyby_rp_km_max
     vinf_lo = args.flyby_vinf_kms if args.flyby_vinf_kms is not None else args.flyby_vinf_kms_min
     vinf_hi = args.flyby_vinf_kms if args.flyby_vinf_kms is not None else args.flyby_vinf_kms_max
-    if rp_lo <= R_EARTH_KM or rp_hi >= args.flyby_start_sep_km:
-        raise ValueError(
-            f"flyby pericentre must satisfy R_EARTH_KM ({R_EARTH_KM:g} km) < rp < "
-            f"flyby_start_sep_km ({args.flyby_start_sep_km:g} km) across the whole swept range; "
-            f"got rp in [{rp_lo:g}, {rp_hi:g}]")
-    t_peri = _encounter_module()._max_time_to_pericentre_hr(
-        rp_lo, rp_hi, vinf_lo, vinf_hi, args.flyby_start_sep_km, args.flyby_perturber_earth_masses)
-    if args.tmax_hours < 2.0 * t_peri:
-        raise ValueError(f"--tmax-hours {args.tmax_hours:g} ends before the body is back out to its "
-                         f"start separation; need >= {2.0 * t_peri:.3g} hr (2 x time to pericentre)")
+    _encounter_module().check_flyby_geometry(
+        rp_lo, rp_hi, vinf_lo, vinf_hi, args.flyby_start_sep_km,
+        args.flyby_perturber_earth_masses, args.tmax_hours)
     if args.sink_earth_id == EARTH_SINK_ID_DEFAULT:
         args.sink_earth_id = 1
         print("[INFO] --encounter hyperbola: auto-set --sink-earth-id 1 (the perturber is the only sink).",
@@ -1263,7 +1250,6 @@ def apply_run_sample_to_setup(
             text = replace_setup_assignment(text, key, tok)
             validate_assignment(text, key, tok)
         columns["use_dem"] = "T" if sample.use_dem else "F"
-        columns["dem_model"] = sample.dem_model
 
     if sample.use_shape_crop is not None:
         path_tok = (shape_setup_value or "") if sample.use_shape_crop else ""
@@ -3381,14 +3367,9 @@ def run_one_case(
             param_columns.update(_encounter_module().apply_settled_body_to_setup(run_dir, prefix, settled))
         # phantomsetup is caught separately so we can inspect setup.log for the specific
         # MAXPTMASS overflow message before falling back to a generic "command failed" error.
-        # For DEM runs (pure-sink, no gas particles after setup), pass --maxp=1000 to both
-        # phantomsetup and phantom so they allocate ~1 MB instead of the 6.3 GB default
-        # (maxp_alloc=5200000).  The temporary SPH lattice used during setup has <=~600
-        # particles, so 1000 is a safe ceiling.
-        # 2000 covers the ~1089-particle (9×11×11) lattice phantomsetup tries when
-        # fitting np_apophis≈500 to a sphere.  Mesh cropping uses a larger bounding box
-        # (11×13×14 ≈ 2002 lattice sites) so use 4000 when shape crop is on.
-        # After DEM conversion npart=0 so the phantom run needs virtually nothing.
+        # DEM runs pass a small --maxp to phantomsetup and phantom (default allocation is
+        # ~6 GB). It must still hold the temporary lattice setup builds before cropping,
+        # which overshoots np_apophis (mesh bounding boxes more than spheres).
         if sample.use_dem is True:
             np_val = sample.np_apophis or 500
             if sample.use_shape_crop:

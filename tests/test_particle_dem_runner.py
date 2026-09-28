@@ -34,7 +34,7 @@ def test_particle_model_sets_use_dem_only(tmp_path):
     cols = apply_run_sample_to_setup(p, RunSample(use_dem=True, dem_model="particle"), None, None)
     t = p.read_text()
     assert _val(t, "use_dem") == "T" and _val(t, "use_dem_as_sinks") == "F"
-    assert cols["use_dem"] == "T" and cols["dem_model"] == "particle"
+    assert cols["use_dem"] == "T"
 
 
 def test_sink_model_sets_use_dem_as_sinks_only(tmp_path):
@@ -42,7 +42,6 @@ def test_sink_model_sets_use_dem_as_sinks_only(tmp_path):
     cols = apply_run_sample_to_setup(p, RunSample(use_dem=True, dem_model="sink"), None, None)
     t = p.read_text()
     assert _val(t, "use_dem") == "F" and _val(t, "use_dem_as_sinks") == "T"
-    assert cols["dem_model"] == "sink"
 
 
 def test_use_dem_false_clears_both(tmp_path):

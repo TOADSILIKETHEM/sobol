@@ -28,7 +28,6 @@ from run_mass_sobol_phantom import (  # noqa: E402
     RunRecord,
     EARTH_SINK_ID_DEFAULT,
     APOPHIS_SINK_ID_DEFAULT,
-    R_EARTH_KM,
     DEFAULT_DN_COHES_FACTOR,
     _cleanup_run_dir,
     attach_settled_bodies,
@@ -953,24 +952,10 @@ class SimRenderTUIApp(App[None]):
                 raise ValueError("hyperbola needs tmax (hr) and dtmax (hr)")
             if sample.apophis_spin_period is not None or sample.apophis_spin_torque_align_deg is not None:
                 raise ValueError("hyperbola has no spin; clear spin_period and spin_torque_align")
-            if sample.flyby_rp_km <= 0:
-                raise ValueError("flyby_rp_km must be > 0")
-            if sample.flyby_vinf_kms <= 0:
-                raise ValueError("flyby_vinf_kms must be > 0")
-            if sample.flyby_start_sep_km <= 0:
-                raise ValueError("flyby_start_sep_km must be > 0")
-            if not (R_EARTH_KM < sample.flyby_rp_km < sample.flyby_start_sep_km):
-                raise ValueError(
-                    f"flyby_rp_km must satisfy R_EARTH_KM ({R_EARTH_KM:g} km) < rp < "
-                    f"flyby_start_sep_km ({sample.flyby_start_sep_km:g} km), got {sample.flyby_rp_km:g}")
             import encounter as enc
-            t_peri = enc.time_to_pericentre_hr(
-                sample.flyby_rp_km, sample.flyby_vinf_kms, sample.flyby_start_sep_km,
-                sample.flyby_perturber_earth_masses)
-            if sample.tmax_hours < 2.0 * t_peri:
-                raise ValueError(
-                    f"tmax {sample.tmax_hours:g} hr ends before the body is back out to its "
-                    f"start separation; need >= {2.0 * t_peri:.3g} hr (2 x time to pericentre)")
+            enc.check_flyby_geometry(
+                sample.flyby_rp_km, sample.flyby_rp_km, sample.flyby_vinf_kms, sample.flyby_vinf_kms,
+                sample.flyby_start_sep_km, sample.flyby_perturber_earth_masses, sample.tmax_hours)
         eph_cache_raw = self._iv("eph-cache")
         prefix = self._iv("prefix")
         # <sim_name> (spec Component 2) is a timestamped batch dir the TUI

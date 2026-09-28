@@ -2,15 +2,15 @@
 
 Prompts mirror argparse actions on a shared parser so new flags are picked up automatically.
 Optional scale and mass bounds are gated before min/max prompts.
-Extend DEST_TO_SECTION for headings; add INTERACTIVE_BRIEF entries for brief help + valid answers;
-add WIZARD_CUSTOM_HANDLERS for unusual actions.
+Extend DEST_TO_SECTION for headings; add INTERACTIVE_BRIEF entries for brief help + valid answers.
+``nargs='+'`` options are prompted as space-separated lists of their argparse ``type``.
 """
 
 from __future__ import annotations
 
 import argparse
 import sys
-from typing import Callable, Dict, FrozenSet, List, Optional, Tuple
+from typing import Dict, FrozenSet, List, Optional, Tuple
 
 # Logical scale parameters (param name in .setup / RunSample) and argparse dests for min/max.
 # Order matches run_mass_sobol_phantom._SCALE_VARIATION_SPEC; extend if new scale pairs are added.
@@ -31,7 +31,6 @@ SCALE_BOUND_DESTS: FrozenSet[str] = frozenset(
 # DEM contact parameters: patched into .in after phantomsetup; gated separately from setup scales.
 IN_BOUND_PAIRS: Tuple[Tuple[str, str, str], ...] = (
     ("kt_cgs",        "kt_min",    "kt_max"),
-    ("ct_dem",        "ct_min",    "ct_max"),
     ("epsilon_n_dem", "eps_n_min", "eps_n_max"),
     ("kn_cgs",        "kn_min",    "kn_max"),
 )
@@ -52,7 +51,6 @@ TIME_FIXED_DESTS: FrozenSet[str] = frozenset({"tmax_hours", "dtmax_hours"})
 
 IN_PARAM_LABELS: Dict[str, str] = {
     "kt_cgs":        "kt_cgs (tensile spring constant dyne/cm; 0=off; DEM only)",
-    "ct_dem":        "ct_dem (tangential damping coefficient; DEM only)",
     "epsilon_n_dem": "epsilon_n_dem (normal restitution coeff [0=inelastic,1=elastic]; DEM only)",
     "kn_cgs":        "kn_cgs (normal spring constant dyne/cm; DEM only)",
 }
@@ -101,8 +99,6 @@ DEST_TO_SECTION: Dict[str, str] = {
     "spin_azimuth_max":   "Spin (optional dimension)",
     "kt_min":    "DEM Contact (optional dimensions)",
     "kt_max":    "DEM Contact (optional dimensions)",
-    "ct_min":    "DEM Contact (optional dimensions)",
-    "ct_max":    "DEM Contact (optional dimensions)",
     "eps_n_min": "DEM Contact (optional dimensions)",
     "eps_n_max": "DEM Contact (optional dimensions)",
     "kn_min":    "DEM Contact (optional dimensions)",
@@ -143,27 +139,23 @@ DEST_TO_SECTION: Dict[str, str] = {
     "jobs": "Execution",
 }
 
-def _handle_np_apophis_list(
-    action: argparse.Action, state: argparse.Namespace, flag: str, out: List[str]
-) -> None:
-    """Custom wizard handler for --np-apophis-list (nargs='+').
-
-    The default _collect_store raises on nargs != None; this handler prompts for a
-    space-separated list and emits individual integer tokens so argparse parses them correctly.
-    """
+def _collect_list(action: argparse.Action, state: argparse.Namespace, out: List[str]) -> None:
+    """Prompt for a ``nargs='+'`` option as space-separated values of ``action.type``."""
+    flag = _primary_flag(action)
+    conv = action.type or str
     current = getattr(state, action.dest, None)
-    cur_s = " ".join(str(n) for n in current) if current else ""
+    cur_s = " ".join(str(v) for v in current) if current else ""
     what, valid = _explain_for(action)
     while True:
         raw = _read_line(f"{what}\n  Option: {flag}\n  Valid answers: {valid}\n[{cur_s}]: ").strip()
         if not raw:
             if current:
-                out.extend([flag] + [str(n) for n in current])
+                out.extend([flag] + [str(v) for v in current])
             return
         try:
-            vals = [int(x) for x in raw.split()]
+            vals = [conv(x) for x in raw.split()]
         except ValueError:
-            print("  Invalid: enter space-separated integers (e.g. 250 500 1000).", file=sys.stderr)
+            print(f"  Invalid: enter space-separated {conv.__name__} values.", file=sys.stderr)
             continue
         if any(v < 0 for v in vals):
             print("  All values must be >= 0.", file=sys.stderr)
@@ -172,11 +164,6 @@ def _handle_np_apophis_list(
         out.extend([flag] + [str(v) for v in vals])
         return
 
-
-# dest -> handler(action, state, flag) -> None (mutates state and out_argv)
-WIZARD_CUSTOM_HANDLERS: Dict[str, Callable[[argparse.Action, argparse.Namespace, str, List[str]], None]] = {
-    "np_apophis_list": _handle_np_apophis_list,
-}
 
 # dest -> (brief what-it-does, valid answers / input rules). Used for every prompt; extend when
 # adding new CLI flags. Unknown dests use _fallback_explain(action).
@@ -278,15 +265,6 @@ INTERACTIVE_BRIEF: Dict[str, tuple[str, str]] = {
     ),
     "kt_max": (
         "Upper bound for kt_cgs. Must be greater than min.",
-        "Float > min, or Enter.",
-    ),
-    "ct_min": (
-        "Lower bound for ct_dem (tangential damping coefficient; DEM only). "
-        "0 = no tangential damping. Default is 0.1 (10% of relative tangential velocity).",
-        "Float ≥ 0, or Enter to leave unvaried.",
-    ),
-    "ct_max": (
-        "Upper bound for ct_dem. Must be greater than min.",
         "Float > min, or Enter.",
     ),
     "eps_n_min": (
@@ -767,8 +745,8 @@ def run_interactive_wizard(parser: argparse.ArgumentParser, initial_args: argpar
         if _skip_action(action):
             continue
 
-        if action.dest in WIZARD_CUSTOM_HANDLERS:
-            WIZARD_CUSTOM_HANDLERS[action.dest](action, state, _primary_flag(action), out)
+        if action.nargs == "+":
+            _collect_list(action, state, out)
             continue
 
         sec = _section_for_dest(action.dest)
@@ -834,7 +812,7 @@ def run_interactive_wizard(parser: argparse.ArgumentParser, initial_args: argpar
         if action.nargs not in (None, 0):
             raise RuntimeError(
                 f"Interactive wizard: unsupported nargs={action.nargs!r} for --{action.dest}; "
-                "add a WIZARD_CUSTOM_HANDLERS entry."
+                "only nargs='+' lists are supported."
             )
 
         _collect_store(action, state, out)
@@ -880,6 +858,5 @@ __all__ = [
     "TIME_BOUND_DESTS",
     "TIME_BOUND_PAIRS",
     "TIME_FIXED_DESTS",
-    "WIZARD_CUSTOM_HANDLERS",
     "run_interactive_wizard",
 ]

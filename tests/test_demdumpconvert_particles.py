@@ -39,6 +39,15 @@ def test_particle_run_writes_grains_and_bodies(tmp_path):
     assert len(bodies) == 11 and bodies["name"].iloc[-1] == "Apophis"
 
 
+def test_particle_grain_id_is_phantom_iorig(tmp_path):
+    import sarracen
+    out = _convert(tmp_path, "particle_np300")
+    g = np.load(sorted((out / "run_0001_grains_output").glob("*.npz"))[0])
+    parts = sarracen.read_phantom(str(FIX / "particle_np300" / "sobol_00000"), separate_types="all")[0]
+    parts = parts[(parts["h"] > 0) & (parts["itype"] == 2)]
+    assert list(g["grain_id"]) == list(parts["iorig"])
+
+
 @needs_sink_fixture
 def test_particle_and_sink_grain_layout_match(tmp_path):
     gp = np.load(sorted((_convert(tmp_path / "p", "particle_np300") / "run_0001_grains_output").glob("*.npz"))[0])

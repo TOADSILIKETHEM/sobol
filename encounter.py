@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Dict
 
 GM_EARTH_KM3_S2 = 3.986004e5  # G * M_earth
+R_EARTH_KM = 6371.0  # mean Earth radius; the pericentre must clear this and stay short of start_sep
 
 
 def time_to_pericentre_hr(rp_km: float, vinf_kms: float, start_sep_km: float,
@@ -46,6 +47,26 @@ def _max_time_to_pericentre_hr(rp_lo_km: float, rp_hi_km: float, vinf_lo_kms: fl
         time_to_pericentre_hr(rp, vinf, start_sep_km, perturber_earth_masses)
         for rp in rp_vals for vinf in vinf_vals
     )
+
+
+def check_flyby_geometry(rp_lo_km: float, rp_hi_km: float, vinf_lo_kms: float, vinf_hi_kms: float,
+                         start_sep_km: float, perturber_earth_masses: float, tmax_hours: float) -> None:
+    """Raise ValueError unless every (rp, v_inf) in the range gives a valid, fully-run flyby:
+    all values > 0, R_EARTH_KM < rp < start_sep, and tmax >= 2 x the longest time to pericentre."""
+    for name, val in (("flyby_rp_km", rp_lo_km), ("flyby_vinf_kms", vinf_lo_kms),
+                      ("flyby_start_sep_km", start_sep_km),
+                      ("flyby_perturber_earth_masses", perturber_earth_masses)):
+        if val <= 0:
+            raise ValueError(f"{name} must be > 0 (got {val:g})")
+    if rp_lo_km <= R_EARTH_KM or rp_hi_km >= start_sep_km:
+        raise ValueError(
+            f"flyby pericentre must satisfy R_EARTH_KM ({R_EARTH_KM:g} km) < rp < "
+            f"flyby_start_sep_km ({start_sep_km:g} km); got rp in [{rp_lo_km:g}, {rp_hi_km:g}]")
+    t_peri = _max_time_to_pericentre_hr(rp_lo_km, rp_hi_km, vinf_lo_kms, vinf_hi_kms,
+                                        start_sep_km, perturber_earth_masses)
+    if tmax_hours < 2.0 * t_peri:
+        raise ValueError(f"tmax {tmax_hours:g} hr ends before the body is back out to its start "
+                         f"separation; need >= {2.0 * t_peri:.3g} hr (2 x time to pericentre)")
 
 
 def _runner():

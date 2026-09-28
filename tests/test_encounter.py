@@ -203,3 +203,10 @@ def test_check_packing_setup_log_wrong_count(tmp_path):
     log.write_text(" placed 300 pre-built grains on the ephemeris orbit\n")
     with pytest.raises(RuntimeError, match="310"):
         enc.check_packing_setup_log(log, 310)
+
+
+def test_check_flyby_geometry_rejects_non_positive_perturber_mass():
+    import encounter as enc
+    with pytest.raises(ValueError, match="flyby_perturber_earth_masses must be > 0"):
+        enc.check_flyby_geometry(38000.0, 38000.0, 5.9, 5.9, 4e5, 0.0, 200.0)
+    enc.check_flyby_geometry(38000.0, 38000.0, 5.9, 5.9, 4e5, 1.0, 200.0)

@@ -1,7 +1,5 @@
 # Sim + render pipeline TUI (`tui_sim_render.py`)
 
-On-demand detail moved verbatim from `sobol/CLAUDE.md` on 2026-09-25 (test counts dropped — they go stale).
-
 Parent: `../CLAUDE.md`. Shared facts: `../docs/SHARED_FACTS.md`. Merge/rename caveats: `../docs/CONTEXT_CHANGELOG.md`.
 
 `sobol/tui_sim_render.py` is a Textual TUI that takes **one** DEM run from configure → PHANTOM → dump conversion → headless Blender render (any combination of render paths), with no manual steps. It handles one run per launch, not a sweep; `tui_run.py` is the sweep TUI. Windows render-script how-to: `Code/CLAUDE.md`.
@@ -29,7 +27,7 @@ Parent: `../CLAUDE.md`. Shared facts: `../docs/SHARED_FACTS.md`. Merge/rename ca
   - `np_apophis` (default 500).
   - `spin_period (hr)` and `spin_torque_align (deg)`.
   - `kt_cgs`: blank keeps the template value; `0` writes 0.
-  - `dn_cohes_factor` (0.1). It is converted with `coh_gap_max_cgs_from_dn()`, but only when `kt_cgs > 0`.
+  - `dn_cohes_factor` (0.1). Passed only when `kt_cgs > 0`; the runner's `resolve_coh_gap_after_setup()` converts it after setup (`dn × 2 × R_grain`).
   - `tmax` (default `108` hr = template 4.5 days) and `dtmax` (default `0.5` hr = template 30 min). Clearing a box falls back to the template.
   - `sink_earth_id` (4) and `sink_apophis_id` (11).
   - `shape_file`: a non-blank value turns on `use_shape_crop`.
@@ -43,8 +41,8 @@ Parent: `../CLAUDE.md`. Shared facts: `../docs/SHARED_FACTS.md`. Merge/rename ca
   - `flyby_rp_km` (default `38000`), `flyby_vinf_kms` (default `5.9`), `flyby_start_sep_km` (`4e5`): read only for
     `hyperbola` (prefilled values never reach an ephemeris sample/CSV). `shape_file` is ignored for `settled` (the body
     carries its own shape).
-  - Hyperbola validation at click: rp/v_inf/start_sep > 0, `R_EARTH_KM (6371) < rp < start_sep`, tmax + dtmax set,
-    tmax ≥ 2 × `encounter.time_to_pericentre_hr()`, spin fields blank.
+  - Hyperbola validation at click: tmax + dtmax set, spin fields blank, then `encounter.check_flyby_geometry()`
+    (same rule as the CLI: values > 0, `R_EARTH_KM (6371) < rp < start_sep`, tmax ≥ 2 × time to pericentre).
   - `run_sim_stage()` builds/loads the settled body (`attach_settled_bodies`, cache
     `<output_root parent>/settled_bodies`, same cache as the CLI) before `run_one_case`; for hyperbola it also
     resolves `phantomflyby` and swaps `sink_earth_id` 4 → 1. `settle_tdyn`/`relax_tdyn`/`body_cache_dir` are `SimParams`
@@ -74,7 +72,7 @@ Parent: `../CLAUDE.md`. Shared facts: `../docs/SHARED_FACTS.md`. Merge/rename ca
 **Limits (v1).**
 - No mid-run cancel. Quitting mid-run leaves PHANTOM or Blender child processes running.
 - No streamed Blender log.
-- The `instance_grains`/`instance_static` camera tracks the grain CoM (origin), not the densest core — can sit between fragments on a breakup.
+- The `instance_static` camera tracks the origin (static placeholder); `instance_grains` tracks the inner-80% grain core like `per_sphere`.
 
-**Tests.** `sobol/tests/test_tui_sim_render.py` (mocked) mocks PHANTOM, the converter and Blender, and includes Textual pilot tests run via `asyncio.run` (no pytest-asyncio needed). `sobol/tests/test_dem_headless_world.py` checks the TUI World HDRI (including a blender.exe smoke). `sobol/tests/test_dem_headless_gpu.py` checks Cycles OPTIX/CUDA GPU-only (CPU hybrid off). `sobol/tests/test_dem_headless_video.py` checks the optional `--encode-video`/`encode_video()` stage (arg parsing, frame-count-mismatch guard, and a blender.exe smoke that encodes 2 dummy frames to mp4). `sobol/tests/test_dem_headless_paths.py` covers `DEMHeadlessRender.py`'s `--viz-path composite|instance` patching and the "Procedural rock" append — Blender integration tests, skip without `blender.exe`. `sobol/tests/test_viz_preprocess_grains_instance.py` covers the `instance_grains` preprocess writer. A real sim→render run through the UI is still to be verified by hand.
+**Tests.** `sobol/tests/test_tui_sim_render.py` (mocked) mocks PHANTOM, the converter and Blender, and includes Textual pilot tests run via `asyncio.run` (no pytest-asyncio needed). `sobol/tests/test_dem_headless_world.py` checks the TUI World HDRI (including a blender.exe smoke). `sobol/tests/test_dem_headless_gpu.py` checks Cycles OPTIX/CUDA GPU-only (CPU hybrid off). `sobol/tests/test_dem_headless_video.py` checks the optional `--encode-video`/`encode_video()` stage (arg parsing, frame-count-mismatch guard, and a blender.exe smoke that encodes 2 dummy frames to mp4). `sobol/tests/test_dem_headless_paths.py` covers `DEMHeadlessRender.py`'s `--viz-path composite|instance` patching and the "Procedural rock" append — Blender integration tests, skip without `blender.exe`. `sobol/tests/test_viz_preprocess_grains_instance.py` covers the `instance_grains` preprocess writer.
 
