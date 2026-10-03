@@ -11,12 +11,15 @@ Launch:
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import platform
 import re
 import subprocess
 import sys
 import time
-from dataclasses import dataclass, field
+from collections import deque
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
@@ -228,6 +231,10 @@ class RenderParams:
     video_fps: Optional[int] = None
     viz_path: str = "per_sphere"  # DEMHeadlessRender.py --viz-path
     manifest: Optional[Path] = None  # required unless viz_path == "per_sphere"
+    # Called with each line Blender prints (see _run_logged). A field rather
+    # than a run_render_stage() argument so stage fakes taking only `params`
+    # keep working.
+    on_line: Optional[Callable[[str], None]] = None
 
 
 @dataclass
@@ -237,7 +244,9 @@ class PathResult:
     stage: str  # "preprocess" | "render" | "done"
     message: str
     n_frames: int = 0
-    elapsed_s: float = 0.0
+    elapsed_s: float = 0.0  # preprocess + render
+    preprocess_s: Optional[float] = None  # None = path has no preprocess stage
+    render_s: Optional[float] = None  # None = render never started; includes video encode
 
 
 @dataclass
@@ -248,6 +257,7 @@ class PipelineResult:
     record: Optional[RunRecord] = None
     paths: List[PathResult] = field(default_factory=list)
     compare: Optional[CompareResult] = None
+    timing_path: Optional[Path] = None  # <run_dir>/pipeline_timing.json once written
 
 
 def run_sim_stage(params: SimParams) -> RunRecord:
@@ -355,6 +365,48 @@ def _output_tail(result: subprocess.CompletedProcess, n_lines: int = 40) -> str:
     return "\n".join(combined.splitlines()[-n_lines:])
 
 
+# Lines of child output held in memory for error messages; the log file on
+# disk keeps everything.
+_LOG_TAIL_LINES = 400
+
+
+def _run_logged(
+    cmd: List[str],
+    log_path: Path,
+    *,
+    cwd: Optional[str] = None,
+    on_line: Optional[Callable[[str], None]] = None,
+) -> subprocess.CompletedProcess:
+    """Run cmd, streaming its output line by line to log_path and on_line.
+
+    stderr is merged into stdout so the log keeps Blender's print() output and
+    a traceback in the order they happened. The returned CompletedProcess
+    carries only the last _LOG_TAIL_LINES lines in stdout (stderr is empty),
+    which is all _output_tail() needs. Raises OSError if cmd cannot start,
+    after writing that error to the log.
+    """
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    tail: deque = deque(maxlen=_LOG_TAIL_LINES)
+    with open(log_path, "w", encoding="utf-8") as log:
+        try:
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, errors="replace", cwd=cwd, bufsize=1,
+            )
+        except OSError as exc:
+            log.write(f"could not start {cmd[0]}: {exc}\n")
+            raise
+        with proc:
+            for line in proc.stdout:
+                log.write(line)
+                log.flush()
+                tail.append(line)
+                if on_line is not None:
+                    on_line(line.rstrip("\r\n"))
+        returncode = proc.wait()
+    return subprocess.CompletedProcess(cmd, returncode, stdout="".join(tail), stderr="")
+
+
 def build_render_command(params: RenderParams) -> List[str]:
     cmd = [
         BLENDER_EXE, "--background", "--python", DEM_HEADLESS_RENDER, "--",
@@ -385,12 +437,15 @@ def build_render_command(params: RenderParams) -> List[str]:
 
 def run_render_stage(params: RenderParams) -> subprocess.CompletedProcess:
     cmd = build_render_command(params)
+    log_path = params.output_dir / "render.log"
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, errors="replace")
+        result = _run_logged(cmd, log_path, on_line=params.on_line)
     except OSError as exc:
         raise RenderError(f"could not start {cmd[0]}: {exc}") from exc
     if result.returncode != 0:
-        raise RenderError(f"blender exited {result.returncode}:\n{_output_tail(result)}")
+        raise RenderError(
+            f"blender exited {result.returncode} (full log: {log_path}):\n{_output_tail(result)}"
+        )
     return result
 
 
@@ -418,9 +473,11 @@ def _max_frames_args(ctx: PathContext) -> List[str]:
     return ["--max-frames", str(mf)] if mf is not None else []
 
 
+# Windows python.exe block-buffers stdout into a pipe, so without -u its
+# output reaches preprocess.log and the status line only when it exits.
 def build_composite_preprocess_command(ctx: PathContext, output_dir: Path) -> List[str]:
     return [
-        str(WIN_VENV_PYTHON), to_windows_path(CODE_DIR / "viz" / "viz_preprocess.py"),
+        str(WIN_VENV_PYTHON), "-u", to_windows_path(CODE_DIR / "viz" / "viz_preprocess.py"),
         "--grains-dir", to_windows_path(ctx.grains_dir),
         "--bodies-dir", to_windows_path(ctx.bodies_dir),
         "--output-dir", to_windows_path(output_dir),
@@ -430,7 +487,7 @@ def build_composite_preprocess_command(ctx: PathContext, output_dir: Path) -> Li
 
 def build_instance_grains_preprocess_command(ctx: PathContext, output_dir: Path) -> List[str]:
     return [
-        str(WIN_VENV_PYTHON),
+        str(WIN_VENV_PYTHON), "-u",
         to_windows_path(CODE_DIR / "viz" / "viz_preprocess_grains_instance.py"),
         "--grains-dir", to_windows_path(ctx.grains_dir),
         "--bodies-dir", to_windows_path(ctx.bodies_dir),
@@ -456,16 +513,20 @@ def build_instance_static_preprocess_command(ctx: PathContext, output_dir: Path)
     ]
 
 
-def run_preprocess_stage(cmd: List[str], output_dir: Path) -> Path:
-    """Run one preprocess subprocess from the Windows repo root; return its manifest path."""
+def run_preprocess_stage(
+    cmd: List[str], output_dir: Path, *, on_line: Optional[Callable[[str], None]] = None,
+) -> Path:
+    """Run one preprocess subprocess from the Windows repo root; return its manifest path.
+    Its output is logged to <output_dir>/preprocess.log."""
+    log_path = output_dir / "preprocess.log"
     try:
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, errors="replace", cwd=str(CODE_DIR),
-        )
+        result = _run_logged(cmd, log_path, cwd=str(CODE_DIR), on_line=on_line)
     except OSError as exc:
         raise PreprocessError(f"could not start {cmd[0]}: {exc}") from exc
     if result.returncode != 0:
-        raise PreprocessError(f"exited {result.returncode}:\n{_output_tail(result)}")
+        raise PreprocessError(
+            f"exited {result.returncode} (full log: {log_path}):\n{_output_tail(result)}"
+        )
     manifest = output_dir / "manifest.json"
     if not manifest.is_file():
         # blender --background --python exits 0 even after an uncaught
@@ -482,7 +543,7 @@ def build_dump_preprocess_command(ctx: PathContext, run_dir: Path, targets: Dict
     # resolve(): to_windows_path only converts absolute paths, and the Windows
     # python cannot see a relative WSL path
     cmd = [
-        str(WIN_VENV_PYTHON), to_windows_path(CODE_DIR / "viz" / "viz_preprocess_dump.py"),
+        str(WIN_VENV_PYTHON), "-u", to_windows_path(CODE_DIR / "viz" / "viz_preprocess_dump.py"),
         "--run-dir", to_windows_path(Path(run_dir).resolve()),
         "--bodies-dir", to_windows_path(ctx.bodies_dir),
     ]
@@ -493,15 +554,17 @@ def build_dump_preprocess_command(ctx: PathContext, run_dir: Path, targets: Dict
     return cmd + _max_frames_args(ctx)
 
 
-def run_dump_preprocess_stage(cmd: List[str], targets: Dict[str, Path]) -> Dict[str, object]:
-    """Run viz_preprocess_dump.py once; {path name: manifest Path | PreprocessError}."""
+def run_dump_preprocess_stage(
+    cmd: List[str], targets: Dict[str, Path], *, on_line: Optional[Callable[[str], None]] = None,
+) -> Dict[str, object]:
+    """Run viz_preprocess_dump.py once; {path name: manifest Path | PreprocessError}.
+    Its output is logged to preprocess.log in the first target's viz dir."""
     for viz_dir in targets.values():
         # success is judged by the manifest existing afterwards
         (viz_dir / "manifest.json").unlink(missing_ok=True)
+    log_path = next(iter(targets.values())) / "preprocess.log"
     try:
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, errors="replace", cwd=str(CODE_DIR),
-        )
+        result = _run_logged(cmd, log_path, cwd=str(CODE_DIR), on_line=on_line)
     except OSError as exc:
         err = PreprocessError(f"could not start {cmd[0]}: {exc}")
         return {name: err for name in targets}
@@ -519,7 +582,9 @@ def run_dump_preprocess_stage(cmd: List[str], targets: Dict[str, Path]) -> Dict[
         elif manifest.is_file():
             out[name] = manifest
         else:
-            out[name] = PreprocessError(f"exited {result.returncode}:\n{_output_tail(result)}")
+            out[name] = PreprocessError(
+                f"exited {result.returncode} (full log: {log_path}):\n{_output_tail(result)}"
+            )
     return out
 
 
@@ -569,7 +634,10 @@ PATH_CHECKBOX_IDS: Dict[str, str] = {
 }
 
 
-def run_render_path(spec: RenderPath, ctx: PathContext, on_stage=None, index: int = 1, total: int = 1) -> PathResult:
+def run_render_path(
+    spec: RenderPath, ctx: PathContext, on_stage=None, index: int = 1, total: int = 1,
+    on_line: Optional[Callable[[str], None]] = None,
+) -> PathResult:
     """[preprocess] -> render for one path. Never raises for stage failures."""
     t0 = time.monotonic()
 
@@ -578,7 +646,10 @@ def run_render_path(spec: RenderPath, ctx: PathContext, on_stage=None, index: in
             on_stage(stage, path=spec.name, index=index, total=total, **info)
 
     manifest: Optional[Path] = None
+    preprocess_s: Optional[float] = None
     if ctx.preprocessed is not None and spec.name in ctx.preprocessed:
+        # preprocessed by the shared viz_preprocess_dump.py call; its time is
+        # in the run-level wall_clock_s.dump_preprocess, not per path
         got = ctx.preprocessed[spec.name]
         if isinstance(got, PreprocessError):
             return PathResult(spec.name, False, "preprocess", str(got), 0, time.monotonic() - t0)
@@ -587,10 +658,17 @@ def run_render_path(spec: RenderPath, ctx: PathContext, on_stage=None, index: in
         viz_dir = _viz_dir(ctx, spec)
         notify("preprocess", output_dir=viz_dir)
         try:
-            manifest = run_preprocess_stage(spec.build_preprocess_command(ctx, viz_dir), viz_dir)
+            manifest = run_preprocess_stage(
+                spec.build_preprocess_command(ctx, viz_dir), viz_dir, on_line=on_line,
+            )
         except PreprocessError as exc:
-            return PathResult(spec.name, False, "preprocess", str(exc), 0, time.monotonic() - t0)
+            elapsed = time.monotonic() - t0
+            return PathResult(
+                spec.name, False, "preprocess", str(exc), 0, elapsed, preprocess_s=elapsed,
+            )
+        preprocess_s = time.monotonic() - t0
 
+    t_render = time.monotonic()
     output_dir = _render_output_dir(ctx.batch_dir, ctx.run_name, spec.name)
     notify("render", n_expected=ctx.n_expected_frames, output_dir=output_dir)
     form = ctx.render_form
@@ -607,6 +685,7 @@ def run_render_path(spec: RenderPath, ctx: PathContext, on_stage=None, index: in
         video_fps=form.video_fps,
         viz_path=spec.headless_viz_path,
         manifest=manifest,
+        on_line=on_line,
     )
     try:
         run_render_stage(params)
@@ -614,12 +693,17 @@ def run_render_path(spec: RenderPath, ctx: PathContext, on_stage=None, index: in
         return PathResult(
             spec.name, False, "render", str(exc),
             count_matching(output_dir, "frame_*.png"), time.monotonic() - t0,
+            preprocess_s=preprocess_s, render_s=time.monotonic() - t_render,
         )
 
+    render_s = time.monotonic() - t_render
     elapsed = time.monotonic() - t0
     n_frames = count_matching(output_dir, "frame_*.png")
     if n_frames == 0:
-        return PathResult(spec.name, False, "render", f"render wrote no frames to {output_dir}", 0, elapsed)
+        return PathResult(
+            spec.name, False, "render", f"render wrote no frames to {output_dir}", 0, elapsed,
+            preprocess_s=preprocess_s, render_s=render_s,
+        )
     message = f"{n_frames} frame(s) in {elapsed:.0f}s to {output_dir}"
     if form.encode_video:
         video_path = output_dir / "animation.mp4"
@@ -627,7 +711,10 @@ def run_render_path(spec: RenderPath, ctx: PathContext, on_stage=None, index: in
             f", encoded to {video_path}" if video_path.is_file()
             else f", video encode requested but {video_path} not found"
         )
-    return PathResult(spec.name, True, "done", message, n_frames, elapsed)
+    return PathResult(
+        spec.name, True, "done", message, n_frames, elapsed,
+        preprocess_s=preprocess_s, render_s=render_s,
+    )
 
 
 def format_path_result(r: PathResult) -> str:
@@ -677,6 +764,9 @@ def count_matching(directory: Optional[Path], pattern: str) -> int:
     return len(list(directory.glob(pattern)))
 
 
+_STATUS_LOG_LINE_MAX = 100
+
+
 def format_live_progress(
     elapsed_s: float,
     stage: str,
@@ -687,8 +777,13 @@ def format_live_progress(
     n_expected: Optional[int] = None,
     warning: str = "",
     path_label: Optional[str] = None,
+    last_line: Optional[str] = None,
 ) -> str:
-    """Status-bar text for the live-progress tick. Pure — no widget I/O."""
+    """Status-bar text for the live-progress tick. Pure — no widget I/O.
+
+    last_line is the latest line a preprocess/render subprocess printed
+    (e.g. Blender's "Fra:14 ... Sample 120/500"), shown so a long stage that
+    has not written a frame yet still visibly moves."""
     elapsed = f"{elapsed_s:.0f}s elapsed"
     label = f" [{path_label}]" if path_label else ""
     if stage == "convert":
@@ -715,7 +810,125 @@ def format_live_progress(
         body = f"Comparing... {elapsed}, {count}"
     else:
         body = f"Running sim... {elapsed}, {n_dumps} dump file(s)"
+    line = (last_line or "").strip()
+    if line:
+        if len(line) > _STATUS_LOG_LINE_MAX:
+            line = line[: _STATUS_LOG_LINE_MAX - 1] + "…"
+        body += f" | {line}"
     return f"{warning}{body}"
+
+
+_TIMING_SCHEMA_VERSION = 1
+_SOBOL_REPO = Path(__file__).resolve().parent
+
+
+def _write_json(path: Path, data: dict) -> None:
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+
+def _np_apophis_from_setup(run_dir: Path) -> Optional[int]:
+    """np_apophis the run actually used, from its generated sobol.setup.
+
+    The form's np_apophis can be blank (template value kept), so this -- not
+    the form -- is the grain count to report against wall-clock time."""
+    setup = run_dir / "sobol.setup"
+    if not setup.is_file():
+        return None
+    for line in setup.read_text(encoding="utf-8", errors="replace").splitlines():
+        stripped = line.split("!", 1)[0].strip()
+        key, sep, val = stripped.partition("=")
+        if sep and key.strip().lower() == "np_apophis":
+            try:
+                return int(float(val.strip()))
+            except ValueError:
+                return None
+    return None
+
+
+def _git_state(repo: Path) -> Optional[dict]:
+    """{"sha", "dirty"} for repo's HEAD, or None if it is not a readable git repo.
+
+    dirty ignores untracked files (sobol/ keeps many untracked staging dirs);
+    it flags uncommitted edits to tracked code, i.e. whether the SHA alone
+    reproduces the run."""
+    def git(*args) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["git", "-C", str(repo), *args],
+            capture_output=True, text=True, errors="replace", timeout=60,
+        )
+    try:
+        head = git("rev-parse", "HEAD")
+        if head.returncode != 0:
+            return None
+        status = git("status", "--porcelain", "--untracked-files=no")
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return {
+        "sha": head.stdout.strip(),
+        "dirty": bool(status.stdout.strip()) if status.returncode == 0 else None,
+    }
+
+
+def _path_timing(r: PathResult) -> dict:
+    per_frame = (
+        r.render_s / r.n_frames if r.render_s is not None and r.n_frames > 0 else None
+    )
+    return {
+        "name": r.name,
+        "ok": r.ok,
+        "failed_stage": None if r.ok else r.stage,
+        "preprocess_s": r.preprocess_s,
+        "render_s": r.render_s,
+        "total_s": r.elapsed_s,
+        "n_frames": r.n_frames,
+        "render_s_per_frame": per_frame,
+    }
+
+
+def build_timing_report(
+    sim_params: SimParams,
+    render_form: RenderFormValues,
+    result: PipelineResult,
+    facts: Dict[str, object],
+    *,
+    started_at: datetime,
+    finished_at: datetime,
+    total_s: float,
+    run_dir: Path,
+) -> dict:
+    """pipeline_timing.json contents: measured wall-clock per stage and path,
+    the grain count and render settings they depend on, and the code
+    versions that produced them."""
+    return {
+        "schema_version": _TIMING_SCHEMA_VERSION,
+        "started_at": started_at.isoformat(timespec="seconds"),
+        "finished_at": finished_at.isoformat(timespec="seconds"),
+        "outcome": {"stage": result.stage, "ok": result.ok},
+        "wall_clock_s": {
+            "total": total_s,
+            "sim": facts.get("sim_s"),
+            "convert": facts.get("convert_s"),
+            "dump_preprocess": facts.get("dump_preprocess_s"),
+        },
+        "paths": [_path_timing(r) for r in result.paths],
+        "counts": {
+            "np_apophis": _np_apophis_from_setup(run_dir),
+            "n_dumps": facts.get("n_dumps"),
+            "n_npz_frames": facts.get("n_npz"),
+            "n_expected_frames": facts.get("n_expected_frames"),
+        },
+        "sim": asdict(sim_params.sample),
+        "render": asdict(render_form),
+        "run_dir": str(run_dir),
+        "environment": {
+            "hostname": platform.node(),
+            "omp_num_threads": os.environ.get("OMP_NUM_THREADS"),
+            "phantom_dir": str(sim_params.phantom_dir),
+            "blender_exe": BLENDER_EXE,
+        },
+        "git": {"sobol": _git_state(_SOBOL_REPO), "code": _git_state(CODE_DIR)},
+        "notes": "render_s includes the optional video encode; total_s = preprocess_s + render_s.",
+    }
 
 
 def run_pipeline(
@@ -723,6 +936,7 @@ def run_pipeline(
     render_form: RenderFormValues,
     base_output_dir: Path,
     on_stage=None,
+    on_line: Optional[Callable[[str], None]] = None,
 ) -> PipelineResult:
     """Sim -> [convert] -> each ticked render path ([preprocess] -> render) -> [compare].
 
@@ -733,6 +947,15 @@ def run_pipeline(
 
     on_stage(stage: str, **info) is optional. The TUI uses it to flip the
     status bar between dump / npz / preprocess / frame counts.
+
+    on_line(line: str) is optional and receives every line the preprocess
+    and render subprocesses print (they also go to preprocess.log /
+    render.log). It is called on the worker thread, once per line, so it
+    must be cheap.
+
+    Unless the sim was a dry run, per-stage wall-clock times are written to
+    <run_dir>/pipeline_timing.json (see build_timing_report); a failure to
+    write it is noted in the message but never fails the pipeline.
     """
     if not render_form.paths:
         raise ValueError("at least one render path must be selected")
@@ -742,12 +965,54 @@ def run_pipeline(
     if render_form.compare and len(render_form.paths) < 2:
         raise ValueError("compare needs at least two render paths")
 
+    started_at = datetime.now().astimezone()
+    t0 = time.monotonic()
+    facts: Dict[str, object] = {}
+    result = _run_pipeline_stages(
+        sim_params, render_form, base_output_dir, on_stage, on_line, facts,
+    )
+    record = result.record
+    if record is None or record.status == "prepared_only":
+        return result
+    run_dir = Path(record.run_dir)
+    if not run_dir.is_dir():
+        return result
+    report = build_timing_report(
+        sim_params, render_form, result, facts,
+        started_at=started_at,
+        finished_at=datetime.now().astimezone(),
+        total_s=time.monotonic() - t0,
+        run_dir=run_dir,
+    )
+    timing_path = run_dir / "pipeline_timing.json"
+    try:
+        _write_json(timing_path, report)
+    except OSError as exc:
+        result.message += f" (timing not written: {exc})"
+    else:
+        result.timing_path = timing_path
+    return result
+
+
+def _run_pipeline_stages(
+    sim_params: SimParams,
+    render_form: RenderFormValues,
+    base_output_dir: Path,
+    on_stage,
+    on_line: Optional[Callable[[str], None]],
+    facts: Dict[str, object],
+) -> PipelineResult:
+    """run_pipeline's stages. Records sim_s / convert_s / n_dumps / n_npz /
+    n_expected_frames into facts as each becomes known."""
+
     def notify(stage: str, **info) -> None:
         if on_stage is not None:
             on_stage(stage, **info)
 
     notify("sim")
+    t_sim = time.monotonic()
     record = run_sim_stage(sim_params)
+    facts["sim_s"] = time.monotonic() - t_sim
     if record.status != "ok":
         return PipelineResult(
             stage="sim", ok=False,
@@ -758,6 +1023,7 @@ def run_pipeline(
     run_dir = Path(record.run_dir)
     grains_dir, bodies_dir = _grains_and_bodies_dirs(run_dir, base_output_dir, sim_params.output_root)
     n_dumps = count_matching(run_dir, f"{sim_params.prefix}_[0-9]*")
+    facts["n_dumps"] = n_dumps
     dump_route = not needs_npz(render_form.paths)
 
     if dump_route:
@@ -772,16 +1038,20 @@ def run_pipeline(
         source_message = f"read {n_dumps} dump(s) directly (convert skipped)"
     else:
         notify("convert", n_expected=n_dumps if n_dumps else None)
+        t_convert = time.monotonic()
         try:
             run_convert_stage(record, base_output_dir)
         except ConvertError as exc:
+            facts["convert_s"] = time.monotonic() - t_convert
             return PipelineResult(stage="convert", ok=False, message=str(exc), record=record)
+        facts["convert_s"] = time.monotonic() - t_convert
 
         # DEMDumpConvert.py never raises on a bad dump or an empty run -- it
         # prints and carries on -- so run_convert_stage() "succeeding" is not
         # proof any frame was actually converted. Catch that here rather than
         # let Blender fail minutes/hours later on "no grain npz files found".
         n_npz = count_matching(grains_dir, "*.npz")
+        facts["n_npz"] = n_npz
         if n_npz == 0:
             return PipelineResult(
                 stage="convert", ok=False,
@@ -802,6 +1072,7 @@ def run_pipeline(
     n_expected_frames = n_frames
     if render_form.max_frames is not None:
         n_expected_frames = min(n_frames, render_form.max_frames)
+    facts["n_expected_frames"] = n_expected_frames
 
     ctx = PathContext(
         grains_dir=grains_dir,
@@ -819,11 +1090,13 @@ def run_pipeline(
         cam_dir = targets["composite"] / "grains" if "composite" in targets else None
         notify("preprocess_dumps", output_dir=cam_dir,
                n_expected=n_expected_frames if cam_dir is not None else None)
+        t_pre = time.monotonic()
         ctx.preprocessed = run_dump_preprocess_stage(
-            build_dump_preprocess_command(ctx, run_dir, targets), targets,
+            build_dump_preprocess_command(ctx, run_dir, targets), targets, on_line=on_line,
         )
+        facts["dump_preprocess_s"] = time.monotonic() - t_pre
     results = [
-        run_render_path(spec, ctx, on_stage=on_stage, index=i, total=len(specs))
+        run_render_path(spec, ctx, on_stage=on_stage, index=i, total=len(specs), on_line=on_line)
         for i, spec in enumerate(specs, start=1)
     ]
     all_ok = all(r.ok for r in results)
@@ -933,6 +1206,10 @@ class SimRenderTUIApp(App[None]):
         self._pipeline_n_expected: Optional[int] = None
         self._pipeline_dry_run: bool = False
         self._pipeline_path_label: Optional[str] = None
+        # Latest line printed by the running preprocess/render subprocess.
+        # Written from the worker thread (a plain attribute store, atomic in
+        # CPython) and read by the 2 s tick -- no call_from_thread per line.
+        self._pipeline_last_line: Optional[str] = None
         # This TUI runs one pipeline at a time -- @work(thread=True) defaults
         # to exclusive=False, so without this guard a second click while a
         # worker is in flight would start a second worker that overwrites
@@ -1269,6 +1546,7 @@ class SimRenderTUIApp(App[None]):
         self._pipeline_n_expected = None
         self._pipeline_dry_run = dry_run
         self._pipeline_path_label = None
+        self._pipeline_last_line = None
         if dry_run:
             self._set_status(f"{warning}Dry run...")
         else:
@@ -1281,6 +1559,7 @@ class SimRenderTUIApp(App[None]):
     def _set_pipeline_stage(self, stage: str, info: Optional[dict] = None) -> None:
         """Called from the worker via call_from_thread when a stage starts."""
         self._pipeline_stage = stage
+        self._pipeline_last_line = None  # the previous stage's line is stale
         info = info or {}
         if "n_expected" in info:
             self._pipeline_n_expected = info["n_expected"]
@@ -1330,8 +1609,13 @@ class SimRenderTUIApp(App[None]):
                 n_expected=self._pipeline_n_expected,
                 warning=self._pipeline_warning,
                 path_label=self._pipeline_path_label,
+                last_line=self._pipeline_last_line,
             )
         )
+
+    def _on_subprocess_line(self, line: str) -> None:
+        """run_pipeline's on_line hook; runs on the worker thread."""
+        self._pipeline_last_line = line
 
     def _stop_progress_timer(self) -> None:
         if self._progress_timer is not None:
@@ -1346,6 +1630,7 @@ class SimRenderTUIApp(App[None]):
         try:
             result = run_pipeline(
                 sim_params, render_form, DATA_DIR / "DEMCSVs", on_stage=on_stage,
+                on_line=self._on_subprocess_line,
             )
         except Exception as exc:  # an uncaught exception here must never kill the app
             result = PipelineResult(
@@ -1378,12 +1663,19 @@ class SimRenderTUIApp(App[None]):
                 error=False,
             )
             return
+        timing = f" | timing: {result.timing_path}" if result.timing_path is not None else ""
         if result.ok:
-            self._set_status(f"{time_prefix}Done ({result.stage}): {result.message}", error=False)
+            self._set_status(
+                f"{time_prefix}Done ({result.stage}): {result.message}{timing}", error=False,
+            )
         elif result.stage == "partial":
-            self._set_status(f"{time_prefix}Finished with failures: {result.message}", error=True)
+            self._set_status(
+                f"{time_prefix}Finished with failures: {result.message}{timing}", error=True,
+            )
         else:
-            self._set_status(f"{time_prefix}Failed at {result.stage}: {result.message}", error=True)
+            self._set_status(
+                f"{time_prefix}Failed at {result.stage}: {result.message}{timing}", error=True,
+            )
 
 
 def main() -> None:

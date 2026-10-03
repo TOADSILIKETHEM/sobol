@@ -111,6 +111,32 @@ def test_patch_instance_real_script():
     assert "CAMERA_MODE = None" in out  # auto leaves it untouched
 
 
+def test_patch_per_sphere_max_frames_limits_scene_build():
+    # The frame limit must reach the builder before it keyframes, not only
+    # clamp scene.frame_end after every grain file has been keyframed.
+    out = dhr.patch_script_source(
+        "per_sphere", _real_src("per_sphere"),
+        grains_dir="C:/g/", bodies_dir="C:/b/", max_frames=3,
+    )
+    assert "\nMAX_FRAMES = 3\n" in out
+
+
+def test_patch_per_sphere_without_max_frames_leaves_constant():
+    out = dhr.patch_script_source(
+        "per_sphere", _real_src("per_sphere"), grains_dir="C:/g/", bodies_dir="C:/b/",
+    )
+    assert "\nMAX_FRAMES = None\n" in out
+
+
+def test_patch_composite_ignores_max_frames():
+    # Composite loads geometry per frame in a frame_change_pre handler, so it
+    # has no up-front build to limit; its script has no MAX_FRAMES constant.
+    out = dhr.patch_script_source(
+        "composite", _real_src("composite"), manifest="C:/m.json", max_frames=3,
+    )
+    assert "MAX_FRAMES" not in out
+
+
 def test_patch_windows_backslashes_are_literal():
     out = dhr.patch_script_source(
         "composite", "VIZ_MANIFEST = (\n    'x'\n)\nCAMERA_MODE = None\n",
@@ -289,3 +315,23 @@ def test_blender_build_point_cloud_writes_given_radii():
     combined = (result.stdout or "") + (result.stderr or "")
     assert result.returncode == 0, combined[-3000:]
     assert "RADII_OK" in combined
+
+
+@pytest.mark.skipif(not BLENDER_EXE.is_file(), reason="blender.exe not installed")
+@pytest.mark.skipif(not WIN_TEMP.is_dir(), reason="Windows Temp not mounted")
+def test_blender_per_sphere_max_frames_builds_only_those_frames():
+    n_fixture = len(list((FIXTURE_RUN / "run_0001_grains_output").glob("*.npz")))
+    assert n_fixture > 2, "fixture needs more than 2 frames to show the limit"
+
+    result, _records, out_dir = run_recorded_render(
+        "per_sphere_max_frames", "DEM_Grain_0000",
+        ["--viz-path", "per_sphere",
+         "--grains-dir", FIXTURE_RUN_WIN + "/run_0001_grains_output",
+         "--bodies-dir", FIXTURE_RUN_WIN + "/run_0001_bodies_output",
+         "--max-frames", "2"],
+    )
+    combined = (result.stdout or "") + (result.stderr or "")
+    assert result.returncode == 0, combined[-3000:]
+    assert len(list(out_dir.glob("frame_*.png"))) == 2
+    assert "Keyframing 2 frames" in combined, combined[-3000:]
+    assert f"Keyframing {n_fixture} frames" not in combined
