@@ -5,7 +5,13 @@ from __future__ import annotations
 
 import argparse
 import csv
+import sys
 from pathlib import Path
+
+_ANALYSIS_DIR = Path(__file__).resolve().parent
+if str(_ANALYSIS_DIR) not in sys.path:
+    sys.path.insert(0, str(_ANALYSIS_DIR))
+from csv_columns import size_ratio_raw
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -26,7 +32,7 @@ def load_batch(csv_path: Path) -> dict[str, np.ndarray]:
             if row.get("status") != "ok":
                 continue
             s = _to_float(row["apophis_spin_period"])
-            d = _to_float(row["dispersion_ratio"])
+            d = _to_float(size_ratio_raw(row))
             u = _to_float(row["unbound_fraction"])
             if s is None or d is None or u is None:
                 continue

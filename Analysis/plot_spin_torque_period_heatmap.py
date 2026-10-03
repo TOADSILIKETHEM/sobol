@@ -5,7 +5,13 @@ from __future__ import annotations
 
 import argparse
 import csv
+import sys
 from pathlib import Path
+
+_ANALYSIS_DIR = Path(__file__).resolve().parent
+if str(_ANALYSIS_DIR) not in sys.path:
+    sys.path.insert(0, str(_ANALYSIS_DIR))
+from csv_columns import size_ratio_raw
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -26,7 +32,7 @@ def load_outputs(csv_path: Path) -> dict[str, np.ndarray]:
             run_id.append(int(row["run_id"]))
             spin.append(float(row["apophis_spin_period"]))
             align.append(float(row["apophis_spin_torque_align_deg"]))
-            disp.append(float(row["dispersion_ratio"]))
+            disp.append(float(size_ratio_raw(row)))
             unbound.append(float(row["unbound_fraction"]))
     return {
         "run_id": np.asarray(run_id),
@@ -78,7 +84,7 @@ def main() -> None:
         "--disp-cap",
         type=float,
         default=1.15,
-        help="Cap dispersion colour scale for bound-deformation panel.",
+        help="Cap size ratio colour scale for bound-deformation panel.",
     )
     args = parser.parse_args()
     repo = Path(__file__).resolve().parents[2]

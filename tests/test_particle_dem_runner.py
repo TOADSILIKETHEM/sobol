@@ -171,7 +171,7 @@ def test_compute_run_metrics_particle_fixture(tmp_path):
     m = runner.compute_run_metrics(run, "sobol", s, runner.EARTH_SINK_ID_DEFAULT, runner.APOPHIS_SINK_ID_DEFAULT)
     assert math.isfinite(m.closest_km) and m.closest_km > 1e4   # ~1 hr of a flyby 3 days out
     # fixture spins at P=2 hr (omega/omega_crit ~1.01), so the pile spreads in both models
-    assert 0.95 < m.dispersion_ratio < 3.0
+    assert 0.95 < m.size_ratio < 3.0
     assert 0.0 <= m.unbound_fraction < 0.05
 
 
@@ -199,7 +199,7 @@ def test_point_mass_run_uses_sink_ev_for_ca(tmp_path, monkeypatch):
     s = RunSample(np_apophis=1, apophis_only=False)
     m = runner.compute_run_metrics(tmp_path, "sobol", s, runner.EARTH_SINK_ID_DEFAULT, runner.APOPHIS_SINK_ID_DEFAULT)
     assert called and m.closest_km == 4.0e4
-    assert math.isnan(m.dispersion_ratio)
+    assert math.isnan(m.size_ratio)
 
 
 def test_particle_loader_works_under_package_import():

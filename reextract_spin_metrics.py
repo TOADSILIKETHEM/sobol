@@ -75,6 +75,14 @@ def reextract_batch(
         ):
             if col not in fieldnames:
                 fieldnames.append(col)
+        # Batches written before the size_ratio rename keep the dispersion_ratio header.
+        size_ratio_col = (
+            "dispersion_ratio"
+            if "dispersion_ratio" in fieldnames and "size_ratio" not in fieldnames
+            else "size_ratio"
+        )
+        if size_ratio_col not in fieldnames:
+            fieldnames.append(size_ratio_col)
         for row in reader:
             if row.get("status") != "ok":
                 rows.append(row)
@@ -110,7 +118,7 @@ def reextract_batch(
             def _fmt(v: float) -> str:
                 return f"{v:.12g}" if math.isfinite(v) else ""
 
-            row["dispersion_ratio"] = _fmt(disp)
+            row[size_ratio_col] = _fmt(disp)
             row["unbound_fraction"] = _fmt(unbound)
             row["intrinsic_spin_period_hr"] = _fmt(intrinsic)
             row["approach_spin_period_hr"] = _fmt(approach)

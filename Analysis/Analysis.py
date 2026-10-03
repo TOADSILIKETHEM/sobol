@@ -21,7 +21,7 @@ Recognised input parameters (varied dimensions):
 
 Recognised response columns (--response / --saltelli-y-column):
   closest_approach_km, closest_approach_au  — orbital closest-approach distance.
-  dispersion_ratio                           — DEM only; peak radius-of-gyration ratio (>=1).
+  size_ratio                           — DEM only; peak radius-of-gyration ratio (>=1).
   unbound_fraction                           — DEM only; peak unbound mass fraction [0,1].
   intrinsic_spin_period_hr                   — early-plateau bound-rubble spin before tidal ramp-up (hours).
   approach_spin_period_hr                    — mean spin in last 24 h before closest approach (hours).
@@ -32,13 +32,13 @@ Examples:
       --response closest_approach_au
 
   python3 Analysis.py --method classic --csv sobol_mass_runs/.../sobol_mass_outputs.csv \\
-      --response dispersion_ratio
+      --response size_ratio
 
   python3 Analysis.py --method saltelli \\
       --sobol-problem-json batch/saltelli_problem.json \\
       --saltelli-meta-json batch/saltelli_meta.json \\
       --saltelli-y-csv batch/saltelli_Y.csv \\
-      --saltelli-y-column dispersion_ratio
+      --saltelli-y-column size_ratio
 
 Classic mode writes ``<input_stem>_sensitivity.csv`` by default. Saltelli mode writes
 ``saltelli_sobol_indices.csv`` next to the problem JSON unless ``--output-sobol-csv`` is set.
@@ -102,12 +102,24 @@ BOOL_INPUTS: Tuple[str, ...] = ("use_dem", "use_shape_crop", "apophis_only")
 RESPONSE_CANDIDATES: Tuple[str, ...] = (
     "closest_approach_km",
     "closest_approach_au",
-    "dispersion_ratio",
+    "size_ratio",
     "unbound_fraction",
     "intrinsic_spin_period_hr",
     "approach_spin_period_hr",
     "post_flyby_spin_period_hr",
 )
+
+# Response columns renamed over time; batch CSVs written before the rename keep the old header.
+LEGACY_RESPONSE_COLUMNS: Dict[str, str] = {"size_ratio": "dispersion_ratio"}
+
+
+def resolve_response_column(response: str, fieldnames: Sequence[str]) -> str:
+    """Column to read for ``response``: the legacy header if only that is present."""
+    legacy = LEGACY_RESPONSE_COLUMNS.get(response)
+    if response not in fieldnames and legacy is not None and legacy in fieldnames:
+        return legacy
+    return response
+
 
 RESULT_CSV_FIELDS = (
     "parameter",
@@ -159,7 +171,7 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Output column to analyse in classic mode; also the default for --saltelli-y-column. "
             "Valid options from the runner: closest_approach_km, closest_approach_au, "
-            "dispersion_ratio (DEM only), unbound_fraction (DEM only), "
+            "size_ratio (DEM only), unbound_fraction (DEM only), "
             "intrinsic_spin_period_hr, approach_spin_period_hr, post_flyby_spin_period_hr "
             "(multi-sink Apophis; approach/post need Earth flyby)."
         ),
@@ -225,7 +237,7 @@ def parse_args() -> argparse.Namespace:
         metavar="NAME",
         help=(
             "Numeric column to use as Y from the saltelli Y CSV (default: same as --response). "
-            "The runner writes closest_approach_km, closest_approach_au, dispersion_ratio, "
+            "The runner writes closest_approach_km, closest_approach_au, size_ratio, "
             "unbound_fraction, intrinsic_spin_period_hr, approach_spin_period_hr, "
             "and post_flyby_spin_period_hr "
             "to saltelli_Y.csv."
@@ -318,6 +330,7 @@ def load_saltelli_y(
             rows = list(reader)
         if not rows:
             raise ValueError("saltelli Y CSV is empty")
+        y_col = resolve_response_column(y_col, fieldnames)
         if y_col not in fieldnames:
             raise ValueError(f"Column {y_col!r} not in saltelli Y CSV: {fieldnames}")
         if "eval_index" in fieldnames:
@@ -392,6 +405,7 @@ def rows_to_arrays(
     ok_only: bool,
     log_response: bool,
 ) -> Tuple[np.ndarray, List[str], Dict[str, np.ndarray]]:
+    response = resolve_response_column(response, fieldnames)
     if response not in fieldnames:
         raise ValueError(f"Response column {response!r} not in CSV headers: {fieldnames}")
 
@@ -666,7 +680,7 @@ def run_classic_analysis(args: argparse.Namespace) -> None:
         "(marginal, nonlinear). R^2 Pearson/Spearman are linear/rank-linear. "
         "These are not Saltelli Sobol indices. "
         "Spin inputs (apophis_spin_period/obliquity/azimuth) only vary in DEM sweeps; "
-        "dispersion_ratio and unbound_fraction responses are blank for non-DEM runs and are "
+        "size_ratio and unbound_fraction responses are blank for non-DEM runs and are "
         "excluded automatically when not finite."
     )
     if not HAS_SCIPY:

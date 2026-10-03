@@ -93,7 +93,7 @@ def _metrics_for_run(
         _time_of_key=time_of_key,
         _n_sinks=n_sinks,
     )
-    out["dispersion_ratio"] = disp
+    out["size_ratio"] = disp
     out["unbound_fraction"] = unbound
     out["intrinsic_spin_period_hr"] = intrinsic
     out["approach_spin_period_hr"] = approach
@@ -103,7 +103,7 @@ def _metrics_for_run(
     disp2, unbound2 = extract_breakup_metrics(
         run_dir, prefix, apophis_sink_id, _groups=groups, _time_of_key=time_of_key
     )
-    out["dispersion_ratio_standalone"] = disp2
+    out["size_ratio_standalone"] = disp2
     out["unbound_fraction_standalone"] = unbound2
     grp_kw = dict(_groups=groups, _time_of_key=time_of_key, _n_sinks=n_sinks)
     if apophis_only:
@@ -157,7 +157,7 @@ def _load_csv_expectations(csv_path: Path, run_dir: Path) -> Dict[str, float]:
                 out: Dict[str, float] = {}
                 for key in (
                     "closest_approach_km",
-                    "dispersion_ratio",
+                    "size_ratio",
                     "unbound_fraction",
                     "intrinsic_spin_period_hr",
                     "approach_spin_period_hr",
@@ -260,7 +260,7 @@ def _print_spin_timeline(
     apophis_only: bool,
     t_ca: Optional[float],
 ) -> None:
-    """Per-dump spin period, dispersion, unbound, and intrinsic-window gate status."""
+    """Per-dump spin period, size ratio, unbound, and intrinsic-window gate status."""
     utime = _parse_utime_from_phantom_log(run_dir / "phantom.log")
     if utime is None:
         print("  spin-timeline: (no utime in phantom.log)")
@@ -318,7 +318,7 @@ def main() -> int:
     parser.add_argument(
         "--spin-timeline",
         action="store_true",
-        help="Print per-dump spin period, dispersion, unbound, and intrinsic gate status",
+        help="Print per-dump spin period, size ratio, unbound, and intrinsic gate status",
     )
     parser.add_argument(
         "--expect-intact",
@@ -356,7 +356,7 @@ def main() -> int:
     print(f"dump groups: {new.get('n_dump_groups')}  apophis sinks: {new.get('n_sinks')}")
     for key in (
         "closest_approach_km",
-        "dispersion_ratio",
+        "size_ratio",
         "unbound_fraction",
         "intrinsic_spin_period_hr",
         "approach_spin_period_hr",
@@ -365,12 +365,12 @@ def main() -> int:
         if key in new:
             print(f"  {key}: {new[key]:.12g}")
 
-    if "dispersion_ratio" not in new:
+    if "size_ratio" not in new:
         print(f"  Non-DEM or single-sink run (n_sinks={new.get('n_sinks')}), skipping metric validation")
         return 0
 
-    if not _finite_close(new["dispersion_ratio"], new["dispersion_ratio_standalone"], 1e-12):
-        print("ERROR: bundle vs standalone dispersion_ratio mismatch", file=sys.stderr)
+    if not _finite_close(new["size_ratio"], new["size_ratio_standalone"], 1e-12):
+        print("ERROR: bundle vs standalone size_ratio mismatch", file=sys.stderr)
         return 1
     if not _finite_close(new["unbound_fraction"], new["unbound_fraction_standalone"], 1e-12):
         print("ERROR: bundle vs standalone unbound_fraction mismatch", file=sys.stderr)
@@ -448,7 +448,7 @@ def main() -> int:
         else:
             tol = {
                 "closest_approach_km": 1e-6,
-                "dispersion_ratio": 1e-3,
+                "size_ratio": 1e-3,
                 "unbound_fraction": 1e-3,
                 "intrinsic_spin_period_hr": 0.02,
                 "approach_spin_period_hr": 0.02,
@@ -477,7 +477,7 @@ def main() -> int:
         )
         print(f"legacy substep groups: {legacy.get('n_dump_groups')}")
         print(
-            f"  legacy dispersion_ratio: {legacy.get('dispersion_ratio', float('nan')):.12g}  "
+            f"  legacy size_ratio: {legacy.get('size_ratio', float('nan')):.12g}  "
             f"unbound: {legacy.get('unbound_fraction', float('nan')):.12g}"
         )
 

@@ -132,8 +132,8 @@ def test_spin_period_hr_bound_rubble_retrograde():
 import verify_metric_extraction as vme
 
 
-def test_metrics_for_run_single_sink_returns_no_dispersion_key(tmp_path):
-    """_metrics_for_run with n_sinks < 2 must not include dispersion_ratio key."""
+def test_metrics_for_run_single_sink_returns_no_size_ratio_key(tmp_path):
+    """_metrics_for_run with n_sinks < 2 must not include size_ratio key."""
     # Create a minimal fake run dir with a single-sink .ev file.
     # Content format: header + one row for sink ID 11 only.
     ev_content = (
@@ -149,15 +149,15 @@ def test_metrics_for_run_single_sink_returns_no_dispersion_key(tmp_path):
         run_dir, "sobol", earth_sink_id=4, apophis_sink_id=11, apophis_only=True,
         legacy_substeps=False
     )
-    assert "dispersion_ratio" not in result, (
-        f"Expected no 'dispersion_ratio' key for single-sink run, got keys: {list(result)}"
+    assert "size_ratio" not in result, (
+        f"Expected no 'size_ratio' key for single-sink run, got keys: {list(result)}"
     )
 
 
 def test_main_does_not_crash_on_single_sink_run(tmp_path):
     """verify_metric_extraction main() must exit 0 (not KeyError) for non-DEM runs.
 
-    Patches _metrics_for_run to return a non-DEM result (no dispersion_ratio key)
+    Patches _metrics_for_run to return a non-DEM result (no size_ratio key)
     so the test is independent of .ev file parsing format.
     """
     run_dir = tmp_path / "run_0001"
@@ -206,18 +206,18 @@ def test_to_float_blank_returns_none():
     assert _to_float("0") == 0.0
 
 
-def test_load_spin_disp_skips_blank_dispersion(tmp_path):
-    """plot_spin_disruption_threshold.load_spin_disp must skip rows with blank dispersion_ratio."""
+def test_load_spin_disp_skips_blank_size_ratio(tmp_path):
+    """plot_spin_disruption_threshold.load_spin_disp must skip rows with blank size_ratio."""
     import sys
     sys.path.insert(0, str(Path(__file__).parent.parent / "Analysis"))
     import plot_spin_disruption_threshold as psd
 
     csv_path = tmp_path / "test.csv"
-    fieldnames = ["status", "apophis_spin_period", "dispersion_ratio"]
+    fieldnames = ["status", "apophis_spin_period", "size_ratio"]
     rows = [
-        {"status": "ok", "apophis_spin_period": "2.0", "dispersion_ratio": "1.05"},
-        {"status": "ok", "apophis_spin_period": "1.5", "dispersion_ratio": ""},   # blank
-        {"status": "ok", "apophis_spin_period": "1.8", "dispersion_ratio": "1.12"},
+        {"status": "ok", "apophis_spin_period": "2.0", "size_ratio": "1.05"},
+        {"status": "ok", "apophis_spin_period": "1.5", "size_ratio": ""},   # blank
+        {"status": "ok", "apophis_spin_period": "1.8", "size_ratio": "1.12"},
     ]
     with csv_path.open("w", newline="") as f:
         w = csv_mod.DictWriter(f, fieldnames=fieldnames)
@@ -230,16 +230,16 @@ def test_load_spin_disp_skips_blank_dispersion(tmp_path):
 
 
 def test_load_batch_noearth_obj_skips_blank(tmp_path):
-    """plot_noearth_obj_ctrl_spin.load_batch must skip rows with blank dispersion_ratio."""
+    """plot_noearth_obj_ctrl_spin.load_batch must skip rows with blank size_ratio."""
     import sys
     sys.path.insert(0, str(Path(__file__).parent.parent / "Analysis"))
     import plot_noearth_obj_ctrl_spin as pnoc
 
     csv_path = tmp_path / "test.csv"
-    fieldnames = ["status", "run_id", "apophis_spin_period", "dispersion_ratio", "unbound_fraction"]
+    fieldnames = ["status", "run_id", "apophis_spin_period", "size_ratio", "unbound_fraction"]
     rows = [
-        {"status": "ok", "run_id": "1", "apophis_spin_period": "1.55", "dispersion_ratio": "8.83", "unbound_fraction": "0.163"},
-        {"status": "ok", "run_id": "2", "apophis_spin_period": "2.00", "dispersion_ratio": "", "unbound_fraction": ""},
+        {"status": "ok", "run_id": "1", "apophis_spin_period": "1.55", "size_ratio": "8.83", "unbound_fraction": "0.163"},
+        {"status": "ok", "run_id": "2", "apophis_spin_period": "2.00", "size_ratio": "", "unbound_fraction": ""},
     ]
     with csv_path.open("w", newline="") as f:
         w = csv_mod.DictWriter(f, fieldnames=fieldnames)
@@ -260,16 +260,16 @@ def test_load_batch_spin30_skips_blank_intrinsic(tmp_path):
     fieldnames = [
         "status", "apophis_spin_torque_align_deg",
         "intrinsic_spin_period_hr", "approach_spin_period_hr",
-        "post_flyby_spin_period_hr", "dispersion_ratio", "unbound_fraction"
+        "post_flyby_spin_period_hr", "size_ratio", "unbound_fraction"
     ]
     rows = [
         {"status": "ok", "apophis_spin_torque_align_deg": "45.0",
          "intrinsic_spin_period_hr": "30.6", "approach_spin_period_hr": "30.7",
-         "post_flyby_spin_period_hr": "30.5", "dispersion_ratio": "1.02", "unbound_fraction": "0.0"},
+         "post_flyby_spin_period_hr": "30.5", "size_ratio": "1.02", "unbound_fraction": "0.0"},
         {"status": "ok", "apophis_spin_torque_align_deg": "177.0",
          "intrinsic_spin_period_hr": "",    # blank — disrupting run
          "approach_spin_period_hr": "30.8",
-         "post_flyby_spin_period_hr": "30.9", "dispersion_ratio": "1.034", "unbound_fraction": "0.0"},
+         "post_flyby_spin_period_hr": "30.9", "size_ratio": "1.034", "unbound_fraction": "0.0"},
     ]
     with csv_path.open("w", newline="") as f:
         w = csv_mod.DictWriter(f, fieldnames=fieldnames)
@@ -293,9 +293,9 @@ def test_load_obj_earth_opposite_uses_latest_kmin_batch(tmp_path):
     for ts in ("sobol_20260611_172636", "sobol_20260701_090000"):
         batch_dir = runs_root / f"{ts}_flyby_spin_torque_period_kmin_obj"
         batch_dir.mkdir(parents=True)
-        fieldnames = ["status", "apophis_spin_torque_align_deg", "apophis_spin_period", "dispersion_ratio"]
+        fieldnames = ["status", "apophis_spin_torque_align_deg", "apophis_spin_period", "size_ratio"]
         rows = [{"status": "ok", "apophis_spin_torque_align_deg": "170.0",
-                 "apophis_spin_period": "2.0", "dispersion_ratio": "1.5"}]
+                 "apophis_spin_period": "2.0", "size_ratio": "1.5"}]
         with (batch_dir / "sobol_mass_outputs.csv").open("w", newline="") as f:
             w = csv_mod.DictWriter(f, fieldnames=fieldnames)
             w.writeheader()

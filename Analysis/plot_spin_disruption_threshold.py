@@ -9,7 +9,13 @@ from __future__ import annotations
 
 import argparse
 import csv
+import sys
 from pathlib import Path
+
+_ANALYSIS_DIR = Path(__file__).resolve().parent
+if str(_ANALYSIS_DIR) not in sys.path:
+    sys.path.insert(0, str(_ANALYSIS_DIR))
+from csv_columns import size_ratio_raw
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -28,7 +34,7 @@ def load_spin_disp(csv_path: Path) -> tuple[np.ndarray, np.ndarray]:
             if row.get("status") != "ok":
                 continue
             s = _to_float(row["apophis_spin_period"])
-            d = _to_float(row["dispersion_ratio"])
+            d = _to_float(size_ratio_raw(row))
             if s is None or d is None:
                 continue
             spin.append(s)
@@ -58,7 +64,7 @@ def load_obj_earth_opposite(repo: Path) -> tuple[np.ndarray, np.ndarray]:
                 if row.get("status") != "ok":
                     continue
                 s = _to_float(row["apophis_spin_period"])
-                d = _to_float(row["dispersion_ratio"])
+                d = _to_float(size_ratio_raw(row))
                 if s is None or d is None:
                     continue
                 spin.append(s)
@@ -78,7 +84,7 @@ def load_obj_earth_opposite(repo: Path) -> tuple[np.ndarray, np.ndarray]:
                 if a is None or not (160.0 <= a <= 180.0):
                     continue
                 s = _to_float(row["apophis_spin_period"])
-                d = _to_float(row["dispersion_ratio"])
+                d = _to_float(size_ratio_raw(row))
                 if s is None or d is None:
                     continue
                 spin.append(s)

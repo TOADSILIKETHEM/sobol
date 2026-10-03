@@ -5,7 +5,13 @@ from __future__ import annotations
 
 import argparse
 import csv
+import sys
 from pathlib import Path
+
+_ANALYSIS_DIR = Path(__file__).resolve().parent
+if str(_ANALYSIS_DIR) not in sys.path:
+    sys.path.insert(0, str(_ANALYSIS_DIR))
+from csv_columns import size_ratio_raw
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -26,7 +32,7 @@ def load_batch(csv_path: Path) -> dict[str, np.ndarray]:
             i = _to_float(row["intrinsic_spin_period_hr"])
             ap = _to_float(row["approach_spin_period_hr"])
             po = _to_float(row["post_flyby_spin_period_hr"])
-            d = _to_float(row["dispersion_ratio"])
+            d = _to_float(size_ratio_raw(row))
             u = _to_float(row["unbound_fraction"])
             if any(v is None for v in (a, i, ap, po, d, u)):
                 continue

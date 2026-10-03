@@ -11,6 +11,11 @@ import csv
 import sys
 from pathlib import Path
 
+_ANALYSIS_DIR = Path(__file__).resolve().parent
+if str(_ANALYSIS_DIR) not in sys.path:
+    sys.path.insert(0, str(_ANALYSIS_DIR))
+from csv_columns import size_ratio_col
+
 
 def _f(val: str) -> float | None:
     s = (val or "").strip()
@@ -36,7 +41,7 @@ def load_rows(batch_dir: Path) -> list[dict[str, float]]:
             intr = _f(row.get("intrinsic_spin_period_hr", ""))
             app = _f(row.get("approach_spin_period_hr", ""))
             post = _f(row.get("post_flyby_spin_period_hr", ""))
-            disp = _f(row.get("dispersion_ratio", ""))
+            disp = _f(row.get(size_ratio_col(row), ""))
             unb = _f(row.get("unbound_fraction", ""))
             if a is None or disp is None or unb is None:
                 continue

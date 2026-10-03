@@ -11,7 +11,7 @@ from pathlib import Path
 _ANALYSIS_DIR = Path(__file__).resolve().parent
 if str(_ANALYSIS_DIR) not in sys.path:
     sys.path.insert(0, str(_ANALYSIS_DIR))
-from csv_columns import kt_cgs_from_row
+from csv_columns import kt_cgs_from_row, size_ratio_raw
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -29,7 +29,7 @@ def load_batch(csv_path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
             if kc_val is None:
                 continue
             kc.append(kc_val)
-            disp.append(float(row["dispersion_ratio"]))
+            disp.append(float(size_ratio_raw(row)))
             ca.append(float(row["closest_approach_km"]))
     order = np.argsort(kc)
     return (
@@ -68,7 +68,7 @@ def main() -> None:
     ax.plot(log_kc, disp, "o-", color="#1f77b4", linewidth=2, markersize=8, zorder=2)
     ax.axhline(1.0, color="gray", linestyle=":", linewidth=1, alpha=0.8)
     ax.set_xlabel(r"$\log_{10}(k_c)$ [dyne/cm]")
-    ax.set_ylabel("Peak dispersion ratio")
+    ax.set_ylabel("Peak size ratio")
     ax.set_ylim(1.0, max(disp) * 1.02)
     ax.grid(True, alpha=0.3)
 

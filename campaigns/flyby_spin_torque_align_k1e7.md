@@ -54,7 +54,7 @@ bash sobol/campaigns/run_flyby_spin_torque_align_k1e7.sh
 
 `sobol_mass_runs/sobol_<timestamp>_flyby_spin_torque_align_k1e7/`
 
-Key columns: `apophis_spin_torque_align_deg`, `apophis_spin_period`, `dispersion_ratio`, `unbound_fraction`.
+Key columns: `apophis_spin_torque_align_deg`, `apophis_spin_period`, `size_ratio`, `unbound_fraction`.
 
 ## Blender re-runs (two extremes)
 

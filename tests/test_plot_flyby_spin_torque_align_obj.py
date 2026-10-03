@@ -16,7 +16,7 @@ def _write_csv(path: Path, rows: list[dict]) -> None:
         "intrinsic_spin_period_hr",
         "approach_spin_period_hr",
         "post_flyby_spin_period_hr",
-        "dispersion_ratio",
+        "size_ratio",
         "unbound_fraction",
     ]
     with path.open("w", newline="") as f:
@@ -37,7 +37,7 @@ def test_load_batch_sorts_by_angle(tmp_path: Path) -> None:
                 "intrinsic_spin_period_hr": "2.0",
                 "approach_spin_period_hr": "2.0",
                 "post_flyby_spin_period_hr": "2.01",
-                "dispersion_ratio": "1.02",
+                "size_ratio": "1.02",
                 "unbound_fraction": "0",
             },
             {
@@ -46,7 +46,7 @@ def test_load_batch_sorts_by_angle(tmp_path: Path) -> None:
                 "intrinsic_spin_period_hr": "2.0",
                 "approach_spin_period_hr": "2.0",
                 "post_flyby_spin_period_hr": "1.99",
-                "dispersion_ratio": "1.01",
+                "size_ratio": "1.01",
                 "unbound_fraction": "0",
             },
         ],

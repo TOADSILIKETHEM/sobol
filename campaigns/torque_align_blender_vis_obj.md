@@ -46,8 +46,8 @@ Sphere comparison (no OBJ): `bash sobol/campaigns/run_torque_align_blender_vis.s
 
 Example metrics (`sobol_mass_outputs.csv`):
 
-- run_0001: `dispersion_ratio` ≈ 1.28, `unbound_fraction` ≈ 0.016  
-- run_0002: `dispersion_ratio` ≈ 54, `unbound_fraction` ≈ 0.93  
+- run_0001: `size_ratio` ≈ 1.28, `unbound_fraction` ≈ 0.016  
+- run_0002: `size_ratio` ≈ 54, `unbound_fraction` ≈ 0.93  
 
 ## Blender pipeline
 

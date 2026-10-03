@@ -19,7 +19,7 @@ from typing import Optional
 _ANALYSIS_DIR = Path(__file__).resolve().parent
 if str(_ANALYSIS_DIR) not in sys.path:
     sys.path.insert(0, str(_ANALYSIS_DIR))
-from csv_columns import kt_cgs_from_row
+from csv_columns import kt_cgs_from_row, size_ratio_raw
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -82,7 +82,7 @@ def load_batch(csv_path: Path, label: str, title: str) -> GridBatch:
                 continue
             np_vals.append(float(row["np_apophis"]))
             spin.append(float(row["apophis_spin_period"]))
-            disp.append(float(row["dispersion_ratio"]))
+            disp.append(float(size_ratio_raw(row)))
             unbound.append(float(row.get("unbound_fraction") or 0))
             intr = (row.get("intrinsic_spin_period_hr") or "").strip()
             intrinsic.append(float(intr) if intr else np.nan)
@@ -185,7 +185,7 @@ def plot_disp_curves_panels(
         ax.set_title(batch.title, loc="left", fontsize=10)
         ax.grid(True, which="both", alpha=0.3)
         ax.legend(fontsize=7, loc="upper right", framealpha=0.9)
-    axes[0].set_ylabel("Peak dispersion ratio")
+    axes[0].set_ylabel("Peak size ratio")
     fig.suptitle(
         r"OBJ ~177°: disruption vs spin period at each $n_p$ ($k_c=10^7$, $t_\mathrm{max}=4.5$ d)",
         fontsize=11,
@@ -205,8 +205,8 @@ def plot_heatmap(
     if field == "disp":
         values = np.log10(np.maximum(batch.disp, 1.0))
         cmap = "magma"
-        label = r"$\log_{10}$(dispersion ratio)"
-        title_extra = "peak dispersion ratio (log scale)"
+        label = r"$\log_{10}$(size ratio)"
+        title_extra = "peak size ratio (log scale)"
     else:
         values = batch.unbound * 100
         cmap = "YlOrRd"
@@ -293,7 +293,7 @@ def plot_stable_band(batch: GridBatch, out: Path) -> None:
     ax_d.bar(x, disp_means, color="#2ca02c", alpha=0.85, label="mean")
     ax_d.scatter(x, disp_max, color="#d62728", s=50, zorder=3, label="max")
     ax_d.axhline(1.1, color="gray", linestyle=":", alpha=0.8)
-    ax_d.set_ylabel("Dispersion ratio")
+    ax_d.set_ylabel("Size ratio")
     ax_d.set_ylim(0.99, max(max(disp_max) * 1.1, 1.15))
     ax_d.legend(fontsize=8)
     ax_d.grid(True, axis="y", alpha=0.3)
@@ -329,8 +329,8 @@ def plot_kc_sigmac_overlay(p1: GridBatch, p2: GridBatch, out: Path) -> None:
         ax.legend(fontsize=7)
     for ax in axes[1, :]:
         ax.set_xlabel("Spin period (hours)")
-    axes[0, 0].set_ylabel("Peak dispersion ratio")
-    axes[1, 0].set_ylabel("Peak dispersion ratio")
+    axes[0, 0].set_ylabel("Peak size ratio")
+    axes[1, 0].set_ylabel("Peak size ratio")
     fig.suptitle("Fixed $k_c$ vs $\\sigma_c$-constant scaling (OBJ no-Earth ~177°)", fontsize=11)
     fig.tight_layout()
     fig.savefig(out, dpi=150, bbox_inches="tight")
@@ -355,8 +355,8 @@ def plot_earth_vs_noearth(p1: GridBatch, p3: GridBatch, out: Path) -> None:
         ax.legend(fontsize=7)
     for ax in axes[1, :]:
         ax.set_xlabel("Spin period (hours)")
-    axes[0, 0].set_ylabel("Peak dispersion ratio")
-    axes[1, 0].set_ylabel("Peak dispersion ratio")
+    axes[0, 0].set_ylabel("Peak size ratio")
+    axes[1, 0].set_ylabel("Peak size ratio")
     fig.suptitle("Intrinsic (no-Earth) vs Earth flyby amplification (OBJ ~177°)", fontsize=11)
     fig.tight_layout()
     fig.savefig(out, dpi=150, bbox_inches="tight")
@@ -431,12 +431,18 @@ def load_sensitivity_csv(path: Path) -> dict[str, float]:
 def plot_sensitivity_bars(sens_dir: Path, out: Path) -> None:
     """Bar chart of η² from classic Analysis.py outputs."""
     configs = [
-        ("P1 disp", sens_dir / "p1_dispersion_ratio_sensitivity.csv", "dispersion_ratio"),
+        ("P1 disp", sens_dir / "p1_size_ratio_sensitivity.csv", "size_ratio"),
         ("P1 unb", sens_dir / "p1_unbound_fraction_sensitivity.csv", "unbound_fraction"),
-        ("P2 disp", sens_dir / "p2_dispersion_ratio_sensitivity.csv", "dispersion_ratio"),
-        ("P3 disp", sens_dir / "p3_dispersion_ratio_sensitivity.csv", "dispersion_ratio"),
+        ("P2 disp", sens_dir / "p2_size_ratio_sensitivity.csv", "size_ratio"),
+        ("P3 disp", sens_dir / "p3_size_ratio_sensitivity.csv", "size_ratio"),
         ("P3 unb", sens_dir / "p3_unbound_fraction_sensitivity.csv", "unbound_fraction"),
     ]
+    # Sensitivity CSVs from before the size_ratio rename are named p*_dispersion_ratio_*.
+    def _existing(path: Path) -> Path:
+        legacy = path.with_name(path.name.replace("size_ratio", "dispersion_ratio"))
+        return legacy if not path.is_file() and legacy.is_file() else path
+
+    configs = [(title, _existing(path), col) for title, path, col in configs]
     fig, axes = plt.subplots(1, len(configs), figsize=(3.2 * len(configs), 4.2), sharey=True)
     params = ["apophis_spin_period", "np_apophis"]
     param_labels = ["Spin period", r"$n_p$"]

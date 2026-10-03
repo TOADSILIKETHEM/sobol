@@ -13,7 +13,7 @@ from typing import Optional
 _ANALYSIS_DIR = Path(__file__).resolve().parent
 if str(_ANALYSIS_DIR) not in sys.path:
     sys.path.insert(0, str(_ANALYSIS_DIR))
-from csv_columns import kt_cgs_from_row
+from csv_columns import kt_cgs_from_row, size_ratio_raw
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -63,7 +63,7 @@ def load_batch(csv_path: Path, label: str = "") -> BatchData:
             if row.get("status") != "ok":
                 continue
             np_vals.append(float(row["np_apophis"]))
-            disp.append(float(row["dispersion_ratio"]))
+            disp.append(float(size_ratio_raw(row)))
             unbound.append(float(row["unbound_fraction"] or 0))
             intr = row.get("intrinsic_spin_period_hr", "").strip()
             intrinsic.append(float(intr) if intr else np.nan)
@@ -106,7 +106,7 @@ def plot_dual_metric_ax(
     show_legend: bool = True,
 ) -> None:
     unb_pct = data.unbound * 100
-    ax.plot(data.np, data.disp, "o-", color="#2ca02c", linewidth=2, markersize=7, label="Dispersion ratio", zorder=2)
+    ax.plot(data.np, data.disp, "o-", color="#2ca02c", linewidth=2, markersize=7, label="Size ratio", zorder=2)
     ax.axhline(1.0, color="gray", linestyle=":", linewidth=1, alpha=0.8)
     _mark_np500(ax, data.np, data.disp)
     if log_disp:
@@ -115,7 +115,7 @@ def plot_dual_metric_ax(
         ax.set_ylim(lo, float(np.max(data.disp)) * 1.6)
     else:
         ax.set_ylim(0.998, max(1.01, float(np.max(data.disp)) * 1.05))
-    ax.set_ylabel("Peak dispersion ratio")
+    ax.set_ylabel("Peak size ratio")
     _style_np_axis(ax)
 
     ax2 = ax.twinx()
@@ -182,7 +182,7 @@ def plot_combined_overview_v2(repo: Path, out: Path) -> None:
     ax_d.axhline(1.0, color="gray", linestyle=":", linewidth=1, alpha=0.8)
     ax_d.axvline(500, color="#888888", linestyle="--", linewidth=1, alpha=0.7)
     ax_d.set_yscale("log")
-    ax_d.set_ylabel("Peak dispersion ratio")
+    ax_d.set_ylabel("Peak size ratio")
     ax_d.set_ylim(0.9, 400)
     ax_d.legend(loc="upper right", fontsize=7, framealpha=0.95, ncol=2)
     ax_d.grid(True, which="both", alpha=0.3)
@@ -243,7 +243,7 @@ def plot_earth_opposite_dense_detail(repo: Path, out: Path) -> None:
     _mark_np500(ax_d, data.np, data.disp)
     ax_d.axhline(1.0, color="gray", linestyle=":", linewidth=1, alpha=0.8)
     ax_d.set_yscale("log")
-    ax_d.set_ylabel("Peak dispersion ratio")
+    ax_d.set_ylabel("Peak size ratio")
     ax_d.set_title(r"Earth opposite flyby — dense $n_p$ grid (fixed $k_c=10^7$, $P=1.52$ hr)", loc="left")
     ax_d.legend(loc="upper right")
     ax_d.grid(True, which="both", alpha=0.3)
@@ -253,7 +253,7 @@ def plot_earth_opposite_dense_detail(repo: Path, out: Path) -> None:
     _mark_np500(ax_u, data.np, data.unbound * 100)
     ax_u.set_xlabel(r"$n_p$ (Apophis grains)")
     ax_u.set_ylabel("Peak unbound (%)")
-    ax_u.set_title("High unbound at ~425–650 despite low dispersion — mass-loss without geometric spreading", loc="left", fontsize=9)
+    ax_u.set_title("High unbound at ~425–650 despite low size ratio — mass-loss without geometric spreading", loc="left", fontsize=9)
     ax_u.grid(True, alpha=0.3)
 
     fig.tight_layout()
@@ -292,7 +292,7 @@ def plot_kc_vs_sigmac(repo: Path, out: Path, *, earth: bool) -> None:
     ax_d.axhline(1.0, color="gray", linestyle=":", linewidth=1, alpha=0.8)
     ax_d.axvline(500, color="#888888", linestyle="--", linewidth=1, alpha=0.7)
     ax_d.set_yscale("log")
-    ax_d.set_ylabel("Peak dispersion ratio")
+    ax_d.set_ylabel("Peak size ratio")
     ax_d.legend(loc="best")
     ax_d.grid(True, which="both", alpha=0.3)
 
@@ -330,7 +330,7 @@ def plot_spin_axis_comparison(repo: Path, out: Path) -> None:
     ax_d.bar(x - w / 2, od, width=w, color="#ff7f0e", label="Opposite (~177.5°)")
     ax_d.bar(x + w / 2, ad, width=w, color="#9467bd", label="Near-aligned (~11°)")
     ax_d.set_yscale("log")
-    ax_d.set_ylabel("Peak dispersion ratio")
+    ax_d.set_ylabel("Peak size ratio")
     ax_d.set_xticks(x, [str(n) for n in shared])
     ax_d.set_xlabel(r"$n_p$")
     ax_d.legend()
@@ -367,7 +367,7 @@ def plot_sphere_marginal_null(repo: Path, out: Path) -> None:
     ax.axhline(1.0, color="gray", linestyle=":", linewidth=1, alpha=0.8)
     ax.axvline(500, color="#888888", linestyle="--", linewidth=1, alpha=0.7)
     ax.set_xlabel(r"$n_p$ (Apophis grains)")
-    ax.set_ylabel("Peak dispersion ratio")
+    ax.set_ylabel("Peak size ratio")
     ax.set_title(r"Sphere no-Earth: $P=1.55$ hr is not resolution-independent ($n_p=300$ disrupts)", loc="left")
     ax.legend()
     ax.grid(True, alpha=0.3)

@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
-"""Plot dispersion_ratio vs spin period: Earth flyby vs apophis_only control."""
+"""Plot size_ratio vs spin period: Earth flyby vs apophis_only control."""
 
 from __future__ import annotations
 
 import argparse
 import csv
+import sys
 from pathlib import Path
+
+_ANALYSIS_DIR = Path(__file__).resolve().parent
+if str(_ANALYSIS_DIR) not in sys.path:
+    sys.path.insert(0, str(_ANALYSIS_DIR))
+from csv_columns import size_ratio_raw
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -19,7 +25,7 @@ def load_batch(csv_path: Path) -> tuple[np.ndarray, np.ndarray]:
             if row.get("status") != "ok":
                 continue
             spins.append(float(row["apophis_spin_period"]))
-            disp.append(float(row["dispersion_ratio"]))
+            disp.append(float(size_ratio_raw(row)))
     order = np.argsort(spins)
     return np.asarray(spins)[order], np.asarray(disp)[order]
 

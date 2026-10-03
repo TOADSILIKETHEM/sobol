@@ -21,6 +21,7 @@ if str(_REPO) not in sys.path:
 
 from sobol.Analysis.Analysis import (  # noqa: E402
     RESPONSE_CANDIDATES,
+    resolve_response_column,
     _parse_numeric_cell,
     compute_classic_sensitivity_rows,
     load_table,
@@ -47,7 +48,7 @@ PARAM_LABELS: Dict[str, str] = {
 }
 
 RESPONSE_LABELS: Dict[str, str] = {
-    "dispersion_ratio": "Dispersion ratio",
+    "size_ratio": "Size ratio",
     "unbound_fraction": "Unbound fraction",
     "closest_approach_km": "Closest approach (km)",
     "closest_approach_au": "Closest approach (AU)",
@@ -89,13 +90,14 @@ def varying_responses(
     candidates = list(RESPONSE_CANDIDATES) + ["settled_spin_period_hr"]
     out: List[str] = []
     for col in candidates:
-        if col not in fieldnames:
+        src = resolve_response_column(col, fieldnames)
+        if src not in fieldnames:
             continue
         vals: List[float] = []
         for r in rows:
             if use_ok and r.get("status", "").strip().lower() != "ok":
                 continue
-            v = _parse_numeric_cell(r.get(col, ""))
+            v = _parse_numeric_cell(r.get(src, ""))
             if v is None or not math.isfinite(v):
                 continue
             vals.append(v)
@@ -118,7 +120,7 @@ def run_all(
     bootstrap: int,
     bins: int,
     seed: int,
-    log_dispersion: bool,
+    log_size_ratio: bool,
     latest_only: bool,
 ) -> Tuple[Path, List[Path]]:
     plots_dir.mkdir(parents=True, exist_ok=True)
@@ -155,7 +157,7 @@ def run_all(
             continue
 
         for response in responses:
-            use_log = log_dispersion and response == "dispersion_ratio"
+            use_log = log_size_ratio and response == "size_ratio"
             try:
                 result_rows, n_used, input_names = compute_classic_sensitivity_rows(
                     csv_path,
@@ -356,9 +358,11 @@ def main() -> int:
     parser.add_argument("--bins", type=int, default=10)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
-        "--log-dispersion",
+        "--log-size-ratio",
+        "--log-dispersion",  # deprecated alias
+        dest="log_size_ratio",
         action="store_true",
-        help="Analyse log10(dispersion_ratio) when that response is used",
+        help="Analyse log10(size_ratio) when that response is used",
     )
     parser.add_argument(
         "--all-batches",
@@ -377,7 +381,7 @@ def main() -> int:
         bootstrap=args.bootstrap,
         bins=args.bins,
         seed=args.seed,
-        log_dispersion=args.log_dispersion,
+        log_size_ratio=args.log_size_ratio,
         latest_only=not args.all_batches,
     )
     summary = plot_summary_heatmap(master_path, plots_dir / "_summary_eta2_heatmap.png")

@@ -5,7 +5,13 @@ from __future__ import annotations
 
 import argparse
 import csv
+import sys
 from pathlib import Path
+
+_ANALYSIS_DIR = Path(__file__).resolve().parent
+if str(_ANALYSIS_DIR) not in sys.path:
+    sys.path.insert(0, str(_ANALYSIS_DIR))
+from csv_columns import size_ratio_raw
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -22,7 +28,7 @@ def load_batch(csv_path: Path) -> dict[str, np.ndarray]:
                 continue
             run_id.append(int(row["run_id"]))
             align.append(float(row["apophis_spin_torque_align_deg"]))
-            disp.append(float(row["dispersion_ratio"]))
+            disp.append(float(size_ratio_raw(row)))
             unbound.append(float(row["unbound_fraction"]))
     order = np.argsort(align)
     return {

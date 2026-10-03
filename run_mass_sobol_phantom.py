@@ -29,13 +29,13 @@ from scipy.spatial import cKDTree
 
 AU_IN_KM = 149_597_870.7
 SPIN_MEAN_MAX_DUMPS = 50
-MAIN_BODY_INTACT_DISP_RATIO = 1.15
+MAIN_BODY_INTACT_SIZE_RATIO = 1.15
 MAIN_BODY_MIN_CLUSTER_FRAC = 0.50
 MAIN_BODY_LINK_FACTOR_INIT = 2.5
 MAIN_BODY_LINK_FACTOR_MAX = 40.0
 SPIN_INTRINSIC_MAX_HOURS = 6.0
 SPIN_INTRINSIC_MAX_DUMPS = 12
-SPIN_INTRINSIC_INTACT_DISP_RATIO = MAIN_BODY_INTACT_DISP_RATIO
+SPIN_INTRINSIC_INTACT_SIZE_RATIO = MAIN_BODY_INTACT_SIZE_RATIO
 SPIN_INTRINSIC_MAX_UNBOUND_FRAC = 0.01
 SPIN_INTRINSIC_MAX_CA_FRACTION = 0.3
 SPIN_APPROACH_HOURS_BEFORE_CA = 24.0
@@ -292,7 +292,7 @@ class RunRecord:
     closest_approach_km: float
     closest_approach_au: float
     error: str
-    dispersion_ratio: float = float("nan")
+    size_ratio: float = float("nan")
     unbound_fraction: float = float("nan")
     intrinsic_spin_period_hr: float = float("nan")
     approach_spin_period_hr: float = float("nan")
@@ -2216,9 +2216,9 @@ def extract_breakup_metrics(
     _groups: Optional[Dict[str, np.ndarray]] = None,
     _time_of_key: Optional[Dict[str, float]] = None,
 ) -> Tuple[float, float]:
-    """Peak dispersion ratio and unbound mass fraction of the Apophis rubble pile.
+    """Peak size ratio and unbound mass fraction of the Apophis rubble pile.
 
-    Apophis particles are the equal-mass sinks with ID >= ``apophis_sink_id``. Dispersion uses
+    Apophis particles are the equal-mass sinks with ID >= ``apophis_sink_id``. Size ratio uses
     the global mass-weighted centre of mass (unchanged). Unbound fraction is peak mass not
     belonging to the main rubble fragment — see ``_unbound_mass_main_body``. Returns ``(nan, nan)``
     when fewer than two Apophis particles are present (non-DEM / single-sink runs).
@@ -2393,14 +2393,14 @@ def _main_body_mask(
 ) -> np.ndarray:
     """Boolean mask of the main Apophis rubble fragment at one dump.
 
-    When ``rg_ratio`` (current rg / initial rg) is below ``MAIN_BODY_INTACT_DISP_RATIO``,
+    When ``rg_ratio`` (current rg / initial rg) is below ``MAIN_BODY_INTACT_SIZE_RATIO``,
     all grains are treated as the main body (cohesive pile with settling gaps only).
     Otherwise adaptive friends-of-friends isolates the largest spatial cluster after breakup.
     """
     N = len(b_pos)
     if N < 2:
         return np.ones(N, dtype=bool)
-    if rg_ratio is not None and rg_ratio < MAIN_BODY_INTACT_DISP_RATIO:
+    if rg_ratio is not None and rg_ratio < MAIN_BODY_INTACT_SIZE_RATIO:
         return np.ones(N, dtype=bool)
     return _main_body_mask_fof_adaptive(b_pos, b_mass)
 
@@ -2661,7 +2661,7 @@ def _intrinsic_spin_dump_intact(rg_ratio: float, unbound_frac: float) -> bool:
     if not math.isfinite(rg_ratio) or not math.isfinite(unbound_frac):
         return False
     return (
-        rg_ratio < SPIN_INTRINSIC_INTACT_DISP_RATIO
+        rg_ratio < SPIN_INTRINSIC_INTACT_SIZE_RATIO
         and unbound_frac < SPIN_INTRINSIC_MAX_UNBOUND_FRAC
     )
 
@@ -3039,7 +3039,7 @@ def write_summary_csv(path: Path, records: List[RunRecord], param_column_order: 
         "status",
         "closest_approach_km",
         "closest_approach_au",
-        "dispersion_ratio",
+        "size_ratio",
         "unbound_fraction",
         "intrinsic_spin_period_hr",
         "approach_spin_period_hr",
@@ -3065,7 +3065,7 @@ def write_summary_csv(path: Path, records: List[RunRecord], param_column_order: 
                     row.status,
                     f"{row.closest_approach_km:.12g}" if not math.isnan(row.closest_approach_km) else "",
                     f"{row.closest_approach_au:.12g}" if not math.isnan(row.closest_approach_au) else "",
-                    f"{row.dispersion_ratio:.12g}" if not math.isnan(row.dispersion_ratio) else "",
+                    f"{row.size_ratio:.12g}" if not math.isnan(row.size_ratio) else "",
                     f"{row.unbound_fraction:.12g}" if not math.isnan(row.unbound_fraction) else "",
                     f"{row.intrinsic_spin_period_hr:.12g}"
                     if not math.isnan(row.intrinsic_spin_period_hr)
@@ -3120,7 +3120,7 @@ def _encounter_module():
 class RunMetrics(NamedTuple):
     closest_km: float
     closest_au: float
-    dispersion_ratio: float
+    size_ratio: float
     unbound_fraction: float
     intrinsic_spin_period_hr: float
     approach_spin_period_hr: float
@@ -3195,14 +3195,14 @@ def compute_run_metrics(
         )
 
     nan = float("nan")
-    dispersion_ratio = unbound_fraction = nan
+    size_ratio = unbound_fraction = nan
     intrinsic_spin_period_hr = approach_spin_period_hr = post_flyby_spin_period_hr = nan
     closest_km = closest_au = nan
 
     if sample.use_dem is True and _n_sinks >= 2:
         if _apophis_only:
             (
-                dispersion_ratio,
+                size_ratio,
                 unbound_fraction,
                 intrinsic_spin_period_hr,
                 _,
@@ -3221,7 +3221,7 @@ def compute_run_metrics(
                 run_dir, prefix, earth_sink_id, apophis_sink_id, _groups, _time_of_key, _model
             )
             (
-                dispersion_ratio,
+                size_ratio,
                 unbound_fraction,
                 intrinsic_spin_period_hr,
                 approach_spin_period_hr,
@@ -3242,7 +3242,7 @@ def compute_run_metrics(
             run_dir, prefix, earth_sink_id, apophis_sink_id
         )
     return RunMetrics(
-        closest_km, closest_au, dispersion_ratio, unbound_fraction,
+        closest_km, closest_au, size_ratio, unbound_fraction,
         intrinsic_spin_period_hr, approach_spin_period_hr, post_flyby_spin_period_hr,
     )
 
@@ -3285,7 +3285,7 @@ def _run_hyperbola_case(
         return RunRecord(
             run_id=run_id, mass_input_kg=nan, run_dir=str(run_dir), status="ok",
             closest_approach_km=m.closest_km, closest_approach_au=m.closest_au, error="",
-            dispersion_ratio=m.dispersion_ratio, unbound_fraction=m.unbound_fraction,
+            size_ratio=m.size_ratio, unbound_fraction=m.unbound_fraction,
             intrinsic_spin_period_hr=m.intrinsic_spin_period_hr,
             approach_spin_period_hr=m.approach_spin_period_hr,
             post_flyby_spin_period_hr=m.post_flyby_spin_period_hr,
@@ -3416,7 +3416,7 @@ def run_one_case(
             closest_approach_km=m.closest_km,
             closest_approach_au=m.closest_au,
             error="",
-            dispersion_ratio=m.dispersion_ratio,
+            size_ratio=m.size_ratio,
             unbound_fraction=m.unbound_fraction,
             intrinsic_spin_period_hr=m.intrinsic_spin_period_hr,
             approach_spin_period_hr=m.approach_spin_period_hr,
@@ -3697,7 +3697,7 @@ def main() -> int:
                     "run_id": result.run_id,
                     "closest_approach_km": result.closest_approach_km,
                     "closest_approach_au": result.closest_approach_au,
-                    "dispersion_ratio": result.dispersion_ratio,
+                    "size_ratio": result.size_ratio,
                     "unbound_fraction": result.unbound_fraction,
                     "intrinsic_spin_period_hr": result.intrinsic_spin_period_hr,
                     "approach_spin_period_hr": result.approach_spin_period_hr,
@@ -3731,7 +3731,7 @@ def main() -> int:
             "run_id",
             "closest_approach_km",
             "closest_approach_au",
-            "dispersion_ratio",
+            "size_ratio",
             "unbound_fraction",
             "intrinsic_spin_period_hr",
             "approach_spin_period_hr",
@@ -3752,7 +3752,7 @@ def main() -> int:
             f"       --saltelli-meta-json {meta_p} \\\n"
             f"       --saltelli-y-csv {y_path.resolve()} \\\n"
             "       --saltelli-y-column closest_approach_au  "
-            "# also: dispersion_ratio, unbound_fraction, intrinsic_spin_period_hr, "
+            "# also: size_ratio, unbound_fraction, intrinsic_spin_period_hr, "
             "approach_spin_period_hr, post_flyby_spin_period_hr (DEM sweeps) "
             + (
                 " \\\n       --saltelli-calc-second-order"

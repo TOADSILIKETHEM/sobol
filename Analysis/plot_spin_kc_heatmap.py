@@ -11,7 +11,7 @@ from pathlib import Path
 _ANALYSIS_DIR = Path(__file__).resolve().parent
 if str(_ANALYSIS_DIR) not in sys.path:
     sys.path.insert(0, str(_ANALYSIS_DIR))
-from csv_columns import kt_cgs_from_row
+from csv_columns import kt_cgs_from_row, size_ratio_raw
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -36,7 +36,7 @@ def load_outputs(csv_path: Path) -> dict[str, np.ndarray]:
             if kc_val is None:
                 continue
             kc.append(kc_val)
-            disp.append(float(row["dispersion_ratio"]))
+            disp.append(float(size_ratio_raw(row)))
             unbound.append(float(row["unbound_fraction"]))
     return {
         "run_id": np.asarray(run_id),
@@ -111,7 +111,7 @@ def main() -> None:
     spin_lim = (args.spin_min, args.spin_max)
     log_kc_lim = (0.0, 8.0)
 
-    # Capped dispersion for bound-deformation structure (run 4 is orders of magnitude larger).
+    # Capped size ratio for bound-deformation structure (run 4 is orders of magnitude larger).
     disp_cap = 1.15
     disp_show = np.minimum(d["disp"], disp_cap)
 
@@ -169,7 +169,7 @@ def main() -> None:
     cbar0 = fig.colorbar(im0, ax=ax, pad=0.02)
     cbar0.set_label("unbound_fraction")
 
-    # --- dispersion (capped) ---
+    # --- size ratio (capped) ---
     ax = axes[1]
     im1 = ax.pcolormesh(
         xi,
@@ -224,12 +224,12 @@ def main() -> None:
         ax.legend(loc="upper right", fontsize=8, framealpha=0.9)
     ax.set_xlabel("Spin period (hours)")
     ax.set_ylabel(r"$\log_{10}(k_c\,/\,\mathrm{dyne\,cm}^{-1})$")
-    ax.set_title(r"Peak dispersion ratio (capped at %.2f)" % disp_cap)
+    ax.set_title(r"Peak size ratio (capped at %.2f)" % disp_cap)
     ax.set_xlim(spin_lim)
     ax.set_ylim(log_kc_lim)
     ax.yaxis.set_major_formatter(FuncFormatter(_kc_tick_formatter))
     cbar1 = fig.colorbar(im1, ax=ax, pad=0.02)
-    cbar1.set_label("dispersion_ratio")
+    cbar1.set_label("size_ratio")
 
     fig.suptitle(
         "Cohesion and spin near the Earth flyby boundary (sphere DEM)\n"
@@ -241,7 +241,7 @@ def main() -> None:
     fig.savefig(out, dpi=150, bbox_inches="tight")
     print(f"Wrote {out}")
 
-    # Optional second figure: log dispersion including catastrophic run
+    # Optional second figure: log size ratio including catastrophic run
     out_log = out.with_name(out.stem + "_log_disp.png")
     fig2, ax2 = plt.subplots(figsize=(5.5, 4.8), constrained_layout=True)
     log_disp = np.log10(np.maximum(d["disp"], 1.0))
@@ -267,7 +267,7 @@ def main() -> None:
     )
     ax2.set_xlabel("Spin period (hours)")
     ax2.set_ylabel(r"$\log_{10}(k_c\,/\,\mathrm{dyne\,cm}^{-1})$")
-    ax2.set_title(r"$\log_{10}$(peak dispersion ratio)")
+    ax2.set_title(r"$\log_{10}$(peak size ratio)")
     ax2.set_xlim(spin_lim)
     ax2.set_ylim(log_kc_lim)
     ax2.yaxis.set_major_formatter(FuncFormatter(_kc_tick_formatter))
@@ -276,7 +276,7 @@ def main() -> None:
         r"$t_\mathrm{max}=4.5$ d, $n_p=500$ — log scale shows catastrophic run 4",
         fontsize=10,
     )
-    fig2.colorbar(im2, ax=ax2, label=r"$\log_{10}$(dispersion_ratio)")
+    fig2.colorbar(im2, ax=ax2, label=r"$\log_{10}$(size_ratio)")
     fig2.savefig(out_log, dpi=150, bbox_inches="tight")
     print(f"Wrote {out_log}")
 

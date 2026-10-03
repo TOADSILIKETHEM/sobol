@@ -34,7 +34,7 @@ Primary plot metric: **post − approach** (%). Secondary: post − intrinsic.
 
 `python3 sobol/Analysis/verify_obj_torque_spin_trend.py <batch_dir>`:
 
-- ≥ **20/24** runs: `dispersion_ratio < 1.15` and `unbound_fraction < 0.01`
+- ≥ **20/24** runs: `size_ratio < 1.15` and `unbound_fraction < 0.01`
 - Intrinsic spread across angles **< 8%** (OBJ settling; not sphere 3% lattice target)
 - `post − approach` at lowest angle vs highest angle differ by **≥ 0.3%** with **opposite signs**
 

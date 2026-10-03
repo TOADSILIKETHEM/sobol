@@ -7,7 +7,7 @@
 # Tier 2 — supporting intrinsic / threshold (~49 runs, ~3–4 h):
 #   noearth_obj_ctrl (16), spin_kc0+kc1e7 (32), fine_dt p2hr (1)
 #
-# Skipped (dispersion-only or already re-extracted from .ev):
+# Skipped (size-ratio-only or already re-extracted from .ev):
 #   flyby_spin_torque_period_kmin_obj, fine_dt p155/p1p6hr/breakup/nospin, sphere noearth_ctrl
 set -euo pipefail
 

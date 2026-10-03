@@ -5,7 +5,13 @@ from __future__ import annotations
 
 import argparse
 import csv
+import sys
 from pathlib import Path
+
+_ANALYSIS_DIR = Path(__file__).resolve().parent
+if str(_ANALYSIS_DIR) not in sys.path:
+    sys.path.insert(0, str(_ANALYSIS_DIR))
+from csv_columns import size_ratio_raw
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -36,7 +42,7 @@ def load_batch(csv_path: Path) -> dict[str, np.ndarray]:
             i = _to_float(row["intrinsic_spin_period_hr"])
             ap = _to_float(row["approach_spin_period_hr"])
             po = _to_float(row["post_flyby_spin_period_hr"])
-            d = _to_float(row["dispersion_ratio"])
+            d = _to_float(size_ratio_raw(row))
             u = _to_float(row["unbound_fraction"])
             if any(v is None for v in (a, i, ap, po, d, u)):
                 continue
@@ -132,7 +138,7 @@ def main() -> None:
     ax_spin.legend(loc="best", framealpha=0.95)
 
     ax_sanity.plot(
-        d["align"], d["disp"], "o-", color="#2ca02c", linewidth=2, markersize=7, label="Dispersion ratio"
+        d["align"], d["disp"], "o-", color="#2ca02c", linewidth=2, markersize=7, label="Size ratio"
     )
     ax_sanity2 = ax_sanity.twinx()
     ax_sanity2.plot(
@@ -144,7 +150,7 @@ def main() -> None:
         markersize=6,
         label="Unbound %",
     )
-    ax_sanity.set_ylabel("Peak dispersion ratio")
+    ax_sanity.set_ylabel("Peak size ratio")
     ax_sanity2.set_ylabel("Peak unbound (%)")
     ax_sanity.set_xlabel("Torque-align angle (degrees)")
     ax_sanity.set_ylim(1.0, max(1.05, float(np.max(d["disp"])) * 1.05))

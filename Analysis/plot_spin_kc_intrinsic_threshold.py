@@ -10,9 +10,11 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 
+LEGACY_COLUMNS = {"size_ratio": "dispersion_ratio"}  # pre-rename batch CSV headers
+
 METRICS = {
-    "dispersion_ratio": {
-        "ylabel": "Peak dispersion ratio",
+    "size_ratio": {
+        "ylabel": "Peak size ratio",
         "yscale": "log",
         "ref_lines": [(1.0, "gray", ":")],
         "ylim_floor": 0.95,
@@ -36,7 +38,8 @@ def load_batch(csv_path: Path, column: str) -> tuple[np.ndarray, np.ndarray]:
             if row.get("status") != "ok":
                 continue
             spin.append(float(row["apophis_spin_period"]))
-            values.append(float(row[column]))
+            col = column if column in row else LEGACY_COLUMNS.get(column, column)
+            values.append(float(row[col]))
     order = np.argsort(spin)
     return np.asarray(spin)[order], np.asarray(values)[order]
 
@@ -126,8 +129,8 @@ def main() -> None:
     parser.add_argument(
         "--metric",
         choices=sorted(METRICS),
-        default="dispersion_ratio",
-        help="Output metric column (default: dispersion_ratio)",
+        default="size_ratio",
+        help="Output metric column (default: size_ratio)",
     )
     parser.add_argument(
         "-o",
@@ -143,7 +146,7 @@ def main() -> None:
     kc0_csv = resolve_batch(runs_root, "spin_kc0_12hr", args.kc0_csv)
     kc1e7_csv = resolve_batch(runs_root, "spin_kc1e7_12hr", args.kc1e7_csv)
     if args.output is None:
-        if args.metric == "dispersion_ratio":
+        if args.metric == "size_ratio":
             out = repo / "sobol_mass_runs/plots/spin_kc_intrinsic_threshold_12hr.png"
         else:
             out = repo / "sobol_mass_runs/plots/spin_kc_intrinsic_threshold_12hr_unbound.png"

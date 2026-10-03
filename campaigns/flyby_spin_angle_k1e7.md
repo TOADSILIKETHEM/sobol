@@ -54,4 +54,4 @@ Dry-run only: `DRY_RUN=1 bash sobol/campaigns/run_flyby_spin_angle_k1e7.sh`
 
 `sobol_mass_runs/sobol_<timestamp>_flyby_spin_angle_k1e7/`
 
-Columns: `apophis_spin_period`, `apophis_spin_obliquity`, `apophis_spin_azimuth`, `kc_cgs`, `dispersion_ratio`, `unbound_fraction`, `closest_approach_km`.
+Columns: `apophis_spin_period`, `apophis_spin_obliquity`, `apophis_spin_azimuth`, `kc_cgs`, `size_ratio`, `unbound_fraction`, `closest_approach_km`.

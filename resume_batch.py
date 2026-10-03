@@ -83,7 +83,7 @@ def _load_records(summary_csv: Path, col_order: List[str]) -> List[RunRecord]:
                     closest_approach_km=_ffloat(row.get("closest_approach_km", "")),
                     closest_approach_au=_ffloat(row.get("closest_approach_au", "")),
                     error=row.get("error", ""),
-                    dispersion_ratio=_ffloat(row.get("dispersion_ratio", "")),
+                    size_ratio=_ffloat(row.get("size_ratio", row.get("dispersion_ratio", ""))),
                     unbound_fraction=_ffloat(row.get("unbound_fraction", "")),
                     intrinsic_spin_period_hr=_ffloat(row.get("intrinsic_spin_period_hr", "")),
                     approach_spin_period_hr=_ffloat(row.get("approach_spin_period_hr", "")),
