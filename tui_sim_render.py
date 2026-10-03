@@ -205,7 +205,7 @@ class RenderFormValues:
     camera_mode: str = "auto"
     encode_video: bool = False
     video_fps: Optional[int] = None
-    paths: Tuple[str, ...] = ("per_sphere",)
+    paths: Tuple[str, ...] = ("instance_grains",)
     envelope_method: str = "hull"
     placeholder_obj: str = DEFAULT_PLACEHOLDER_OBJ
     n_points: int = 1_000_000
@@ -404,6 +404,13 @@ class PathContext:
     run_name: str  # e.g. "run_0001"
     render_form: RenderFormValues
     n_expected_frames: int
+    # dump route: {path name: manifest Path | PreprocessError} from the one
+    # shared viz_preprocess_dump.py call; those paths skip their own preprocess
+    preprocessed: Optional[Dict[str, object]] = None
+
+
+def _viz_dir(ctx: PathContext, spec: "RenderPath") -> Path:
+    return ctx.batch_dir / f"{ctx.run_name}{spec.viz_dir_suffix}"
 
 
 def _max_frames_args(ctx: PathContext) -> List[str]:
@@ -471,6 +478,51 @@ def run_preprocess_stage(cmd: List[str], output_dir: Path) -> Path:
     return manifest
 
 
+def build_dump_preprocess_command(ctx: PathContext, run_dir: Path, targets: Dict[str, Path]) -> List[str]:
+    # resolve(): to_windows_path only converts absolute paths, and the Windows
+    # python cannot see a relative WSL path
+    cmd = [
+        str(WIN_VENV_PYTHON), to_windows_path(CODE_DIR / "viz" / "viz_preprocess_dump.py"),
+        "--run-dir", to_windows_path(Path(run_dir).resolve()),
+        "--bodies-dir", to_windows_path(ctx.bodies_dir),
+    ]
+    for name, viz_dir in targets.items():
+        cmd += [DUMP_PREPROCESS_FLAGS[name], to_windows_path(viz_dir)]
+    if "composite" in targets:
+        cmd += ["--envelope-method", ctx.render_form.envelope_method]
+    return cmd + _max_frames_args(ctx)
+
+
+def run_dump_preprocess_stage(cmd: List[str], targets: Dict[str, Path]) -> Dict[str, object]:
+    """Run viz_preprocess_dump.py once; {path name: manifest Path | PreprocessError}."""
+    for viz_dir in targets.values():
+        # success is judged by the manifest existing afterwards
+        (viz_dir / "manifest.json").unlink(missing_ok=True)
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, errors="replace", cwd=str(CODE_DIR),
+        )
+    except OSError as exc:
+        err = PreprocessError(f"could not start {cmd[0]}: {exc}")
+        return {name: err for name in targets}
+    failed = {}
+    for line in (result.stdout or "").splitlines():
+        if line.startswith("FAILED "):
+            name, _, why = line[len("FAILED "):].partition(": ")
+            failed[name] = why
+    out: Dict[str, object] = {}
+    for name, viz_dir in targets.items():
+        manifest = viz_dir / "manifest.json"
+        if name in failed:
+            # checked first: finish() can die mid-write and leave a truncated manifest
+            out[name] = PreprocessError(failed[name])
+        elif manifest.is_file():
+            out[name] = manifest
+        else:
+            out[name] = PreprocessError(f"exited {result.returncode}:\n{_output_tail(result)}")
+    return out
+
+
 @dataclass(frozen=True)
 class RenderPath:
     name: str
@@ -492,6 +544,23 @@ RENDER_PATHS: Dict[str, RenderPath] = {
 }
 RENDER_PATH_NAMES: Tuple[str, ...] = tuple(RENDER_PATHS)
 
+# Paths that read the grains npz: per_sphere inside Blender (no sarracen
+# there), instance_static via viz_preprocess_lite.py under blender.exe. With
+# none of these ticked, convert is skipped and one viz_preprocess_dump.py call
+# reads each PHANTOM dump once for composite and instance_grains together
+# (Objective 2 scale).
+NPZ_PATHS = frozenset({"per_sphere", "instance_static"})
+
+# viz_preprocess_dump.py output-dir flag per dump-route path
+DUMP_PREPROCESS_FLAGS: Dict[str, str] = {
+    "composite": "--composite-dir",
+    "instance_grains": "--instance-dir",
+}
+
+
+def needs_npz(paths) -> bool:
+    return any(p in NPZ_PATHS for p in paths)
+
 PATH_CHECKBOX_IDS: Dict[str, str] = {
     "per_sphere": "path-per-sphere",
     "composite": "path-composite",
@@ -509,8 +578,13 @@ def run_render_path(spec: RenderPath, ctx: PathContext, on_stage=None, index: in
             on_stage(stage, path=spec.name, index=index, total=total, **info)
 
     manifest: Optional[Path] = None
-    if spec.build_preprocess_command is not None:
-        viz_dir = ctx.batch_dir / f"{ctx.run_name}{spec.viz_dir_suffix}"
+    if ctx.preprocessed is not None and spec.name in ctx.preprocessed:
+        got = ctx.preprocessed[spec.name]
+        if isinstance(got, PreprocessError):
+            return PathResult(spec.name, False, "preprocess", str(got), 0, time.monotonic() - t0)
+        manifest = got
+    elif spec.build_preprocess_command is not None:
+        viz_dir = _viz_dir(ctx, spec)
         notify("preprocess", output_dir=viz_dir)
         try:
             manifest = run_preprocess_stage(spec.build_preprocess_command(ctx, viz_dir), viz_dir)
@@ -622,6 +696,9 @@ def format_live_progress(
         body = f"Converting... {elapsed}, {count}"
     elif stage == "preprocess":
         body = f"Preprocessing{label}... {elapsed}"
+    elif stage == "preprocess_dumps":
+        count = f", {n_png}/{n_expected} dump(s)" if n_expected is not None else ""
+        body = f"Preprocessing dumps... {elapsed}{count}"
     elif stage == "render":
         count = (
             f"{n_png}/{n_expected} frame(s)"
@@ -647,9 +724,11 @@ def run_pipeline(
     base_output_dir: Path,
     on_stage=None,
 ) -> PipelineResult:
-    """Sim -> convert -> each ticked render path ([preprocess] -> render) -> [compare].
+    """Sim -> [convert] -> each ticked render path ([preprocess] -> render) -> [compare].
 
-    Sim or convert failure stops everything. A render-path failure is recorded
+    Convert runs only when a ticked path needs the grains npz (needs_npz);
+    otherwise one viz_preprocess_dump.py call reads each dump once for every
+    ticked path. Sim or convert failure stops everything. A render-path failure is recorded
     on that path and the remaining paths still run (they are independent).
 
     on_stage(stage: str, **info) is optional. The TUI uses it to flip the
@@ -676,40 +755,53 @@ def run_pipeline(
             record=record,
         )
 
-    n_dumps = count_matching(Path(record.run_dir), f"{sim_params.prefix}_[0-9]*")
-    notify("convert", n_expected=n_dumps if n_dumps else None)
-
-    try:
-        run_convert_stage(record, base_output_dir)
-    except ConvertError as exc:
-        return PipelineResult(stage="convert", ok=False, message=str(exc), record=record)
-
     run_dir = Path(record.run_dir)
     grains_dir, bodies_dir = _grains_and_bodies_dirs(run_dir, base_output_dir, sim_params.output_root)
+    n_dumps = count_matching(run_dir, f"{sim_params.prefix}_[0-9]*")
+    dump_route = not needs_npz(render_form.paths)
 
-    # DEMDumpConvert.py never raises on a bad dump or an empty run -- it
-    # prints and carries on -- so run_convert_stage() "succeeding" is not
-    # proof any frame was actually converted. Catch that here rather than
-    # let Blender fail minutes/hours later on "no grain npz files found".
-    n_npz = count_matching(grains_dir, "*.npz")
-    if n_npz == 0:
-        return PipelineResult(
-            stage="convert", ok=False,
-            message=(
-                f"no grain npz files found in {grains_dir} -- DEMDumpConvert.py "
-                "ran without raising but converted nothing; check that the run "
-                f"produced dumps matching its hardcoded \"sobol\" prefix "
-                "(sobol_[0-9]*) with enough DEM grains"
-            ),
-            record=record,
-        )
-    if not sim_params.keep_dumps:
-        # renders read the converted npz/CSV, never the raw dumps
-        _cleanup_run_dir(run_dir, sim_params.prefix)
+    if dump_route:
+        if n_dumps == 0:
+            return PipelineResult(
+                stage="convert", ok=False,
+                message=f"no {sim_params.prefix}_[0-9]* dumps in {run_dir} to preprocess",
+                record=record,
+            )
+        # nfulldump=1 -> every dump is a full frame; a mini dump would make this an overestimate
+        n_frames = n_dumps
+        source_message = f"read {n_dumps} dump(s) directly (convert skipped)"
+    else:
+        notify("convert", n_expected=n_dumps if n_dumps else None)
+        try:
+            run_convert_stage(record, base_output_dir)
+        except ConvertError as exc:
+            return PipelineResult(stage="convert", ok=False, message=str(exc), record=record)
 
-    n_expected_frames = n_npz
+        # DEMDumpConvert.py never raises on a bad dump or an empty run -- it
+        # prints and carries on -- so run_convert_stage() "succeeding" is not
+        # proof any frame was actually converted. Catch that here rather than
+        # let Blender fail minutes/hours later on "no grain npz files found".
+        n_npz = count_matching(grains_dir, "*.npz")
+        if n_npz == 0:
+            return PipelineResult(
+                stage="convert", ok=False,
+                message=(
+                    f"no grain npz files found in {grains_dir} -- DEMDumpConvert.py "
+                    "ran without raising but converted nothing; check that the run "
+                    f"produced dumps matching its hardcoded \"sobol\" prefix "
+                    "(sobol_[0-9]*) with enough DEM grains"
+                ),
+                record=record,
+            )
+        if not sim_params.keep_dumps:
+            # renders read the converted npz/CSV, never the raw dumps
+            _cleanup_run_dir(run_dir, sim_params.prefix)
+        n_frames = n_npz
+        source_message = f"converted {n_npz} frame(s)"
+
+    n_expected_frames = n_frames
     if render_form.max_frames is not None:
-        n_expected_frames = min(n_npz, render_form.max_frames)
+        n_expected_frames = min(n_frames, render_form.max_frames)
 
     ctx = PathContext(
         grains_dir=grains_dir,
@@ -720,12 +812,33 @@ def run_pipeline(
         n_expected_frames=n_expected_frames,
     )
     specs = [RENDER_PATHS[name] for name in RENDER_PATH_NAMES if name in render_form.paths]
+    if dump_route:
+        # every path here is composite and/or instance_grains (needs_npz is False)
+        targets = {spec.name: _viz_dir(ctx, spec) for spec in specs}
+        # composite writes one camera grains/<frame>.npz per dump read
+        cam_dir = targets["composite"] / "grains" if "composite" in targets else None
+        notify("preprocess_dumps", output_dir=cam_dir,
+               n_expected=n_expected_frames if cam_dir is not None else None)
+        ctx.preprocessed = run_dump_preprocess_stage(
+            build_dump_preprocess_command(ctx, run_dir, targets), targets,
+        )
     results = [
         run_render_path(spec, ctx, on_stage=on_stage, index=i, total=len(specs))
         for i, spec in enumerate(specs, start=1)
     ]
     all_ok = all(r.ok for r in results)
-    message = f"converted {n_npz} frame(s); " + "; ".join(format_path_result(r) for r in results)
+    message = source_message + "; " + "; ".join(format_path_result(r) for r in results)
+    if dump_route and not sim_params.keep_dumps:
+        # the dumps are this route's only grain source: keep them while any
+        # path still needs them for a retry (every path failed, or one failed
+        # before writing its assets); a render-stage failure has its assets
+        pre_failed = [r.name for r in results if not r.ok and r.stage == "preprocess"]
+        if not any(r.ok for r in results):
+            message += f"; dumps kept in {run_dir} (every render path failed)"
+        elif pre_failed:
+            message += f"; dumps kept in {run_dir} ({', '.join(pre_failed)} failed at preprocess)"
+        else:
+            _cleanup_run_dir(run_dir, sim_params.prefix)
     compare = None
     if render_form.compare:
         compare, compare_message = run_compare_for_paths(ctx, results, on_stage=on_stage)
@@ -913,8 +1026,8 @@ class SimRenderTUIApp(App[None]):
             yield Static("Render — paths (any combination; one sim feeds all)", classes="sec")
             yield _Row(
                 "per_sphere",
-                Checkbox("one sphere per grain", value=True, id=PATH_CHECKBOX_IDS["per_sphere"]),
-                "≤~2000 grains",
+                Checkbox("one sphere per grain", value=False, id=PATH_CHECKBOX_IDS["per_sphere"]),
+                "≤~2000 grains, legacy",
             )
             yield _Row(
                 "composite",
@@ -923,7 +1036,7 @@ class SimRenderTUIApp(App[None]):
             )
             yield _Row(
                 "instance_grains",
-                Checkbox("real grains, GN-instanced", value=False, id=PATH_CHECKBOX_IDS["instance_grains"]),
+                Checkbox("real grains, GN-instanced", value=True, id=PATH_CHECKBOX_IDS["instance_grains"]),
                 "any N",
             )
             yield _Row(
@@ -1173,6 +1286,11 @@ class SimRenderTUIApp(App[None]):
             self._pipeline_n_expected = info["n_expected"]
         if "path" in info:
             self._pipeline_path_label = f"{info['path']} {info['index']}/{info['total']}"
+        if stage == "preprocess_dumps":
+            # composite's camera files, one per dump read (None: instance_grains only)
+            self._pipeline_render_dir = info.get("output_dir")
+            self._pipeline_png_glob = "*.npz"
+            self._pipeline_path_label = None
         if stage == "render" and "output_dir" in info:
             self._pipeline_render_dir = info["output_dir"]
             self._pipeline_png_glob = "frame_*.png"

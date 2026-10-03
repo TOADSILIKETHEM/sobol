@@ -1,13 +1,14 @@
 """Tests for tui_sim_render.py (sim+render pipeline TUI)."""
 import argparse
 import asyncio
+import os
 import re
 import subprocess
 import sys
 import threading
 import time
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -291,7 +292,7 @@ def test_run_pipeline_stops_after_failed_sim(monkeypatch):
     monkeypatch.setattr(tsr, "run_convert_stage", convert_mock)
     monkeypatch.setattr(tsr, "run_render_stage", render_mock)
 
-    result = tsr.run_pipeline(tsr.SimParams(), tsr.RenderFormValues(), Path("/mnt/c/.../DEMCSVs"))
+    result = tsr.run_pipeline(tsr.SimParams(), tsr.RenderFormValues(paths=("per_sphere",)), Path("/mnt/c/.../DEMCSVs"))
 
     assert result.stage == "sim"
     assert result.ok is False
@@ -309,7 +310,7 @@ def test_run_pipeline_stops_after_failed_convert(monkeypatch):
     render_mock = MagicMock()
     monkeypatch.setattr(tsr, "run_render_stage", render_mock)
 
-    result = tsr.run_pipeline(tsr.SimParams(), tsr.RenderFormValues(), Path("/mnt/c/.../DEMCSVs"))
+    result = tsr.run_pipeline(tsr.SimParams(), tsr.RenderFormValues(paths=("per_sphere",)), Path("/mnt/c/.../DEMCSVs"))
 
     assert result.stage == "convert"
     assert result.ok is False
@@ -348,7 +349,7 @@ def test_run_pipeline_stops_after_failed_render(monkeypatch, tmp_path):
     monkeypatch.setattr(tsr, "run_render_stage", boom_render)
 
     sim_params = tsr.SimParams(output_root=Path("sobol_mass_runs/batch"))
-    result = tsr.run_pipeline(sim_params, tsr.RenderFormValues(), base_output_dir)
+    result = tsr.run_pipeline(sim_params, tsr.RenderFormValues(paths=("per_sphere",)), base_output_dir)
 
     assert result.stage == "partial"
     assert result.ok is False
@@ -370,7 +371,7 @@ def test_run_pipeline_convert_succeeds_but_no_npz_fails_before_render(monkeypatc
 
     base_output_dir = tmp_path / "DEMCSVs"
     sim_params = tsr.SimParams(output_root=Path("sobol_mass_runs/batch"))
-    result = tsr.run_pipeline(sim_params, tsr.RenderFormValues(), base_output_dir)
+    result = tsr.run_pipeline(sim_params, tsr.RenderFormValues(paths=("per_sphere",)), base_output_dir)
 
     grains_dir = base_output_dir / "batch" / "run_0001_grains_output"
     assert result.stage == "convert"
@@ -399,7 +400,7 @@ def test_run_pipeline_full_success(monkeypatch, tmp_path):
     monkeypatch.setattr(tsr, "run_render_stage", fake_render)
 
     sim_params = tsr.SimParams(output_root=Path("sobol_mass_runs/batch"))
-    render_form = tsr.RenderFormValues(resolution="640x360", samples=8, camera_mode="grain_only")
+    render_form = tsr.RenderFormValues(resolution="640x360", samples=8, camera_mode="grain_only", paths=("per_sphere",))
     result = tsr.run_pipeline(sim_params, render_form, base_output_dir)
 
     assert result.stage == "done"
@@ -438,7 +439,7 @@ def test_run_pipeline_success_message_counts_rendered_frames(monkeypatch, tmp_pa
     monkeypatch.setattr(tsr, "run_render_stage", fake_render)
 
     sim_params = tsr.SimParams(output_root=Path("sobol_mass_runs/batch"))
-    result = tsr.run_pipeline(sim_params, tsr.RenderFormValues(), base_output_dir)
+    result = tsr.run_pipeline(sim_params, tsr.RenderFormValues(paths=("per_sphere",)), base_output_dir)
 
     output_dir = base_output_dir / "batch" / "run_0001_render_per_sphere"
     assert result.message.startswith("converted 3 frame(s); per_sphere: ok, 2 frame(s) in ")
@@ -465,7 +466,7 @@ def test_run_pipeline_message_reports_encoded_video(monkeypatch, tmp_path):
     monkeypatch.setattr(tsr, "run_render_stage", fake_render)
 
     sim_params = tsr.SimParams(output_root=Path("sobol_mass_runs/batch"))
-    render_form = tsr.RenderFormValues(encode_video=True)
+    render_form = tsr.RenderFormValues(encode_video=True, paths=("per_sphere",))
     result = tsr.run_pipeline(sim_params, render_form, base_output_dir)
 
     output_dir = base_output_dir / "batch" / "run_0001_render_per_sphere"
@@ -494,7 +495,7 @@ def test_run_pipeline_message_flags_missing_video_when_requested(monkeypatch, tm
     monkeypatch.setattr(tsr, "run_render_stage", fake_render)
 
     sim_params = tsr.SimParams(output_root=Path("sobol_mass_runs/batch"))
-    render_form = tsr.RenderFormValues(encode_video=True)
+    render_form = tsr.RenderFormValues(encode_video=True, paths=("per_sphere",))
     result = tsr.run_pipeline(sim_params, render_form, base_output_dir)
 
     assert "video encode requested but" in result.message
@@ -523,7 +524,7 @@ def test_run_pipeline_notifies_stage_callbacks(monkeypatch, tmp_path):
 
     sim_params = tsr.SimParams(output_root=Path("sobol_mass_runs/batch"))
     tsr.run_pipeline(
-        sim_params, tsr.RenderFormValues(), base_output_dir, on_stage=on_stage,
+        sim_params, tsr.RenderFormValues(paths=("per_sphere",)), base_output_dir, on_stage=on_stage,
     )
 
     assert [s[0] for s in stages] == ["sim", "convert", "render"]
@@ -549,7 +550,7 @@ def test_run_pipeline_render_n_expected_respects_max_frames(monkeypatch, tmp_pat
     stages = []
     tsr.run_pipeline(
         tsr.SimParams(output_root=Path("sobol_mass_runs/batch")),
-        tsr.RenderFormValues(max_frames=2),
+        tsr.RenderFormValues(max_frames=2, paths=("per_sphere",)),
         base_output_dir,
         on_stage=lambda stage, **info: stages.append((stage, info)),
     )
@@ -1116,7 +1117,7 @@ def test_render_path_registry_order_and_wiring():
 
 def test_render_form_values_new_defaults():
     r = tsr.RenderFormValues()
-    assert r.paths == ("per_sphere",)
+    assert r.paths == ("instance_grains",)
     assert r.envelope_method == "hull"
     assert r.placeholder_obj == tsr.DEFAULT_PLACEHOLDER_OBJ
     assert r.placeholder_obj.endswith("/apophis_v233s7.obj")
@@ -1278,7 +1279,14 @@ def test_run_render_stage_passes_errors_replace(monkeypatch):
     assert captured["errors"] == "replace"
 
 
+def _force_npz_route(monkeypatch):
+    # these tests pin per-path preprocess semantics (npz route); the dump
+    # route's shared preprocess has its own tests (test_dump_route_*)
+    monkeypatch.setattr(tsr, "needs_npz", lambda paths: True)
+
+
 def _pipeline_setup(monkeypatch, tmp_path, n_npz=2):
+    _force_npz_route(monkeypatch)
     monkeypatch.setattr(tsr, "run_sim_stage", lambda params: _ok_record())
     base = tmp_path / "DEMCSVs"
     grains = base / "batch" / "run_0001_grains_output"
@@ -1374,7 +1382,7 @@ def test_run_pipeline_all_paths_ok_is_done(monkeypatch, tmp_path):
 def test_run_pipeline_zero_pngs_is_render_failure(monkeypatch, tmp_path):
     base, sim_params = _pipeline_setup(monkeypatch, tmp_path)
     monkeypatch.setattr(tsr, "run_render_stage", lambda params: _ok_completed())
-    result = tsr.run_pipeline(sim_params, tsr.RenderFormValues(), base)
+    result = tsr.run_pipeline(sim_params, tsr.RenderFormValues(paths=("per_sphere",)), base)
     assert result.ok is False
     assert result.paths[0].stage == "render"
     assert "render wrote no frames to" in result.message
@@ -1470,7 +1478,7 @@ def test_pipeline_warning_only_for_per_sphere():
 
 # --- Task 6: render path form ----------------------------------------------
 
-def _render_form_or_error(setup):
+def _render_form_or_error(setup, *, venv_ok=True):
     async def _scenario():
         app = tsr.SimRenderTUIApp()
         async with app.run_test():
@@ -1479,6 +1487,10 @@ def _render_form_or_error(setup):
                 return app._build_render_form()
             except ValueError as exc:
                 return exc
+    if venv_ok and not Path(tsr.WIN_VENV_PYTHON).is_file():
+        # instance_grains (default) needs the venv python; any existing file stands in.
+        with patch.object(tsr, "WIN_VENV_PYTHON", Path(__file__)):
+            return asyncio.run(_scenario())
     return asyncio.run(_scenario())
 
 
@@ -1488,28 +1500,32 @@ def _tick(app, name, value=True):
 
 def test_path_checkbox_defaults():
     form = _render_form_or_error(lambda app: None)
-    assert form.paths == ("per_sphere",)
+    assert form.paths == ("instance_grains",)
     assert form.envelope_method == "hull"
     assert form.placeholder_obj == tsr.DEFAULT_PLACEHOLDER_OBJ
     assert form.n_points == 1_000_000
 
 
 def test_no_path_ticked_is_error():
-    err = _render_form_or_error(lambda app: _tick(app, "per_sphere", False))
+    err = _render_form_or_error(lambda app: _tick(app, "instance_grains", False))
     assert isinstance(err, ValueError)
     assert "render path" in str(err)
 
 
 def test_composite_requires_venv_python(monkeypatch, tmp_path):
     monkeypatch.setattr(tsr, "WIN_VENV_PYTHON", tmp_path / "missing" / "python.exe")
-    err = _render_form_or_error(lambda app: _tick(app, "composite"))
+    def setup(app):
+        _tick(app, "instance_grains", False)  # default path also needs the venv; isolate composite
+        _tick(app, "composite")
+
+    err = _render_form_or_error(setup, venv_ok=False)
     assert isinstance(err, ValueError)
     assert "python.exe" in str(err)
 
 
 def test_instance_grains_requires_venv_python(monkeypatch, tmp_path):
     monkeypatch.setattr(tsr, "WIN_VENV_PYTHON", tmp_path / "missing" / "python.exe")
-    err = _render_form_or_error(lambda app: _tick(app, "instance_grains"))
+    err = _render_form_or_error(lambda app: None, venv_ok=False)  # instance_grains is the default
     assert isinstance(err, ValueError)
 
 
@@ -1523,7 +1539,7 @@ def test_composite_with_venv_and_sdf(monkeypatch, tmp_path):
         app.query_one("#envelope-method", tsr.Select).value = "sdf"
 
     form = _render_form_or_error(setup)
-    assert form.paths == ("per_sphere", "composite")
+    assert form.paths == ("composite", "instance_grains")
     assert form.envelope_method == "sdf"
 
 
@@ -1554,7 +1570,7 @@ def test_instance_static_valid(tmp_path):
     obj.write_text("v 0 0 0\n")
 
     def setup(app):
-        _tick(app, "per_sphere", False)
+        _tick(app, "instance_grains", False)
         _tick(app, "instance_static")
         app.query_one("#placeholder-obj", tsr.Input).value = str(obj)
         app.query_one("#n-points", tsr.Input).value = "5000"
@@ -1581,7 +1597,7 @@ def test_unticked_path_fields_are_not_validated():
         app.query_one("#placeholder-obj", tsr.Input).value = "C:/nope.obj"
 
     form = _render_form_or_error(setup)
-    assert form.paths == ("per_sphere",)
+    assert form.paths == ("instance_grains",)
 
 
 def test_envelope_method_select_disallows_blank():
@@ -1684,7 +1700,7 @@ def test_sim_params_keep_dumps_default_off():
 def test_run_pipeline_cleans_raw_dumps_after_convert(monkeypatch, tmp_path, keep):
     run_dir, base_output_dir = _pipeline_with_run_dir(monkeypatch, tmp_path)
     sim_params = tsr.SimParams(output_root=run_dir.parent, keep_dumps=keep)
-    result = tsr.run_pipeline(sim_params, tsr.RenderFormValues(), base_output_dir)
+    result = tsr.run_pipeline(sim_params, tsr.RenderFormValues(paths=("per_sphere",)), base_output_dir)
     assert result.ok is True
     assert (run_dir / "sobol_00000").exists() is keep
     assert (run_dir / "sobolSink0012N01.ev").exists() is keep
@@ -1693,7 +1709,7 @@ def test_run_pipeline_cleans_raw_dumps_after_convert(monkeypatch, tmp_path, keep
 
 def test_run_pipeline_keeps_dumps_when_convert_produced_nothing(monkeypatch, tmp_path):
     run_dir, base_output_dir = _pipeline_with_run_dir(monkeypatch, tmp_path, npz_frames=0)
-    result = tsr.run_pipeline(tsr.SimParams(output_root=run_dir.parent), tsr.RenderFormValues(), base_output_dir)
+    result = tsr.run_pipeline(tsr.SimParams(output_root=run_dir.parent), tsr.RenderFormValues(paths=("per_sphere",)), base_output_dir)
     assert result.ok is False
     assert (run_dir / "sobol_00000").exists()
 
@@ -2065,3 +2081,237 @@ def test_run_pipeline_compare_unexpected_error_is_partial(monkeypatch, tmp_path)
     assert [r.ok for r in result.paths] == [True, True]
     assert result.stage == "partial" and result.ok is False
     assert "compare: failed: PermissionError: compare_0003.png is locked" in result.message
+
+
+# --- dump-direct route: convert skipped, one shared dump preprocess -----------
+
+@pytest.mark.parametrize("paths,expected", [
+    (("per_sphere",), True),
+    (("instance_static",), True),
+    (("composite", "per_sphere"), True),
+    (("composite",), False),
+    (("composite", "instance_grains"), False),
+])
+def test_needs_npz(paths, expected):
+    assert tsr.needs_npz(paths) is expected
+
+
+def _ctx(tmp_path, **form):
+    return tsr.PathContext(
+        grains_dir=tmp_path / "g", bodies_dir=tmp_path / "b", batch_dir=tmp_path / "batch",
+        run_name="run_0001", render_form=tsr.RenderFormValues(**form), n_expected_frames=2,
+    )
+
+
+def test_build_dump_preprocess_command_both_targets(tmp_path):
+    ctx = _ctx(tmp_path, paths=("composite", "instance_grains"), envelope_method="sdf", max_frames=3)
+    targets = {"composite": tmp_path / "v", "instance_grains": tmp_path / "vi"}
+    rel_run = Path(os.path.relpath(tmp_path / "run_0001"))
+    cmd = tsr.build_dump_preprocess_command(ctx, rel_run, targets)
+    assert cmd[0] == str(tsr.WIN_VENV_PYTHON)
+    assert cmd[1].endswith("viz_preprocess_dump.py")
+    assert cmd[cmd.index("--run-dir") + 1] == tsr.to_windows_path((tmp_path / "run_0001").resolve())
+    assert cmd[cmd.index("--composite-dir") + 1] == tsr.to_windows_path(tmp_path / "v")
+    assert cmd[cmd.index("--instance-dir") + 1] == tsr.to_windows_path(tmp_path / "vi")
+    assert cmd[cmd.index("--envelope-method") + 1] == "sdf"
+    assert cmd[cmd.index("--max-frames") + 1] == "3"
+
+
+def test_build_dump_preprocess_command_instance_only_has_no_envelope(tmp_path):
+    ctx = _ctx(tmp_path, paths=("instance_grains",))
+    cmd = tsr.build_dump_preprocess_command(ctx, tmp_path, {"instance_grains": tmp_path / "vi"})
+    assert "--composite-dir" not in cmd and "--envelope-method" not in cmd
+
+
+def _fake_run(monkeypatch, stdout, rc, write=()):
+    def run(cmd, **kw):
+        for d in write:
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "manifest.json").write_text("{}")
+        return subprocess.CompletedProcess(cmd, rc, stdout=stdout, stderr="")
+    monkeypatch.setattr(tsr.subprocess, "run", run)
+
+
+def test_run_dump_preprocess_stage_splits_results(tmp_path, monkeypatch):
+    v, vi = tmp_path / "v", tmp_path / "vi"
+    vi.mkdir()
+    (vi / "manifest.json").write_text("stale")
+    _fake_run(monkeypatch, "OK composite -> x\nFAILED instance_grains: GrainReappeared: boom\n", 1, write=(v,))
+    res = tsr.run_dump_preprocess_stage(["py"], {"composite": v, "instance_grains": vi})
+    assert res["composite"] == v / "manifest.json"
+    assert isinstance(res["instance_grains"], tsr.PreprocessError)
+    assert str(res["instance_grains"]) == "GrainReappeared: boom"
+
+
+def test_run_dump_preprocess_stage_crash_gives_tail(tmp_path, monkeypatch):
+    _fake_run(monkeypatch, "Traceback ...\nModuleNotFoundError: sarracen\n", 1)
+    res = tsr.run_dump_preprocess_stage(["py"], {"composite": tmp_path / "v"})
+    assert "exited 1" in str(res["composite"]) and "sarracen" in str(res["composite"])
+
+
+def test_run_dump_preprocess_stage_spawn_error(tmp_path, monkeypatch):
+    def boom(cmd, **kw):
+        raise OSError("no python")
+    monkeypatch.setattr(tsr.subprocess, "run", boom)
+    res = tsr.run_dump_preprocess_stage(["py"], {"composite": tmp_path / "v", "instance_grains": tmp_path / "vi"})
+    assert all("could not start py: no python" in str(e) for e in res.values())
+
+
+def _dump_route(monkeypatch, tmp_path, fail=()):
+    run_dir, base = _pipeline_with_run_dir(monkeypatch, tmp_path)
+    convert = MagicMock()
+    monkeypatch.setattr(tsr, "run_convert_stage", convert)
+    per_path = MagicMock()
+    monkeypatch.setattr(tsr, "run_preprocess_stage", per_path)
+    cmds = []
+
+    def fake_dump(cmd, targets):
+        cmds.append(cmd)
+        out = {}
+        for name, d in targets.items():
+            if name in fail:
+                out[name] = tsr.PreprocessError(f"{name} boom")
+            else:
+                out[name] = _fake_preprocess_ok(cmd, d)
+        return out
+    monkeypatch.setattr(tsr, "run_dump_preprocess_stage", fake_dump)
+    return run_dir, base, convert, per_path, cmds
+
+
+def test_dump_route_one_shared_preprocess(monkeypatch, tmp_path):
+    run_dir, base, convert, per_path, cmds = _dump_route(monkeypatch, tmp_path)
+    form = tsr.RenderFormValues(paths=("composite", "instance_grains"))
+    result = tsr.run_pipeline(tsr.SimParams(output_root=run_dir.parent), form, base)
+    assert result.ok is True and result.stage == "done"
+    convert.assert_not_called()
+    per_path.assert_not_called()
+    assert len(cmds) == 1
+    assert "--composite-dir" in cmds[0] and "--instance-dir" in cmds[0]
+    assert "read 2 dump(s) directly (convert skipped)" in result.message
+
+
+def test_dump_route_one_failed_target_other_renders(monkeypatch, tmp_path):
+    run_dir, base, *_ = _dump_route(monkeypatch, tmp_path, fail=("instance_grains",))
+    form = tsr.RenderFormValues(paths=("composite", "instance_grains"))
+    result = tsr.run_pipeline(tsr.SimParams(output_root=run_dir.parent), form, base)
+    assert result.stage == "partial"
+    by = {r.name: r for r in result.paths}
+    assert by["composite"].ok is True
+    assert by["instance_grains"].ok is False and by["instance_grains"].stage == "preprocess"
+    assert "instance_grains boom" in by["instance_grains"].message
+
+
+def test_npz_route_kept_when_per_sphere_ticked(monkeypatch, tmp_path):
+    run_dir, base = _pipeline_with_run_dir(monkeypatch, tmp_path)
+    dump = MagicMock()
+    monkeypatch.setattr(tsr, "run_dump_preprocess_stage", dump)
+    cmds = []
+    monkeypatch.setattr(tsr, "run_preprocess_stage",
+                        lambda cmd, out: cmds.append(cmd) or _fake_preprocess_ok(cmd, out))
+    form = tsr.RenderFormValues(paths=("per_sphere", "composite"))
+    result = tsr.run_pipeline(tsr.SimParams(output_root=run_dir.parent), form, base)
+    assert result.ok is True
+    dump.assert_not_called()
+    assert "--grains-dir" in cmds[0]
+    assert "converted 1 frame(s)" in result.message
+
+
+@pytest.mark.parametrize("keep", [False, True])
+def test_dump_route_cleans_dumps_after_render(monkeypatch, tmp_path, keep):
+    run_dir, base, *_ = _dump_route(monkeypatch, tmp_path)
+    sim_params = tsr.SimParams(output_root=run_dir.parent, keep_dumps=keep)
+    result = tsr.run_pipeline(sim_params, tsr.RenderFormValues(paths=("composite",)), base)
+    assert result.ok is True
+    assert (run_dir / "sobol_00000").exists() is keep
+    assert (run_dir / "sobol.setup").exists()
+
+
+def test_dump_route_keeps_dumps_when_every_path_failed(monkeypatch, tmp_path):
+    run_dir, base, *_ = _dump_route(monkeypatch, tmp_path, fail=("composite", "instance_grains"))
+    form = tsr.RenderFormValues(paths=("composite", "instance_grains"))
+    result = tsr.run_pipeline(tsr.SimParams(output_root=run_dir.parent), form, base)
+    assert result.ok is False and result.stage == "partial"
+    assert (run_dir / "sobol_00000").exists()
+    assert f"dumps kept in {run_dir} (every render path failed)" in result.message
+
+
+def test_dump_route_no_dumps_fails_before_preprocess(monkeypatch, tmp_path):
+    run_dir, base, _c, _p, cmds = _dump_route(monkeypatch, tmp_path)
+    for f in run_dir.glob("sobol_[0-9]*"):
+        f.unlink()
+    result = tsr.run_pipeline(tsr.SimParams(output_root=run_dir.parent),
+                              tsr.RenderFormValues(paths=("composite",)), base)
+    assert result.ok is False and result.stage == "convert"
+    assert "no sobol_[0-9]* dumps" in result.message
+    assert cmds == []
+
+
+def test_dump_route_stages(monkeypatch, tmp_path):
+    run_dir, base, *_ = _dump_route(monkeypatch, tmp_path)
+    stages = []
+    form = tsr.RenderFormValues(paths=("composite", "instance_grains"), max_frames=1)
+    tsr.run_pipeline(tsr.SimParams(output_root=run_dir.parent), form, base,
+                     on_stage=lambda s, **i: stages.append((s, i)))
+    names = [s for s, _ in stages]
+    assert "convert" not in names and "preprocess" not in names
+    pre = dict(stages)["preprocess_dumps"]
+    assert pre["n_expected"] == 1
+    assert pre["output_dir"] == base / "batch" / "run_0001_viz" / "grains"
+    assert ("render", 1) in [(s, i.get("n_expected")) for s, i in stages]
+
+
+def test_dump_route_instance_only_progress_has_no_count(monkeypatch, tmp_path):
+    run_dir, base, *_ = _dump_route(monkeypatch, tmp_path)
+    stages = []
+    tsr.run_pipeline(tsr.SimParams(output_root=run_dir.parent),
+                     tsr.RenderFormValues(paths=("instance_grains",)), base,
+                     on_stage=lambda s, **i: stages.append((s, i)))
+    pre = dict(stages)["preprocess_dumps"]
+    assert pre["n_expected"] is None and pre["output_dir"] is None
+
+
+def test_format_live_progress_preprocess_dumps():
+    assert tsr.format_live_progress(5, "preprocess_dumps", n_png=3, n_expected=10) == \
+        "Preprocessing dumps... 5s elapsed, 3/10 dump(s)"
+    assert tsr.format_live_progress(5, "preprocess_dumps", n_png=0, n_expected=None) == \
+        "Preprocessing dumps... 5s elapsed"
+
+
+def test_set_pipeline_stage_preprocess_dumps_counts_camera_files(tmp_path):
+    cam = tmp_path / "run_0001_viz" / "grains"
+    cam.mkdir(parents=True)
+    for i in range(2):
+        (cam / f"{i:05d}.npz").write_bytes(b"")
+
+    async def _scenario():
+        app = tsr.SimRenderTUIApp()
+        async with app.run_test():
+            app._pipeline_running = True
+            app._pipeline_start = time.monotonic()
+            app._pipeline_dry_run = False
+            app._pipeline_warning = ""
+            app._pipeline_path_label = "composite 1/2"
+            app._set_pipeline_stage("preprocess_dumps", {"n_expected": 5, "output_dir": cam})
+            return str(app.query_one("#status", tsr.Static).content)
+
+    text = asyncio.run(_scenario())
+    assert "Preprocessing dumps..." in text and "2/5 dump(s)" in text
+
+
+def test_dump_route_keeps_dumps_when_a_path_failed_at_preprocess(monkeypatch, tmp_path):
+    # the dumps are the only grain source: a retry of the failed path needs them
+    run_dir, base, *_ = _dump_route(monkeypatch, tmp_path, fail=("instance_grains",))
+    form = tsr.RenderFormValues(paths=("composite", "instance_grains"))
+    result = tsr.run_pipeline(tsr.SimParams(output_root=run_dir.parent), form, base)
+    assert result.stage == "partial"
+    assert (run_dir / "sobol_00000").exists()
+    assert f"dumps kept in {run_dir} (instance_grains failed at preprocess)" in result.message
+
+
+def test_run_dump_preprocess_stage_failed_line_beats_existing_manifest(tmp_path, monkeypatch):
+    # finish() can die mid-write (disk full, OneDrive lock) leaving a truncated manifest
+    v = tmp_path / "v"
+    _fake_run(monkeypatch, "FAILED composite: OSError: disk full\n", 1, write=(v,))
+    res = tsr.run_dump_preprocess_stage(["py"], {"composite": v})
+    assert isinstance(res["composite"], tsr.PreprocessError)
+    assert str(res["composite"]) == "OSError: disk full"

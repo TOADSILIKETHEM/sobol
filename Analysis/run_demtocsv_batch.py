@@ -51,7 +51,11 @@ def run_dem_dump_convert(
                 code_lines[i] = new_line
                 break
     print(f"\n=== DEMDumpConvert: {input_dir.name} ===", flush=True)
-    exec(compile("\n".join(code_lines), str(dump_convert_path), "exec"), {"__name__": "__main__"})
+    exec(
+        compile("\n".join(code_lines), str(dump_convert_path), "exec"),
+        # __file__ lets the script find Code/ (it imports viz.dump_frames)
+        {"__name__": "__main__", "__file__": str(dump_convert_path)},
+    )
 
 
 def main() -> int:
