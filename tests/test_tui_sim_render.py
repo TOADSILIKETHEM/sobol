@@ -1884,3 +1884,184 @@ def test_run_sim_stage_settled_ephemeris_keeps_earth_4_and_no_flyby(tmp_path, mo
     t.run_sim_stage(p)
     assert seen["run"]["earth_sink_id"] == t.EARTH_SINK_ID_DEFAULT
     assert seen["run"]["phantomflyby_bin"] is None
+
+
+# --- side-by-side compare stage ------------------------------------------
+
+def test_render_form_compare_defaults_off():
+    assert tsr.RenderFormValues().compare is False
+
+
+def test_compare_output_dir():
+    assert tsr._compare_output_dir(Path("/b/batch"), "run_0001") == Path("/b/batch/run_0001_compare")
+
+
+def test_run_pipeline_compare_needs_two_paths_before_sim(monkeypatch):
+    sim_mock = MagicMock()
+    monkeypatch.setattr(tsr, "run_sim_stage", sim_mock)
+    with pytest.raises(ValueError, match="compare"):
+        tsr.run_pipeline(
+            tsr.SimParams(), tsr.RenderFormValues(paths=("composite",), compare=True), Path("/x"),
+        )
+    sim_mock.assert_not_called()
+
+
+def _compare_pipeline(monkeypatch, tmp_path, fail_paths=(), compare_exc=None):
+    base, sim_params = _pipeline_setup(monkeypatch, tmp_path)
+    monkeypatch.setattr(tsr, "run_preprocess_stage", _fake_preprocess_ok)
+
+    def fake_render(params):
+        if params.output_dir.name.split("_render_", 1)[1] in fail_paths:
+            raise tsr.RenderError("blender exited 1:\nboom")
+        _write_fake_pngs(params.output_dir, 2)
+        return _ok_completed()
+    monkeypatch.setattr(tsr, "run_render_stage", fake_render)
+
+    calls = []
+    def fake_compare(render_dirs, output_dir, fps=24, encode_video=False):
+        calls.append({"render_dirs": list(render_dirs), "output_dir": output_dir,
+                      "fps": fps, "encode_video": encode_video})
+        if compare_exc is not None:
+            raise compare_exc
+        return tsr.CompareResult(output_dir, 2, [label for label, _ in render_dirs], [])
+    monkeypatch.setattr(tsr, "run_compare_stage", fake_compare)
+    return base, sim_params, calls
+
+
+def test_run_pipeline_compare_composite_and_point_cloud(monkeypatch, tmp_path):
+    base, sim_params, calls = _compare_pipeline(monkeypatch, tmp_path)
+    form = tsr.RenderFormValues(paths=("instance_grains", "composite"), compare=True)
+    result = tsr.run_pipeline(sim_params, form, base)
+
+    assert result.stage == "done" and result.ok is True
+    assert len(calls) == 1
+    batch = base / "batch"
+    assert calls[0]["render_dirs"] == [
+        ("composite", batch / "run_0001_render_composite"),
+        ("instance_grains", batch / "run_0001_render_instance_grains"),
+    ]
+    assert calls[0]["output_dir"] == batch / "run_0001_compare"
+    assert calls[0]["fps"] == 24 and calls[0]["encode_video"] is False
+    assert result.compare is not None and result.compare.n_frames == 2
+    assert "compare: ok, 2 frame(s) (composite | instance_grains)" in result.message
+
+
+def test_run_pipeline_compare_uses_video_fps_and_encode(monkeypatch, tmp_path):
+    base, sim_params, calls = _compare_pipeline(monkeypatch, tmp_path)
+    form = tsr.RenderFormValues(
+        paths=("per_sphere", "composite"), compare=True, fps=24, video_fps=30, encode_video=True,
+    )
+    tsr.run_pipeline(sim_params, form, base)
+    assert calls[0]["fps"] == 30 and calls[0]["encode_video"] is True
+
+
+def test_run_pipeline_compare_off_never_calls_compare(monkeypatch, tmp_path):
+    base, sim_params, calls = _compare_pipeline(monkeypatch, tmp_path)
+    result = tsr.run_pipeline(sim_params, tsr.RenderFormValues(paths=("per_sphere", "composite")), base)
+    assert calls == []
+    assert result.compare is None
+    assert "compare:" not in result.message  # tmp_path itself contains "compare"
+
+
+def test_run_pipeline_compare_runs_on_surviving_paths(monkeypatch, tmp_path):
+    base, sim_params, calls = _compare_pipeline(monkeypatch, tmp_path, fail_paths=("composite",))
+    form = tsr.RenderFormValues(paths=("per_sphere", "composite", "instance_grains"), compare=True)
+    result = tsr.run_pipeline(sim_params, form, base)
+    assert [label for label, _ in calls[0]["render_dirs"]] == ["per_sphere", "instance_grains"]
+    assert result.stage == "partial" and result.ok is False
+    assert "compare: ok" in result.message
+
+
+def test_run_pipeline_compare_skipped_when_one_path_left(monkeypatch, tmp_path):
+    base, sim_params, calls = _compare_pipeline(monkeypatch, tmp_path, fail_paths=("composite",))
+    form = tsr.RenderFormValues(paths=("per_sphere", "composite"), compare=True)
+    result = tsr.run_pipeline(sim_params, form, base)
+    assert calls == []
+    assert result.stage == "partial"
+    assert "compare: skipped, only 1 path(s) rendered" in result.message
+
+
+def test_run_pipeline_compare_failure_is_partial(monkeypatch, tmp_path):
+    base, sim_params, calls = _compare_pipeline(
+        monkeypatch, tmp_path, compare_exc=tsr.CompareError("ffmpeg not found on PATH"),
+    )
+    form = tsr.RenderFormValues(paths=("per_sphere", "composite"), compare=True)
+    result = tsr.run_pipeline(sim_params, form, base)
+    assert [r.ok for r in result.paths] == [True, True]
+    assert result.stage == "partial" and result.ok is False
+    assert result.compare is None
+    assert "compare: failed: ffmpeg not found on PATH" in result.message
+
+
+def test_run_pipeline_compare_stage_callback(monkeypatch, tmp_path):
+    base, sim_params, _calls = _compare_pipeline(monkeypatch, tmp_path)
+    stages = []
+    tsr.run_pipeline(
+        sim_params, tsr.RenderFormValues(paths=("per_sphere", "composite"), compare=True), base,
+        on_stage=lambda stage, **info: stages.append((stage, info)),
+    )
+    assert stages[-1][0] == "compare"
+    assert stages[-1][1]["output_dir"] == base / "batch" / "run_0001_compare"
+    assert stages[-1][1]["n_expected"] == 2
+
+
+def test_format_live_progress_compare():
+    text = tsr.format_live_progress(12.0, "compare", n_png=3, n_expected=10)
+    assert text == "Comparing... 12s elapsed, 3/10 frame(s)"
+
+
+def test_tick_progress_compare_stage_counts_compare_pngs(tmp_path):
+    async def _scenario():
+        app = tsr.SimRenderTUIApp()
+        async with app.run_test():
+            out = tmp_path / "run_0001_compare"
+            out.mkdir()
+            (out / "compare_0001.png").write_bytes(b"")
+            (out / "frame_0001.png").write_bytes(b"")  # must not be counted
+            app._pipeline_start = time.monotonic()
+            app._pipeline_warning = ""
+            app._pipeline_dry_run = False
+            app._pipeline_running = False  # stop _set_pipeline_stage from ticking early
+            app._set_pipeline_stage("compare", {"n_expected": 5, "output_dir": out})
+            app._tick_progress()
+            return str(app.query_one("#status", tsr.Static).content)
+
+    text = asyncio.run(_scenario())
+    assert "Comparing..." in text
+    assert "1/5 frame(s)" in text
+
+
+def test_form_compare_with_one_path_is_error():
+    err = _render_form_or_error(
+        lambda app: setattr(app.query_one("#compare", tsr.Checkbox), "value", True),
+    )
+    assert isinstance(err, ValueError)
+    assert "compare" in str(err)
+
+
+def test_form_compare_with_two_paths(monkeypatch, tmp_path):
+    exe = tmp_path / "python.exe"
+    exe.write_bytes(b"")
+    monkeypatch.setattr(tsr, "WIN_VENV_PYTHON", exe)
+
+    def setup(app):
+        _tick(app, "per_sphere", False)
+        _tick(app, "composite")
+        _tick(app, "instance_grains")
+        app.query_one("#compare", tsr.Checkbox).value = True
+
+    form = _render_form_or_error(setup)
+    assert form.paths == ("composite", "instance_grains")
+    assert form.compare is True
+
+
+def test_run_pipeline_compare_unexpected_error_is_partial(monkeypatch, tmp_path):
+    # e.g. OneDrive lock on a stale compare_*.png, or a full disk on mkdir
+    base, sim_params, _calls = _compare_pipeline(
+        monkeypatch, tmp_path, compare_exc=PermissionError("compare_0003.png is locked"),
+    )
+    form = tsr.RenderFormValues(paths=("per_sphere", "composite"), compare=True)
+    result = tsr.run_pipeline(sim_params, form, base)
+    assert [r.ok for r in result.paths] == [True, True]
+    assert result.stage == "partial" and result.ok is False
+    assert "compare: failed: PermissionError: compare_0003.png is locked" in result.message

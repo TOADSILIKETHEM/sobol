@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Textual TUI: configure one PHANTOM DEM run, run it, convert dumps,
 render it headless through any mix of per-sphere, composite, and
-point-cloud (instanced real grains / static placeholder) paths. One run per
-launch — see sobol/tui_run.py for the Sobol sweep TUI.
+point-cloud (instanced real grains / static placeholder) paths, and
+optionally stitch the rendered paths side by side (render_compare.py).
+One run per launch — see sobol/tui_run.py for the Sobol sweep TUI.
 
 Launch:
     python3 sobol/tui_sim_render.py
@@ -42,6 +43,12 @@ from run_demtocsv_batch import (  # noqa: E402
     run_dem_dump_convert,
     DEFAULT_DEM_DUMP_CONVERT,
     _min_dem_grains_from_setup,
+)
+from render_compare import (  # noqa: E402
+    CompareError,
+    CompareResult,
+    format_compare_result,
+    run_compare_stage,
 )
 
 try:
@@ -202,6 +209,7 @@ class RenderFormValues:
     envelope_method: str = "hull"
     placeholder_obj: str = DEFAULT_PLACEHOLDER_OBJ
     n_points: int = 1_000_000
+    compare: bool = False  # stitch every rendered path side by side (needs >= 2 paths)
 
 
 @dataclass
@@ -239,6 +247,7 @@ class PipelineResult:
     message: str
     record: Optional[RunRecord] = None
     paths: List[PathResult] = field(default_factory=list)
+    compare: Optional[CompareResult] = None
 
 
 def run_sim_stage(params: SimParams) -> RunRecord:
@@ -307,6 +316,10 @@ def _grains_and_bodies_dirs(run_dir: Path, base_output_dir: Path, output_root: P
 
 def _render_output_dir(batch_dir: Path, run_name: str, path_name: str) -> Path:
     return batch_dir / f"{run_name}_render_{path_name}"
+
+
+def _compare_output_dir(batch_dir: Path, run_name: str) -> Path:
+    return batch_dir / f"{run_name}_compare"
 
 
 def run_convert_stage(record: RunRecord, base_output_dir: Path) -> None:
@@ -558,6 +571,31 @@ def format_path_result(r: PathResult) -> str:
     return f"{r.name}: failed at {r.stage}: {first}"
 
 
+def run_compare_for_paths(
+    ctx: PathContext, results: List[PathResult], on_stage=None,
+) -> Tuple[Optional[CompareResult], str]:
+    """Stitch every path that rendered, side by side. Never raises for compare failures."""
+    ok = [r for r in results if r.ok]
+    if len(ok) < 2:
+        return None, f"compare: skipped, only {len(ok)} path(s) rendered"
+    output_dir = _compare_output_dir(ctx.batch_dir, ctx.run_name)
+    if on_stage is not None:
+        on_stage("compare", n_expected=ctx.n_expected_frames, output_dir=output_dir)
+    form = ctx.render_form
+    try:
+        result = run_compare_stage(
+            [(r.name, _render_output_dir(ctx.batch_dir, ctx.run_name, r.name)) for r in ok],
+            output_dir,
+            fps=form.video_fps or form.fps,
+            encode_video=form.encode_video,
+        )
+    except CompareError as exc:
+        return None, f"compare: failed: {exc}"
+    except Exception as exc:  # e.g. OneDrive lock / full disk on unlink or mkdir
+        return None, f"compare: failed: {type(exc).__name__}: {exc}"
+    return result, format_compare_result(result)
+
+
 def count_matching(directory: Optional[Path], pattern: str) -> int:
     """Return glob hits under directory, or 0 if it is missing / None."""
     if directory is None or not directory.is_dir():
@@ -591,6 +629,13 @@ def format_live_progress(
             else f"{n_png} frame(s)"
         )
         body = f"Rendering{label}... {elapsed}, {count}"
+    elif stage == "compare":
+        count = (
+            f"{n_png}/{n_expected} frame(s)"
+            if n_expected is not None
+            else f"{n_png} frame(s)"
+        )
+        body = f"Comparing... {elapsed}, {count}"
     else:
         body = f"Running sim... {elapsed}, {n_dumps} dump file(s)"
     return f"{warning}{body}"
@@ -602,7 +647,7 @@ def run_pipeline(
     base_output_dir: Path,
     on_stage=None,
 ) -> PipelineResult:
-    """Sim -> convert -> each ticked render path ([preprocess] -> render).
+    """Sim -> convert -> each ticked render path ([preprocess] -> render) -> [compare].
 
     Sim or convert failure stops everything. A render-path failure is recorded
     on that path and the remaining paths still run (they are independent).
@@ -615,6 +660,8 @@ def run_pipeline(
     unknown = [p for p in render_form.paths if p not in RENDER_PATHS]
     if unknown:
         raise ValueError(f"unknown render path(s): {', '.join(unknown)}")
+    if render_form.compare and len(render_form.paths) < 2:
+        raise ValueError("compare needs at least two render paths")
 
     def notify(stage: str, **info) -> None:
         if on_stage is not None:
@@ -679,12 +726,18 @@ def run_pipeline(
     ]
     all_ok = all(r.ok for r in results)
     message = f"converted {n_npz} frame(s); " + "; ".join(format_path_result(r) for r in results)
+    compare = None
+    if render_form.compare:
+        compare, compare_message = run_compare_for_paths(ctx, results, on_stage=on_stage)
+        message += "; " + compare_message
+        all_ok = all_ok and compare is not None
     return PipelineResult(
         stage="done" if all_ok else "partial",
         ok=all_ok,
         message=message,
         record=record,
         paths=results,
+        compare=compare,
     )
 
 
@@ -760,6 +813,7 @@ class SimRenderTUIApp(App[None]):
         self._pipeline_run_dir: Optional[Path] = None
         self._pipeline_grains_dir: Optional[Path] = None
         self._pipeline_render_dir: Optional[Path] = None
+        self._pipeline_png_glob: str = "frame_*.png"  # "compare_*.png" during compare
         self._pipeline_prefix: str = ""
         self._pipeline_warning: str = ""
         self._pipeline_stage: str = "sim"
@@ -876,6 +930,11 @@ class SimRenderTUIApp(App[None]):
                 "instance_static",
                 Checkbox("shape-model placeholder cloud", value=False, id=PATH_CHECKBOX_IDS["instance_static"]),
                 "not sim motion",
+            )
+            yield _Row(
+                "compare",
+                Checkbox("side-by-side of ticked paths", value=False, id="compare"),
+                "needs ≥2 paths",
             )
             yield _Row(
                 "envelope_method",
@@ -1015,6 +1074,9 @@ class SimRenderTUIApp(App[None]):
         )
         if not paths:
             raise ValueError("tick at least one render path")
+        compare = bool(self.query_one("#compare", Checkbox).value)
+        if compare and len(paths) < 2:
+            raise ValueError("compare needs at least two ticked render paths")
         envelope_method = str(self.query_one("#envelope-method", Select).value)
         placeholder_obj = self._iv("placeholder-obj")
         n_points = 1_000_000
@@ -1046,6 +1108,7 @@ class SimRenderTUIApp(App[None]):
             envelope_method=envelope_method,
             placeholder_obj=placeholder_obj,
             n_points=n_points,
+            compare=compare,
         )
 
     @on(Button.Pressed, "#btn-run")
@@ -1086,6 +1149,7 @@ class SimRenderTUIApp(App[None]):
         self._pipeline_grains_dir = grains_dir
         # Set per path by the "render" stage callback (Task 6).
         self._pipeline_render_dir = None
+        self._pipeline_png_glob = "frame_*.png"
         self._pipeline_prefix = sim_params.prefix
         self._pipeline_warning = warning
         self._pipeline_stage = "sim"
@@ -1111,6 +1175,11 @@ class SimRenderTUIApp(App[None]):
             self._pipeline_path_label = f"{info['path']} {info['index']}/{info['total']}"
         if stage == "render" and "output_dir" in info:
             self._pipeline_render_dir = info["output_dir"]
+            self._pipeline_png_glob = "frame_*.png"
+        if stage == "compare":
+            self._pipeline_render_dir = info.get("output_dir")
+            self._pipeline_png_glob = "compare_*.png"
+            self._pipeline_path_label = None
         if self._pipeline_running and not self._pipeline_dry_run:
             self._tick_progress()
 
@@ -1118,7 +1187,7 @@ class SimRenderTUIApp(App[None]):
         """Coarse live progress while the worker thread runs.
 
         Stage is set by run_pipeline's on_stage callback. Sim counts dumps;
-        convert counts npz; render counts frame_*.png so the bar does not
+        convert counts npz; render counts frame_*.png (compare: compare_*.png) so the bar does not
         freeze on the last dump after PHANTOM exits.
         """
         if self._pipeline_start is None:
@@ -1132,7 +1201,7 @@ class SimRenderTUIApp(App[None]):
             self._pipeline_run_dir, f"{self._pipeline_prefix}_[0-9]*",
         )
         n_npz = count_matching(self._pipeline_grains_dir, "*.npz")
-        n_png = count_matching(self._pipeline_render_dir, "frame_*.png")
+        n_png = count_matching(self._pipeline_render_dir, self._pipeline_png_glob)
         self._set_status(
             format_live_progress(
                 elapsed,

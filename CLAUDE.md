@@ -43,11 +43,11 @@ Both need `--use-dem-fixed true` and `--np-apophis` / `--np-apophis-list` (grain
 
 ## Sim + render pipeline TUI (summary)
 
-`tui_sim_render.py`: **one** DEM run per launch: PHANTOM (`run_one_case`) → convert (`run_demtocsv_batch`) → headless Blender, any mix of `per_sphere`, `composite`, `instance_grains`, `instance_static` (result `done` or `partial`). Sweep TUI is `tui_run.py`. Keep `prefix = sobol` (converter globs `sobol_[0-9]*`). Set `ephemeris_cache_dir = /home/mboyle/Honours/sobol` (blank = live Horizons download). No mid-run cancel. Detail: `docs/tui_sim_render.md`.
+`tui_sim_render.py`: **one** DEM run per launch: PHANTOM (`run_one_case`) → convert (`run_demtocsv_batch`) → headless Blender, any mix of `per_sphere`, `composite`, `instance_grains`, `instance_static`, optional side-by-side compare (`render_compare.py` → `run_0001_compare/`) (result `done` or `partial`). Sweep TUI is `tui_run.py`. Keep `prefix = sobol` (converter globs `sobol_[0-9]*`). Set `ephemeris_cache_dir = /home/mboyle/Honours/sobol` (blank = live Horizons download). No mid-run cancel. Detail: `docs/tui_sim_render.md`.
 
 ## Key commands
 
-Laptop: `OMP_NUM_THREADS=1`, `--jobs 2` (hub rule). Batches live in `Honours/sobol_mass_runs/`.
+Laptop: sweeps `OMP_NUM_THREADS=1`, `--jobs 2`; single long run `--jobs 1 OMP_NUM_THREADS=4..6` (hub rule). Batches live in `Honours/sobol_mass_runs/`.
 
 ```bash
 python3 sobol/run_mass_sobol_phantom.py --base-dir sobol --prefix sobol --num-samples 50 \
