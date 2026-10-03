@@ -35,15 +35,38 @@ import run_mass_sobol_phantom as _runner
 # ── constants ────────────────────────────────────────────────────────────────
 
 # (CSS-id-stem, attr-name, checkbox label, is_integer)
+# attr-name is the argparse dest STEM: min/max are read as attr+"_min"/attr+"_max".
+# Spin entries use "spin_period" etc. (argparse dest stem), not the full setup key.
 _SCALE_DIMS = [
-    ("scale-vel",       "scale_vel",       "scale_vel  — Apophis velocity scale",      False),
-    ("scale-pos",       "scale_pos",       "scale_pos  — Apophis position scale",      False),
-    ("scale-r-apophis", "scale_r_apophis", "scale_r_apophis  — Apophis radius scale",  False),
-    ("scale-rho",       "scale_rho",       "scale_rho  — bulk density scale",          False),
-    ("np-apophis",      "np_apophis",      "np_apophis  — DEM particle count (int)",   True),
+    ("scale-vel",       "scale_vel",        "scale_vel  — Apophis velocity scale",             False),
+    ("scale-pos",       "scale_pos",        "scale_pos  — Apophis position scale",             False),
+    ("scale-r-apophis", "scale_r_apophis",  "scale_r_apophis  — Apophis radius scale",         False),
+    ("scale-rho",       "scale_rho",        "scale_rho  — bulk density scale",                 False),
+    # Spin: applied after DEM placement (use_dem=T, np_apophis>1); no-op for single-sink runs.
+    ("spin-period",     "spin_period",      "spin_period (hr)  — spin period (0 = no spin)",   False),
+    ("spin-obliquity",  "spin_obliquity",   "spin_obliquity (deg)  — spin axis from north",    False),
+    ("spin-azimuth",    "spin_azimuth",     "spin_azimuth (deg)  — spin axis azimuth",         False),
+    (
+        "spin-torque-align",
+        "spin_torque_align",
+        "spin_torque_align (deg)  — flyby-frame torque align [0,180]; alt to obl/az",
+        False,
+    ),
 ]
 
-_MASS_GATE_IDS = ("mass-min-kg", "mass-max-kg", "mass-unit")
+# Matches sobol/Makefile `ifndef MAXPTMASS` default (runner compile-time warn uses 1000).
+_MAKEFILE_MAXPTMASS_DEFAULT = 3000
+
+_MASS_GATE_IDS = ("mass-min-kg", "mass-max-kg", "apophis-ref-mass-kg")
+
+# DEM contact parameters: patched into .in after phantomsetup.
+# (css-id-stem, argparse-dest-stem, label, is_integer)
+# dest stem follows argparse convention: --kc-min → kc_min, getattr(d, "kc_min", None)
+_IN_DIMS = [
+    ("kt",    "kt",    "kt_cgs  — tensile spring constant (dyne/cm; 0=off; DEM only)",       False),
+    ("eps-n", "eps_n", "epsilon_n_dem  — normal restitution coeff [0,1] (DEM only)",            False),
+    ("kn",    "kn",    "kn_cgs  — normal spring constant (dyne/cm; DEM only)",                  False),
+]
 
 
 # ── helper: one labelled row ─────────────────────────────────────────────────
@@ -133,6 +156,7 @@ class SobolTUIApp(App[Optional[List[str]]]):
 
     .err { color: $error; }
     .ok  { color: $success; }
+    .note { color: $warning; text-style: italic; padding: 0 0 0 27; }
 
     Button { margin: 0 1; }
     """
@@ -198,10 +222,11 @@ class SobolTUIApp(App[Optional[List[str]]]):
                        Input(str(d.mass_max_kg or ""), id="mass-max-kg",
                              disabled=not mass_on, placeholder="e.g. 1e11"),
                        "kg")
-            yield _Row("mass_unit",
-                       Select([("kg", "kg"), ("g", "g"), ("msun", "msun")],
-                              value=(d.mass_unit or "kg"),
-                              id="mass-unit", disabled=not mass_on))
+            yield _Row("apophis_ref_mass_kg",
+                       Input(str(getattr(d, "apophis_ref_mass_kg", "") or ""), id="apophis-ref-mass-kg",
+                             disabled=not mass_on,
+                             placeholder="e.g. 2.7e10  (mass at scale_rho=1)"),
+                       "kg")
 
             # ── Scale bounds ───────────────────────────────────────────────
             yield Static("Scale bounds  (optional Sobol dimensions)", classes="sec")
@@ -221,6 +246,136 @@ class SobolTUIApp(App[Optional[List[str]]]):
                                  disabled=not active, placeholder="max"),
                            hint)
 
+            # ── Spin period fixed / grid ───────────────────────────────────
+            yield Static(
+                "Spin period modes  (fixed or np×period grid — exclusive with spin_period min/max above)",
+                classes="sec",
+            )
+            sp_fixed = getattr(d, "spin_period_fixed", None)
+            sp_list_raw = getattr(d, "spin_period_list", None)
+            sp_list_val = " ".join(str(x) for x in sp_list_raw) if sp_list_raw else ""
+            sp_lo = getattr(d, "spin_period_min", None)
+            sp_hi = getattr(d, "spin_period_max", None)
+            sp_vary = sp_lo is not None and sp_hi is not None
+            sp_fixed_active = sp_fixed is not None
+            sp_list_active = bool(sp_list_val)
+            yield _Row(
+                "  spin_period_fixed",
+                Input(
+                    str(sp_fixed or ""),
+                    id="spin-period-fixed",
+                    disabled=sp_vary or sp_list_active,
+                    placeholder="hours  e.g. 4  (exclusive with vary/list)",
+                ),
+                "hr  fixed",
+            )
+            yield _Row(
+                "  spin_period_list",
+                Input(
+                    sp_list_val,
+                    id="spin-period-list",
+                    disabled=sp_vary or sp_fixed_active,
+                    placeholder="e.g. 2 4 8  — needs np_apophis_list (Cartesian product)",
+                ),
+                "space-sep hr",
+            )
+
+            # ── DEM Contact parameters ─────────────────────────────────────
+            yield Static("DEM Contact  (optional Sobol dimensions — .in file, DEM mode only)", classes="sec")
+            for css, attr, label, is_int in _IN_DIMS:
+                lo = getattr(d, attr + "_min", None)
+                hi = getattr(d, attr + "_max", None)
+                active = lo is not None and hi is not None
+                hint = "int" if is_int else "float"
+                yield _Row(f"vary {attr}",
+                           Checkbox(label, value=active, id=f"vary-{css}"))
+                yield _Row(f"  {attr}_min",
+                           Input(str(lo or ""), id=f"{css}-min",
+                                 disabled=not active, placeholder="min"),
+                           hint)
+                yield _Row(f"  {attr}_max",
+                           Input(str(hi or ""), id=f"{css}-max",
+                                 disabled=not active, placeholder="max"),
+                           hint)
+
+            kt_lo = getattr(d, "kt_min", None)
+            kt_hi = getattr(d, "kt_max", None)
+            kt_vary = kt_lo is not None and kt_hi is not None
+            kt_fixed_val = getattr(d, "kt_fixed", None)
+            if kt_fixed_val is None:
+                kt_fixed_val = getattr(d, "kc_fixed", None)
+            kt_scale_ref = getattr(d, "kt_scale_ref_np", None)
+            if kt_scale_ref is None:
+                kt_scale_ref = getattr(d, "kc_scale_ref_np", None)
+            np_list_prefill = getattr(d, "np_apophis_list", None)
+            np_list_prefill_active = bool(np_list_prefill)
+            yield Static("DEM Cohesive strength  (fixed kt / gap sizing)", classes="sec")
+            yield _Row(
+                "  kt_fixed",
+                Input(
+                    str(kt_fixed_val or ""),
+                    id="kt-fixed",
+                    disabled=kt_vary,
+                    placeholder="dyne/cm  e.g. 1e7  (exclusive with vary kt)",
+                ),
+                "fixed",
+            )
+            yield _Row(
+                "  kt_scale_ref_np",
+                Input(
+                    str(kt_scale_ref or ""),
+                    id="kt-scale-ref-np",
+                    disabled=not bool(kt_fixed_val) or not np_list_prefill_active,
+                    placeholder="ref np for kt(np) scaling  — needs kt_fixed + np_apophis_list",
+                ),
+                "int",
+            )
+            yield _Row(
+                "  dn_cohes_factor",
+                Input(
+                    str(getattr(d, "dn_cohes_factor", _runner.DEFAULT_DN_COHES_FACTOR)),
+                    id="dn-cohes-factor",
+                    placeholder=f"default {_runner.DEFAULT_DN_COHES_FACTOR}",
+                ),
+                "float",
+            )
+            yield _Row(
+                "  coh_gap_max_cgs",
+                Input(
+                    str(getattr(d, "coh_gap_max_cgs", "") or ""),
+                    id="coh-gap-max-cgs",
+                    placeholder="cm  optional fix  (else derived from dn × grain size when kt>0)",
+                ),
+                "cm",
+            )
+
+            # ── Timeframe ──────────────────────────────────────────────────
+            yield Static("Timeframe  (fix for all runs, or sweep as Sobol dimension)", classes="sec")
+            for t_css, t_attr, t_label in (
+                ("tmax",  "tmax_hours",  "tmax_in — simulation end time"),
+                ("dtmax", "dtmax_hours", "dtmax_in — dump interval"),
+            ):
+                t_lo  = getattr(d, t_attr + "_min", None)
+                t_hi  = getattr(d, t_attr + "_max", None)
+                t_fix = getattr(d, t_attr, None)
+                t_vary = t_lo is not None and t_hi is not None
+                yield _Row(f"vary {t_attr}",
+                           Checkbox(f"{t_label}  (sweep as Sobol dim)",
+                                    value=t_vary, id=f"vary-{t_css}"))
+                yield _Row(f"  {t_attr} fixed",
+                           Input(str(t_fix or ""), id=f"{t_css}-fixed",
+                                 disabled=t_vary,
+                                 placeholder="hours  e.g. 108 = 4.5 days  (blank = keep template)"),
+                           "hr  fixed")
+                yield _Row(f"  {t_attr}_min",
+                           Input(str(t_lo or ""), id=f"{t_css}-min",
+                                 disabled=not t_vary, placeholder="min hr"),
+                           "hr")
+                yield _Row(f"  {t_attr}_max",
+                           Input(str(t_hi or ""), id=f"{t_css}-max",
+                                 disabled=not t_vary, placeholder="max hr"),
+                           "hr")
+
             # ── Setup toggles ──────────────────────────────────────────────
             yield Static("Setup toggles", classes="sec")
             vary_dem = bool(getattr(d, "vary_use_dem", False))
@@ -236,6 +391,47 @@ class SobolTUIApp(App[Optional[List[str]]]):
                               value=dem_fixed_val,
                               id="use-dem-fixed", disabled=vary_dem),
                        "if not varying")
+            np_ap_val = str(getattr(d, "np_apophis", "") or "")
+            np_list_raw = getattr(d, "np_apophis_list", None)
+            np_list_val = " ".join(str(n) for n in np_list_raw) if np_list_raw else ""
+            # np_apophis and np_apophis_list are mutually exclusive; disable whichever is empty.
+            np_list_active = bool(np_list_val)
+            yield _Row("  np_apophis",
+                       Input(np_ap_val, id="np-apophis",
+                             disabled=np_list_active,
+                             placeholder="(from template)  0=none  1=sink  N=gas/DEM"),
+                       "int ≥ 0")
+            yield _Row("  np_apophis_list",
+                       Input(np_list_val, id="np-apophis-list",
+                             disabled=not np_list_active,
+                             placeholder="e.g. 250 500 1000  — one run per value in this batch"),
+                       "space-sep ints")
+            yield Static(
+                f"⚠ np_apophis ≥ {_runner._MAXPTMASS_WARN_THRESHOLD}: lattice overshoot (~2-3%) "
+                f"exceeds upstream default MAXPTMASS={_runner._MAXPTMASS_DEFAULT}. "
+                f"sobol/Makefile builds with MAXPTMASS={_MAKEFILE_MAXPTMASS_DEFAULT} — "
+                "run 'cd sobol && make setup && make' if binaries are stale.",
+                classes="note",
+            )
+            vary_shape = bool(getattr(d, "vary_use_shape_crop", False))
+            shape_fixed_raw = getattr(d, "use_shape_crop_fixed", None)
+            shape_fixed_val = shape_fixed_raw if shape_fixed_raw in ("true", "false") else ""
+            shape_path_active = vary_shape or shape_fixed_val == "true"
+            yield _Row("vary_use_shape_crop",
+                       Checkbox("vary shape cropping as a Sobol dimension  (u≥0.5 → crop)",
+                                value=vary_shape, id="vary-use-shape-crop"))
+            yield _Row("  use_shape_crop_fixed",
+                       Select([("(from template)", ""),
+                               ("True", "true"),
+                               ("False", "false")],
+                              value=shape_fixed_val,
+                              id="use-shape-crop-fixed", disabled=vary_shape),
+                       "if not varying")
+            yield _Row("  shape_file",
+                       Input(str(getattr(d, "shape_file", "") or ""), id="shape-file",
+                             disabled=not shape_path_active,
+                             placeholder="path/to/apophis.shape or apophis.obj  (required when cropping on)"),
+                       "shape/OBJ path")
             yield _Row("vary_apophis_only",
                        Checkbox("vary apophis_only (Earth absent when True; CA → NaN)",
                                 value=bool(getattr(d, "vary_apophis_only", False)),
@@ -262,7 +458,7 @@ class SobolTUIApp(App[Optional[List[str]]]):
                        Input(str(getattr(d, "batch_slug_max_len",
                                          _runner._BATCH_SLUG_DEFAULT_MAX_LEN)),
                              id="slug-max-len"),
-                       "int ≥ 9")
+                       "int ≥ 17")
 
             # ── Execution ──────────────────────────────────────────────────
             yield Static("Execution", classes="sec")
@@ -270,6 +466,12 @@ class SobolTUIApp(App[Optional[List[str]]]):
                        Checkbox("dry run  (prepare dirs only, skip PHANTOM binary)",
                                 value=bool(getattr(d, "dry_run", False)),
                                 id="dry-run"))
+            yield _Row("no_cleanup",
+                       Checkbox(
+                           "keep dumps (.ev, binary dumps, phantom.log) after metrics extraction",
+                           value=bool(getattr(d, "no_cleanup", False)),
+                           id="no-cleanup",
+                       ))
             yield _Row("jobs",
                        Input(str(getattr(d, "jobs", 1)), id="jobs"),
                        "parallel workers")
@@ -277,11 +479,54 @@ class SobolTUIApp(App[Optional[List[str]]]):
         # ── button bar ─────────────────────────────────────────────────────
         with Horizontal(id="bar"):
             yield Button("Run Sweep", id="btn-run",    variant="success")
-            yield Button("Dry Run",   id="btn-dryrun", variant="primary")
+            yield Button("Dry Run",   id="btn-dryrun", variant="warning")
             yield Button("Quit",      id="btn-quit",   variant="error")
             yield Static("Ready — edit fields above, then press Run Sweep.", id="status")
 
         yield Footer()
+
+    def on_mount(self) -> None:
+        self._sync_spin_axis_gates()
+        self._sync_spin_period_gates()
+        self._sync_kt_gates()
+
+    def _sync_spin_axis_gates(self) -> None:
+        torque = self._cb("vary-spin-torque-align")
+        obl = self._cb("vary-spin-obliquity")
+        az = self._cb("vary-spin-azimuth")
+        axis_active = obl or az
+
+        self.query_one("#vary-spin-torque-align").disabled = axis_active
+        self.query_one("#spin-torque-align-min").disabled = not torque
+        self.query_one("#spin-torque-align-max").disabled = not torque
+
+        for css in ("spin-obliquity", "spin-azimuth"):
+            self.query_one(f"#vary-{css}").disabled = torque
+            active = self._cb(f"vary-{css}")
+            self.query_one(f"#{css}-min").disabled = not active or torque
+            self.query_one(f"#{css}-max").disabled = not active or torque
+
+    def _sync_spin_period_gates(self) -> None:
+        vary = self._cb("vary-spin-period")
+        fixed = bool(self._iv("spin-period-fixed"))
+        listed = bool(self._iv("spin-period-list"))
+
+        self.query_one("#vary-spin-period").disabled = fixed or listed
+        self.query_one("#spin-period-min").disabled = not vary or fixed or listed
+        self.query_one("#spin-period-max").disabled = not vary or fixed or listed
+        self.query_one("#spin-period-fixed").disabled = vary or listed
+        self.query_one("#spin-period-list").disabled = vary or fixed
+
+    def _sync_kt_gates(self) -> None:
+        vary = self._cb("vary-kt")
+        fixed = bool(self._iv("kt-fixed"))
+        np_list = bool(self._iv("np-apophis-list"))
+
+        self.query_one("#vary-kt").disabled = fixed
+        self.query_one("#kt-min").disabled = not vary or fixed
+        self.query_one("#kt-max").disabled = not vary or fixed
+        self.query_one("#kt-fixed").disabled = vary
+        self.query_one("#kt-scale-ref-np").disabled = not fixed or not np_list
 
     # ── gate handlers ─────────────────────────────────────────────────────────
 
@@ -297,12 +542,71 @@ class SobolTUIApp(App[Optional[List[str]]]):
         elif cb_id == "vary-use-dem":
             self.query_one("#use-dem-fixed").disabled = active
 
+
+        elif cb_id == "vary-use-shape-crop":
+            self.query_one("#use-shape-crop-fixed").disabled = active
+            # path field is needed whenever cropping may be on
+            self.query_one("#shape-file").disabled = not active
+
+        elif cb_id in ("vary-tmax", "vary-dtmax"):
+            stem = cb_id[len("vary-"):]   # "tmax" or "dtmax"
+            self.query_one(f"#{stem}-fixed").disabled = active
+            self.query_one(f"#{stem}-min").disabled   = not active
+            self.query_one(f"#{stem}-max").disabled   = not active
+
+        elif cb_id == "vary-spin-period":
+            self._sync_spin_period_gates()
+
+        elif cb_id == "vary-kt":
+            self._sync_kt_gates()
+
+        elif cb_id in ("vary-spin-torque-align", "vary-spin-obliquity", "vary-spin-azimuth"):
+            self._sync_spin_axis_gates()
+
         else:
-            for css, _, _, _ in _SCALE_DIMS:
+            for css, _, _, _ in (*_SCALE_DIMS, *_IN_DIMS):
                 if cb_id == f"vary-{css}":
                     self.query_one(f"#{css}-min").disabled = not active
                     self.query_one(f"#{css}-max").disabled = not active
+                    if css == "spin-period":
+                        self._sync_spin_period_gates()
+                    elif css == "kt":
+                        self._sync_kt_gates()
+                    elif css in ("spin-torque-align", "spin-obliquity", "spin-azimuth"):
+                        self._sync_spin_axis_gates()
                     break
+
+    @on(Select.Changed)
+    def _select_gate(self, event: Select.Changed) -> None:
+        if event.select.id == "use-shape-crop-fixed":
+            val = "" if event.value is Select.BLANK else str(event.value)
+            self.query_one("#shape-file").disabled = (val != "true")
+
+    # np_apophis and np_apophis_list are mutually exclusive: filling one disables the other.
+    @on(Input.Changed, "#np-apophis")
+    def _np_apophis_changed(self, event: Input.Changed) -> None:
+        self.query_one("#np-apophis-list").disabled = bool(event.value.strip())
+        self._sync_kt_gates()
+
+    @on(Input.Changed, "#np-apophis-list")
+    def _np_apophis_list_changed(self, event: Input.Changed) -> None:
+        self.query_one("#np-apophis").disabled = bool(event.value.strip())
+        self._sync_kt_gates()
+
+    @on(Input.Changed, "#spin-period-fixed")
+    def _spin_period_fixed_changed(self, event: Input.Changed) -> None:
+        del event
+        self._sync_spin_period_gates()
+
+    @on(Input.Changed, "#spin-period-list")
+    def _spin_period_list_changed(self, event: Input.Changed) -> None:
+        del event
+        self._sync_spin_period_gates()
+
+    @on(Input.Changed, "#kt-fixed")
+    def _kt_fixed_changed(self, event: Input.Changed) -> None:
+        del event
+        self._sync_kt_gates()
 
     # ── button / action handlers ───────────────────────────────────────────────
 
@@ -412,9 +716,7 @@ class SobolTUIApp(App[Optional[List[str]]]):
         if self._cb("vary-mass"):
             fi("mass-min-kg", "--mass-min-kg")
             fi("mass-max-kg", "--mass-max-kg")
-            mu = self._sel("mass-unit")
-            if mu:
-                argv.extend(["--mass-unit", mu])
+            fi("apophis-ref-mass-kg", "--apophis-ref-mass-kg")
 
         # Scale bounds
         for css, attr, _, is_int in _SCALE_DIMS:
@@ -427,6 +729,62 @@ class SobolTUIApp(App[Optional[List[str]]]):
                     fi(f"{css}-min", f"{flag_base}-min")
                     fi(f"{css}-max", f"{flag_base}-max")
 
+        # DEM contact parameters
+        for css, attr, _, is_int in _IN_DIMS:
+            if self._cb(f"vary-{css}"):
+                flag_base = "--" + attr.replace("_", "-")
+                if is_int:
+                    ii(f"{css}-min", f"{flag_base}-min")
+                    ii(f"{css}-max", f"{flag_base}-max")
+                else:
+                    fi(f"{css}-min", f"{flag_base}-min")
+                    fi(f"{css}-max", f"{flag_base}-max")
+
+        fi("kt-fixed", "--kt-fixed")
+        ii("kt-scale-ref-np", "--kt-scale-ref-np")
+        dn_raw = self._iv("dn-cohes-factor")
+        if dn_raw:
+            try:
+                float(dn_raw)
+            except ValueError:
+                raise ValueError(f"--dn-cohes-factor must be a number (got '{dn_raw}')")
+            if float(dn_raw) != _runner.DEFAULT_DN_COHES_FACTOR:
+                argv.extend(["--dn-cohes-factor", dn_raw])
+        fi("coh-gap-max-cgs", "--coh-gap-max-cgs")
+
+        # Spin period fixed / grid (mutually exclusive with spin_period min/max above)
+        sp_list_raw = self._iv("spin-period-list")
+        if sp_list_raw:
+            try:
+                sp_list_vals = [float(x) for x in sp_list_raw.split()]
+            except ValueError:
+                raise ValueError(
+                    f"spin_period_list must be space-separated numbers (got '{sp_list_raw}')"
+                )
+            if any(p <= 0 for p in sp_list_vals):
+                raise ValueError("all spin_period_list values must be > 0")
+            argv.extend(["--spin-period-list"] + [str(v) for v in sp_list_vals])
+        else:
+            sp_fixed_raw = self._iv("spin-period-fixed")
+            if sp_fixed_raw:
+                try:
+                    sp_fixed = float(sp_fixed_raw)
+                except ValueError:
+                    raise ValueError(
+                        f"--spin-period-fixed must be a number (got '{sp_fixed_raw}')"
+                    )
+                if sp_fixed <= 0:
+                    raise ValueError("--spin-period-fixed must be > 0")
+                argv.extend(["--spin-period-fixed", sp_fixed_raw])
+
+        # Timeframe
+        for t_css, t_flag in (("tmax", "--tmax-hours"), ("dtmax", "--dtmax-hours")):
+            if self._cb(f"vary-{t_css}"):
+                fi(f"{t_css}-min", f"{t_flag}-min")
+                fi(f"{t_css}-max", f"{t_flag}-max")
+            else:
+                fi(f"{t_css}-fixed", t_flag)
+
         # Setup toggles
         if self._cb("vary-use-dem"):
             argv.append("--vary-use-dem")
@@ -434,6 +792,25 @@ class SobolTUIApp(App[Optional[List[str]]]):
             df = self._sel("use-dem-fixed")
             if df:
                 argv.extend(["--use-dem-fixed", df])
+        # np_apophis and np_apophis_list are mutually exclusive.
+        np_list_raw = self._iv("np-apophis-list")
+        if np_list_raw:
+            try:
+                np_list_vals = [int(x) for x in np_list_raw.split()]
+            except ValueError:
+                raise ValueError(f"np_apophis_list must be space-separated integers (got '{np_list_raw}')")
+            argv.extend(["--np-apophis-list"] + [str(v) for v in np_list_vals])
+        else:
+            ii("np-apophis", "--np-apophis")
+        if self._cb("vary-use-shape-crop"):
+            argv.append("--vary-use-shape-crop")
+            si("shape-file", "--shape-file")
+        else:
+            ocf = self._sel("use-shape-crop-fixed")
+            if ocf:
+                argv.extend(["--use-shape-crop-fixed", ocf])
+                if ocf == "true":
+                    si("shape-file", "--shape-file")
         if self._cb("vary-apophis-only"):
             argv.append("--vary-apophis-only")
 
@@ -450,6 +827,8 @@ class SobolTUIApp(App[Optional[List[str]]]):
         # Execution
         if force_dry or self._cb("dry-run"):
             argv.append("--dry-run")
+        if self._cb("no-cleanup"):
+            argv.append("--no-cleanup")
         ii("jobs", "--jobs")
 
         return argv

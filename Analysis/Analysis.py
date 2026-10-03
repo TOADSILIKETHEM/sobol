@@ -13,15 +13,32 @@ and optionally ``saltelli_meta.json`` — produced by ``run_mass_sobol_phantom.p
 You cannot compute Saltelli Sobol indices from a classic ``sobol_mass_outputs.csv`` alone;
 that design has only N evaluations instead of N*(D+2) or N*(2*D+2).
 
+Recognised input parameters (varied dimensions):
+  mass_input_kg, scale_vel, scale_pos, scale_r_apophis, scale_rho,
+  apophis_spin_period, apophis_spin_obliquity, apophis_spin_azimuth,
+  apophis_spin_torque_align_deg, kt_cgs, coh_gap_max_cgs, np_apophis,
+  use_dem, use_shape_crop, apophis_only.
+
+Recognised response columns (--response / --saltelli-y-column):
+  closest_approach_km, closest_approach_au  — orbital closest-approach distance.
+  size_ratio                           — DEM only; peak radius-of-gyration ratio (>=1).
+  unbound_fraction                           — DEM only; peak unbound mass fraction [0,1].
+  intrinsic_spin_period_hr                   — early-plateau bound-rubble spin before tidal ramp-up (hours).
+  approach_spin_period_hr                    — mean spin in last 24 h before closest approach (hours).
+  post_flyby_spin_period_hr                  — mean bound-rubble spin period after closest approach (hours).
+
 Examples:
   python3 Analysis.py --method classic --csv sobol_mass_runs/.../sobol_mass_outputs.csv \\
       --response closest_approach_au
+
+  python3 Analysis.py --method classic --csv sobol_mass_runs/.../sobol_mass_outputs.csv \\
+      --response size_ratio
 
   python3 Analysis.py --method saltelli \\
       --sobol-problem-json batch/saltelli_problem.json \\
       --saltelli-meta-json batch/saltelli_meta.json \\
       --saltelli-y-csv batch/saltelli_Y.csv \\
-      --saltelli-y-column closest_approach_au
+      --saltelli-y-column size_ratio
 
 Classic mode writes ``<input_stem>_sensitivity.csv`` by default. Saltelli mode writes
 ``saltelli_sobol_indices.csv`` next to the problem JSON unless ``--output-sobol-csv`` is set.
@@ -68,9 +85,41 @@ INPUT_CANDIDATES: Tuple[str, ...] = (
     "scale_pos",
     "scale_r_apophis",
     "scale_rho",
+    # Spin orientation/rate — patched into setup; only affect DEM runs.
+    "apophis_spin_period",
+    "apophis_spin_obliquity",
+    "apophis_spin_azimuth",
+    "apophis_spin_torque_align_deg",
+    "kt_cgs",
+    "coh_gap_max_cgs",
+    # Particle count (varies in --np-apophis-list sweeps).
+    "np_apophis",
 )
 
-BOOL_INPUTS: Tuple[str, ...] = ("use_dem", "apophis_only")
+BOOL_INPUTS: Tuple[str, ...] = ("use_dem", "use_shape_crop", "apophis_only")
+
+# All response columns the runner can produce; used only for documentation / help text.
+RESPONSE_CANDIDATES: Tuple[str, ...] = (
+    "closest_approach_km",
+    "closest_approach_au",
+    "size_ratio",
+    "unbound_fraction",
+    "intrinsic_spin_period_hr",
+    "approach_spin_period_hr",
+    "post_flyby_spin_period_hr",
+)
+
+# Response columns renamed over time; batch CSVs written before the rename keep the old header.
+LEGACY_RESPONSE_COLUMNS: Dict[str, str] = {"size_ratio": "dispersion_ratio"}
+
+
+def resolve_response_column(response: str, fieldnames: Sequence[str]) -> str:
+    """Column to read for ``response``: the legacy header if only that is present."""
+    legacy = LEGACY_RESPONSE_COLUMNS.get(response)
+    if response not in fieldnames and legacy is not None and legacy in fieldnames:
+        return legacy
+    return response
+
 
 RESULT_CSV_FIELDS = (
     "parameter",
@@ -119,7 +168,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--response",
         default="closest_approach_au",
-        help="Output column for classic mode and default --saltelli-y-column.",
+        help=(
+            "Output column to analyse in classic mode; also the default for --saltelli-y-column. "
+            "Valid options from the runner: closest_approach_km, closest_approach_au, "
+            "size_ratio (DEM only), unbound_fraction (DEM only), "
+            "intrinsic_spin_period_hr, approach_spin_period_hr, post_flyby_spin_period_hr "
+            "(multi-sink Apophis; approach/post need Earth flyby)."
+        ),
     )
     p.add_argument(
         "--include-failed",
@@ -180,7 +235,13 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default=None,
         metavar="NAME",
-        help="Numeric column for Y (default: same as --response).",
+        help=(
+            "Numeric column to use as Y from the saltelli Y CSV (default: same as --response). "
+            "The runner writes closest_approach_km, closest_approach_au, size_ratio, "
+            "unbound_fraction, intrinsic_spin_period_hr, approach_spin_period_hr, "
+            "and post_flyby_spin_period_hr "
+            "to saltelli_Y.csv."
+        ),
     )
     p.add_argument(
         "--saltelli-calc-second-order",
@@ -269,6 +330,7 @@ def load_saltelli_y(
             rows = list(reader)
         if not rows:
             raise ValueError("saltelli Y CSV is empty")
+        y_col = resolve_response_column(y_col, fieldnames)
         if y_col not in fieldnames:
             raise ValueError(f"Column {y_col!r} not in saltelli Y CSV: {fieldnames}")
         if "eval_index" in fieldnames:
@@ -343,52 +405,52 @@ def rows_to_arrays(
     ok_only: bool,
     log_response: bool,
 ) -> Tuple[np.ndarray, List[str], Dict[str, np.ndarray]]:
+    response = resolve_response_column(response, fieldnames)
     if response not in fieldnames:
         raise ValueError(f"Response column {response!r} not in CSV headers: {fieldnames}")
 
     use_ok = ok_only and "status" in fieldnames
 
-    kept: List[Dict[str, str]] = []
+    kept: List[Tuple[Dict[str, str], float]] = []
     for r in rows:
         if use_ok and r.get("status", "").strip().lower() != "ok":
             continue
         yv = _parse_numeric_cell(r.get(response, ""))
         if yv is None or not math.isfinite(yv):
             continue
-        kept.append(r)
+        kept.append((r, yv))
 
     if not kept:
         raise ValueError("No usable rows after filtering (check status and finite response).")
 
     if log_response:
         logs: List[float] = []
-        for r in kept:
-            yv = _parse_numeric_cell(r.get(response, ""))
-            if yv is None or yv <= 0 or not math.isfinite(yv):
+        for _r, yv in kept:
+            if yv <= 0:
                 raise ValueError("--log-response requires strictly positive finite response values.")
             logs.append(math.log10(yv))
         y_arr = np.array(logs, dtype=float)
     else:
-        y_arr = np.array(
-            [float(_parse_numeric_cell(r.get(response, "")) or 0.0) for r in kept],
-            dtype=float,
-        )
+        y_arr = np.array([yv for _r, yv in kept], dtype=float)
 
     input_names: List[str] = []
     col_arrays: Dict[str, np.ndarray] = {}
 
     for name in list(INPUT_CANDIDATES) + list(BOOL_INPUTS):
-        if name not in fieldnames or name == response:
+        col = name
+        if name == "kt_cgs" and name not in fieldnames and "kc_cgs" in fieldnames:
+            col = "kc_cgs"
+        if col not in fieldnames or col == response:
             continue
         vals: List[float] = []
         ok = True
-        for r in kept:
-            v = _parse_numeric_cell(r.get(name, ""))
+        for r, _yv in kept:
+            v = _parse_numeric_cell(r.get(col, ""))
             if v is None or not math.isfinite(v):
                 ok = False
                 break
             vals.append(v)
-        if not ok or len(vals) != len(kept):
+        if not ok:
             continue
         x = np.array(vals, dtype=float)
         if np.ptp(x) <= 0.0:
@@ -459,6 +521,8 @@ def bootstrap_eta_sq(
     n_boot: int,
     seed: int,
 ) -> Tuple[float, float]:
+    if len(x) != len(y):
+        raise ValueError(f"bootstrap_eta_sq: x and y must have the same length ({len(x)} vs {len(y)})")
     rng = np.random.default_rng(seed)
     stat = correlation_ratio_quantile(x, y, n_bins)
     if n_boot <= 0:
@@ -507,6 +571,44 @@ def write_sobol_s2_csv(path: Path, names: Sequence[str], s2: np.ndarray, s2_conf
                         float(s2_conf[i, j]),
                     ]
                 )
+
+
+def compute_classic_sensitivity_rows(
+    csv_path: Path,
+    response: str,
+    *,
+    ok_only: bool = True,
+    log_response: bool = False,
+    bins: int = 10,
+    bootstrap: int = 0,
+    seed: int = 42,
+) -> Tuple[List[Dict[str, object]], int, List[str]]:
+    """Run classic sensitivity on one CSV; return (result_rows, n_rows_used, input_names)."""
+    fieldnames, rows = load_table(csv_path)
+    y, input_names, cols = rows_to_arrays(
+        rows, fieldnames, response, ok_only=ok_only, log_response=log_response
+    )
+    result_rows: List[Dict[str, object]] = []
+    for name in input_names:
+        x = cols[name]
+        eta2 = correlation_ratio_quantile(x, y, bins)
+        if bootstrap > 0:
+            _, half_width = bootstrap_eta_sq(x, y, bins, bootstrap, seed)
+            ci_cell: object = half_width if math.isfinite(half_width) else ""
+        else:
+            ci_cell = ""
+        r2p = squared_pearson(x, y)
+        r2s = squared_spearman(x, y)
+        result_rows.append(
+            {
+                "parameter": name,
+                "eta2_bins": eta2,
+                "eta2_ci95_halfwidth": ci_cell,
+                "r2_pearson": r2p,
+                "r2_spearman": r2s if HAS_SCIPY and math.isfinite(r2s) else "",
+            }
+        )
+    return result_rows, len(y), input_names
 
 
 def run_classic_analysis(args: argparse.Namespace) -> None:
@@ -576,7 +678,10 @@ def run_classic_analysis(args: argparse.Namespace) -> None:
     print(
         "Interpretation (classic): eta^2 is the correlation ratio from quantile bins on each input "
         "(marginal, nonlinear). R^2 Pearson/Spearman are linear/rank-linear. "
-        "These are not Saltelli Sobol indices."
+        "These are not Saltelli Sobol indices. "
+        "Spin inputs (apophis_spin_period/obliquity/azimuth) only vary in DEM sweeps; "
+        "size_ratio and unbound_fraction responses are blank for non-DEM runs and are "
+        "excluded automatically when not finite."
     )
     if not HAS_SCIPY:
         print("[NOTE] Install scipy for Spearman R^2 (pip install scipy).")

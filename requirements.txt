@@ -1,8 +1,14 @@
 numpy>=1.21
 # TUI for interactive parameter editing (tui_run.py).
 textual>=0.70
+# Side-by-side render compare (render_compare.py; load_default(size=) needs 10.1).
+Pillow>=10.1
 # Optional: enables proper multi-dimensional Sobol sequences.
 # Without scipy, the runner uses independent 1D quasi-random sequences per dimension (weaker joint coverage).
 scipy>=1.9.0
 # Saltelli Sobol sampling + variance-based Sobol analysis (runner --saltelli-n, Analysis.py --method saltelli).
 SALib>=1.4.7
+# Thesis plots (Analysis/plot_*.py).
+matplotlib>=3.5
+# Tests (tests/).
+pytest>=7

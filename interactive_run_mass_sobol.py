@@ -2,15 +2,15 @@
 
 Prompts mirror argparse actions on a shared parser so new flags are picked up automatically.
 Optional scale and mass bounds are gated before min/max prompts.
-Extend DEST_TO_SECTION for headings; add INTERACTIVE_BRIEF entries for brief help + valid answers;
-add WIZARD_CUSTOM_HANDLERS for unusual actions.
+Extend DEST_TO_SECTION for headings; add INTERACTIVE_BRIEF entries for brief help + valid answers.
+``nargs='+'`` options are prompted as space-separated lists of their argparse ``type``.
 """
 
 from __future__ import annotations
 
 import argparse
 import sys
-from typing import Callable, Dict, FrozenSet, List, Optional, Tuple
+from typing import Dict, FrozenSet, List, Optional, Tuple
 
 # Logical scale parameters (param name in .setup / RunSample) and argparse dests for min/max.
 # Order matches run_mass_sobol_phantom._SCALE_VARIATION_SPEC; extend if new scale pairs are added.
@@ -19,14 +19,44 @@ SCALE_BOUND_PAIRS: Tuple[Tuple[str, str, str], ...] = (
     ("scale_pos", "scale_pos_min", "scale_pos_max"),
     ("scale_r_apophis", "scale_r_apophis_min", "scale_r_apophis_max"),
     ("scale_rho", "scale_rho_min", "scale_rho_max"),
-    ("np_apophis", "np_apophis_min", "np_apophis_max"),
+    # Spin parameters — only applied by PHANTOM when use_dem=T and np_apophis>1.
+    ("apophis_spin_period",    "spin_period_min",    "spin_period_max"),
+    ("apophis_spin_obliquity", "spin_obliquity_min", "spin_obliquity_max"),
+    ("apophis_spin_azimuth",   "spin_azimuth_min",   "spin_azimuth_max"),
 )
 SCALE_BOUND_DESTS: FrozenSet[str] = frozenset(
     dest for _, lo, hi in SCALE_BOUND_PAIRS for dest in (lo, hi)
 )
 
+# DEM contact parameters: patched into .in after phantomsetup; gated separately from setup scales.
+IN_BOUND_PAIRS: Tuple[Tuple[str, str, str], ...] = (
+    ("kt_cgs",        "kt_min",    "kt_max"),
+    ("epsilon_n_dem", "eps_n_min", "eps_n_max"),
+    ("kn_cgs",        "kn_min",    "kn_max"),
+)
+IN_BOUND_DESTS: FrozenSet[str] = frozenset(
+    dest for _, lo, hi in IN_BOUND_PAIRS for dest in (lo, hi)
+)
+
+# Timeframe parameters: fixed override or sweep bounds per parameter.
+# Fixed dest (tmax_hours / dtmax_hours) and sweep dests (tmax_hours_min/max etc.) are mutually exclusive.
+TIME_BOUND_PAIRS: Tuple[Tuple[str, str, str], ...] = (
+    ("tmax_hours",  "tmax_hours_min",  "tmax_hours_max"),
+    ("dtmax_hours", "dtmax_hours_min", "dtmax_hours_max"),
+)
+TIME_BOUND_DESTS: FrozenSet[str] = frozenset(
+    dest for _, lo, hi in TIME_BOUND_PAIRS for dest in (lo, hi)
+)
+TIME_FIXED_DESTS: FrozenSet[str] = frozenset({"tmax_hours", "dtmax_hours"})
+
+IN_PARAM_LABELS: Dict[str, str] = {
+    "kt_cgs":        "kt_cgs (tensile spring constant dyne/cm; 0=off; DEM only)",
+    "epsilon_n_dem": "epsilon_n_dem (normal restitution coeff [0=inelastic,1=elastic]; DEM only)",
+    "kn_cgs":        "kn_cgs (normal spring constant dyne/cm; DEM only)",
+}
+
 # Mass min/max/unit are skipped when user declines the mass gate (mirrors optional scale pattern).
-MASS_GATE_DESTS: FrozenSet[str] = frozenset({"mass_min_kg", "mass_max_kg", "mass_unit"})
+MASS_GATE_DESTS: FrozenSet[str] = frozenset({"mass_min_kg", "mass_max_kg", "apophis_ref_mass_kg"})
 
 # Human-readable labels for the scale gate (match setup_solarsystem / argparse help).
 SCALE_PARAM_LABELS: Dict[str, str] = {
@@ -34,7 +64,9 @@ SCALE_PARAM_LABELS: Dict[str, str] = {
     "scale_pos": "scale_pos (Apophis initial position scale)",
     "scale_r_apophis": "scale_r_apophis (Apophis radius scale)",
     "scale_rho": "scale_rho (bulk density scale when mass is density-derived)",
-    "np_apophis": "np_apophis (Apophis DEM particle count)",
+    "apophis_spin_period":    "apophis_spin_period (spin period in hours; 0 = no spin; DEM runs only)",
+    "apophis_spin_obliquity": "apophis_spin_obliquity (degrees; runner converts to apophis_spin_axis_* in .setup)",
+    "apophis_spin_azimuth":   "apophis_spin_azimuth (degrees; runner converts to apophis_spin_axis_* in .setup)",
 }
 
 # dest -> section title (unknown dests fall under "Other")
@@ -50,7 +82,7 @@ DEST_TO_SECTION: Dict[str, str] = {
     "saltelli_calc_second_order": "Sampling",
     "mass_min_kg": "Mass",
     "mass_max_kg": "Mass",
-    "mass_unit": "Mass",
+    "apophis_ref_mass_kg": "Mass",
     "scale_vel_min": "Scale bounds (optional dimensions)",
     "scale_vel_max": "Scale bounds (optional dimensions)",
     "scale_pos_min": "Scale bounds (optional dimensions)",
@@ -59,11 +91,46 @@ DEST_TO_SECTION: Dict[str, str] = {
     "scale_r_apophis_max": "Scale bounds (optional dimensions)",
     "scale_rho_min": "Scale bounds (optional dimensions)",
     "scale_rho_max": "Scale bounds (optional dimensions)",
-    "np_apophis_min": "Scale bounds (optional dimensions)",
-    "np_apophis_max": "Scale bounds (optional dimensions)",
+    "spin_period_min":    "Spin (optional dimension)",
+    "spin_period_max":    "Spin (optional dimension)",
+    "spin_obliquity_min": "Spin (optional dimension)",
+    "spin_obliquity_max": "Spin (optional dimension)",
+    "spin_azimuth_min":   "Spin (optional dimension)",
+    "spin_azimuth_max":   "Spin (optional dimension)",
+    "kt_min":    "DEM Contact (optional dimensions)",
+    "kt_max":    "DEM Contact (optional dimensions)",
+    "eps_n_min": "DEM Contact (optional dimensions)",
+    "eps_n_max": "DEM Contact (optional dimensions)",
+    "kn_min":    "DEM Contact (optional dimensions)",
+    "kn_max":    "DEM Contact (optional dimensions)",
+    "tmax_hours":     "Time (optional override / dimension)",
+    "tmax_hours_min": "Time (optional override / dimension)",
+    "tmax_hours_max": "Time (optional override / dimension)",
+    "dtmax_hours":     "Time (optional override / dimension)",
+    "dtmax_hours_min": "Time (optional override / dimension)",
+    "dtmax_hours_max": "Time (optional override / dimension)",
     "vary_use_dem": "Setup toggles",
-    "use_dem_fixed": "Setup toggles",
+    "dem_model": "Setup toggles",
+    "body_source": "Body / encounter",
+    "encounter": "Body / encounter",
+    "flyby_rp_km": "Body / encounter",
+    "flyby_rp_km_min": "Body / encounter",
+    "flyby_rp_km_max": "Body / encounter",
+    "flyby_vinf_kms": "Body / encounter",
+    "flyby_vinf_kms_min": "Body / encounter",
+    "flyby_vinf_kms_max": "Body / encounter",
+    "flyby_start_sep_km": "Body / encounter",
+    "flyby_perturber_earth_masses": "Body / encounter",
+    "settle_tdyn": "Body / encounter",
+    "relax_tdyn": "Body / encounter",
+    "body_cache_dir": "Body / encounter",
+    "np_apophis": "Setup toggles",
+    "vary_use_shape_crop": "Setup toggles",
+    "use_shape_crop_fixed": "Setup toggles",
+    "shape_file": "Paths",
     "vary_apophis_only": "Setup toggles",
+    "apophis_only_fixed": "Setup toggles",
+    "np_apophis_list": "Setup toggles",
     "sink_earth_id": "Sinks / post-processing",
     "sink_apophis_id": "Sinks / post-processing",
     "batch_label": "Batch naming",
@@ -72,11 +139,31 @@ DEST_TO_SECTION: Dict[str, str] = {
     "jobs": "Execution",
 }
 
-# dest -> handler(action, state, flag, out) -> None (mutates state and out_argv)
-WIZARD_CUSTOM_HANDLERS: Dict[str, Callable[[argparse.Action, argparse.Namespace, str, List[str]], None]] = {}
+def _collect_list(action: argparse.Action, state: argparse.Namespace, out: List[str]) -> None:
+    """Prompt for a ``nargs='+'`` option as space-separated values of ``action.type``."""
+    flag = _primary_flag(action)
+    conv = action.type or str
+    current = getattr(state, action.dest, None)
+    cur_s = " ".join(str(v) for v in current) if current else ""
+    what, valid = _explain_for(action)
+    while True:
+        raw = _read_line(f"{what}\n  Option: {flag}\n  Valid answers: {valid}\n[{cur_s}]: ").strip()
+        if not raw:
+            if current:
+                out.extend([flag] + [str(v) for v in current])
+            return
+        try:
+            vals = [conv(x) for x in raw.split()]
+        except ValueError:
+            print(f"  Invalid: enter space-separated {conv.__name__} values.", file=sys.stderr)
+            continue
+        if any(v < 0 for v in vals):
+            print("  All values must be >= 0.", file=sys.stderr)
+            continue
+        setattr(state, action.dest, vals)
+        out.extend([flag] + [str(v) for v in vals])
+        return
 
-# Set only via --vary-use-dem wizard block or CLI; no separate interactive prompts.
-WIZARD_SKIP_DESTS: FrozenSet[str] = frozenset({"use_dem_fixed"})
 
 # dest -> (brief what-it-does, valid answers / input rules). Used for every prompt; extend when
 # adding new CLI flags. Unknown dests use _fallback_explain(action).
@@ -105,9 +192,9 @@ INTERACTIVE_BRIEF: Dict[str, tuple[str, str]] = {
         "Upper bound on Apophis mass in kg when mass is varied.",
         "Positive float; must be greater than mass min.",
     ),
-    "mass_unit": (
-        "Unit written to m_apophis_in when mass is varied; sampling is always in kg internally.",
-        "Exactly one of: kg, g, msun. (Only used when mass min/max are set.)",
+    "apophis_ref_mass_kg": (
+        "Deprecated and ignored: sampled masses are written directly as mass_apophis (g).",
+        "Press Enter to skip.",
     ),
     "seed": (
         "Random seed for scrambled Sobol draws and for Saltelli when used.",
@@ -145,21 +232,126 @@ INTERACTIVE_BRIEF: Dict[str, tuple[str, str]] = {
         "Upper bound for scale_rho; set both min and max or neither.",
         "Float, or Enter to keep current.",
     ),
-    "np_apophis_min": (
-        "Lower bound for np_apophis (DEM particle count per Apophis body); must be >= 2.",
-        "Integer >= 2; or Enter to keep current.",
+    "spin_period_min": (
+        "Lower bound for apophis_spin_period (hours). Spin is only applied by PHANTOM when "
+        "use_dem=T and np_apophis>1; this is a no-op for single-sink or gas runs.",
+        "Positive float (hours), or Enter to leave spin period unvaried.",
     ),
-    "np_apophis_max": (
-        "Upper bound for np_apophis; must be > min. Each run draws an integer uniformly from [min, max].",
-        "Integer > np_apophis_min; or Enter to keep current.",
+    "spin_period_max": (
+        "Upper bound for apophis_spin_period (hours). Must be greater than min.",
+        "Positive float (hours), or Enter to leave spin period unvaried.",
+    ),
+    "spin_obliquity_min": (
+        "Lower bound for spin axis obliquity from ecliptic north (degrees). 0 = spin axis pointing north.",
+        "Float in degrees, or Enter to leave obliquity unvaried.",
+    ),
+    "spin_obliquity_max": (
+        "Upper bound for spin axis obliquity (degrees). Must be greater than min.",
+        "Float in degrees, or Enter to leave obliquity unvaried.",
+    ),
+    "spin_azimuth_min": (
+        "Lower bound for spin axis azimuth in the ecliptic plane (degrees).",
+        "Float in degrees, or Enter to leave azimuth unvaried.",
+    ),
+    "spin_azimuth_max": (
+        "Upper bound for spin axis azimuth (degrees). Must be greater than min.",
+        "Float in degrees, or Enter to leave azimuth unvaried.",
+    ),
+    "kt_min": (
+        "Lower bound for kt_cgs (tensile spring constant in dyne/cm; DEM only). "
+        "Physically plausible range for Apophis-scale rubble: 1e5–1e9 dyne/cm. "
+        "0 = no cohesion (default). Only active when run uses isink_potential=2.",
+        "Float ≥ 0, or Enter to leave unvaried.",
+    ),
+    "kt_max": (
+        "Upper bound for kt_cgs. Must be greater than min.",
+        "Float > min, or Enter.",
+    ),
+    "eps_n_min": (
+        "Lower bound for epsilon_n_dem (normal restitution coefficient; DEM only). "
+        "0 = perfectly inelastic, 1 = perfectly elastic. Default 0.5.",
+        "Float in [0, 1], or Enter to leave unvaried.",
+    ),
+    "eps_n_max": (
+        "Upper bound for epsilon_n_dem. Must be greater than min and ≤ 1.",
+        "Float in [0, 1] and > min, or Enter.",
+    ),
+    "kn_min": (
+        "Lower bound for kn_cgs (normal spring constant in dyne/cm; DEM only). "
+        "Default is 1e7 dyne/cm (10^4 kg/s^2).",
+        "Float > 0, or Enter to leave unvaried.",
+    ),
+    "kn_max": (
+        "Upper bound for kn_cgs. Must be greater than min.",
+        "Float > min, or Enter.",
     ),
     "vary_use_dem": (
-        "Interactive: two-step use_dem (fixed preset, then vary). CLI: use --vary-use-dem and/or --use-dem-fixed.",
-        "See prompts when using -i.",
+        "If yes, adds a Sobol dimension that toggles use_dem in the setup (T/F across runs).",
+        "y, n, yes, no, t, f, 1, 0; or Enter to keep the current value.",
+    ),
+    "dem_model": (
+        "DEM model: particle (Mia tree DEM, default) or sink (legacy all-pairs sink DEM).",
+        "particle or sink; or Enter to keep the current value.",
+    ),
+    "body_source": (
+        "Apophis body: lattice (phantomsetup fill, default) or settled (Mia settle -> crop -> relax, cached).",
+        "lattice or settled; or Enter to keep the current value.",
+    ),
+    "encounter": (
+        "Encounter: ephemeris (2029 Horizons, default) or hyperbola (phantomflyby; needs settled body, no spin).",
+        "ephemeris or hyperbola; or Enter to keep the current value.",
+    ),
+    "flyby_rp_km": ("Hyperbola pericentre distance in km (hyperbola only).", "Float > 0, or Enter."),
+    "flyby_rp_km_min": ("Hyperbola sweep bound (set min and max together).", "Float > 0, or Enter."),
+    "flyby_rp_km_max": ("Hyperbola sweep bound (set min and max together).", "Float > 0, or Enter."),
+    "flyby_vinf_kms": ("Hyperbola velocity at infinity in km/s (hyperbola only).", "Float > 0, or Enter."),
+    "flyby_vinf_kms_min": ("Hyperbola sweep bound (set min and max together).", "Float > 0, or Enter."),
+    "flyby_vinf_kms_max": ("Hyperbola sweep bound (set min and max together).", "Float > 0, or Enter."),
+    "flyby_start_sep_km": ("Initial Earth-body separation in km (Mia default 4e5).", "Float > 0, or Enter."),
+    "flyby_perturber_earth_masses": ("Perturber mass in Earth masses (default 1).", "Float > 0, or Enter."),
+    "settle_tdyn": ("Settle length in t_dyn = 1/sqrt(G rho) (settled bodies; default 5).", "Float > 0, or Enter."),
+    "relax_tdyn": ("Relax after crop, in t_dyn (Mia: 0.5; 0 skips).", "Float >= 0, or Enter."),
+    "body_cache_dir": ("Settled-body cache dir (default <output-root>/settled_bodies).", "Path, or Enter."),
+    "np_apophis_list": (
+        "Space-separated list of np_apophis values: one run per value within a single batch "
+        "(e.g. '250 500 1000' → run_0001=250, run_0002=500, run_0003=1000). "
+        "Mutually exclusive with --np-apophis. Leave blank to use np_apophis instead. "
+        "WARNING: values >= 975 risk MAXPTMASS overflow — compile with MAXPTMASS=2000.",
+        "Space-separated integers (e.g. 250 500 1000), or Enter to skip / use --np-apophis.",
+    ),
+    "np_apophis": (
+        "Fix np_apophis to a single value in every run's setup (0=none, 1=sink, N>1=gas/DEM). "
+        "Leave blank to keep the template value unchanged. "
+        "WARNING: the close-packed lattice overshoots np_apophis by ~2-3%, so values >= 975 "
+        "will exceed the default compiled MAXPTMASS=1000 and cause phantomsetup to abort. "
+        "Ensure PHANTOM is compiled with MAXPTMASS>np_apophis (e.g. MAXPTMASS=2000 in the Makefile).",
+        "Non-negative integer, or Enter to leave unchanged. Values >= 975 require MAXPTMASS recompile.",
+    ),
+    "vary_use_shape_crop": (
+        "If yes, adds a Sobol dimension that toggles shape cropping (writes --shape-file path or blanks apophis_shape_file).",
+        "y, n, yes, no, t, f, 1, 0; or Enter to keep the current value.",
+    ),
+    "use_shape_crop_fixed": (
+        "Force shape cropping on or off for every run: 'true' writes --shape-file to apophis_shape_file; 'false' blanks it. "
+        "Omit to leave the template apophis_shape_file unchanged.",
+        "true, false; or Enter to keep the current value (None = leave template unchanged).",
+    ),
+    "shape_file": (
+        "Path to the shape config (or .obj) staged into each run when shape cropping is enabled. "
+        "Default when cropping is on: repo Shapes/apophis.shape (mesh apophis_v233s7.obj, half long "
+        "axis 0.170 km; the lattice is sized from the mesh and mass from its volume).",
+        "File path string; or Enter to use the default when cropping is enabled.",
     ),
     "vary_apophis_only": (
         "If yes, adds a dimension toggling apophis_only (Earth absent when true; CA metrics may be NaN).",
         "y, n, yes, no, t, f, 1, 0; or Enter to keep the current value.",
+    ),
+    "apophis_only_fixed": (
+        "Force apophis_only to a fixed value for every run. "
+        "'true' removes all solar-system bodies (Apophis-only sim); 'false' forces Earth present. "
+        "When true, --sink-apophis-id is auto-set to 1 (Apophis sinks start at 1 with no solar bodies). "
+        "Mutually exclusive with --vary-apophis-only.",
+        "true, false; or Enter for None (leave template unchanged).",
     ),
     "sink_earth_id": (
         "Sink index for Earth in .ev filenames when extracting closest approach.",
@@ -179,10 +371,10 @@ INTERACTIVE_BRIEF: Dict[str, tuple[str, str]] = {
     ),
     "batch_slug_max_len": (
         "Maximum length of the batch suffix (auto slug or sanitized label) before truncation + hash.",
-        "Integer >= 9 (enforced after the wizard).",
+        "Integer >= 17 (enforced by the runner at startup).",
     ),
     "phantom_dir": (
-        "PHANTOM installation root; must contain bin/phantomsetup and bin/phantom (unless dry-run).",
+        "PHANTOM install root; each binary is <root>/bin/<name> or <root>/<name> (unless dry-run).",
         "Directory path; or Enter to keep the current value.",
     ),
     "dry_run": (
@@ -200,6 +392,34 @@ INTERACTIVE_BRIEF: Dict[str, tuple[str, str]] = {
     "saltelli_calc_second_order": (
         "If yes with Saltelli, use the larger design that also estimates second-order Sobol indices.",
         "y, n, yes, no, t, f, 1, 0; or Enter to keep the current value.",
+    ),
+    "tmax_hours": (
+        "Fix tmax_in for every run in this batch (hours). "
+        "E.g. 12 sets tmax_in = '12 hr'. Leave blank to keep the template value. "
+        "Mutually exclusive with tmax sweep bounds.",
+        "Positive float (e.g. 12, 24, 48); or Enter to leave template unchanged.",
+    ),
+    "tmax_hours_min": (
+        "Lower bound for tmax_in sweep (hours). Only prompted if you chose to vary tmax.",
+        "Positive float; must be less than tmax-hours-max.",
+    ),
+    "tmax_hours_max": (
+        "Upper bound for tmax_in sweep (hours). Must be greater than min.",
+        "Positive float; must be greater than tmax-hours-min.",
+    ),
+    "dtmax_hours": (
+        "Fix dtmax_in (dump interval) for every run in this batch (hours). "
+        "E.g. 0.5 sets dtmax_in = '0.5 hr' (30 min). Leave blank to keep the template value. "
+        "Mutually exclusive with dtmax sweep bounds.",
+        "Positive float (e.g. 0.5 = 30 min, 1 = 1 hr); or Enter to leave template unchanged.",
+    ),
+    "dtmax_hours_min": (
+        "Lower bound for dtmax_in sweep (hours). Only prompted if you chose to vary dtmax.",
+        "Positive float; must be less than dtmax-hours-max.",
+    ),
+    "dtmax_hours_max": (
+        "Upper bound for dtmax_in sweep (hours). Must be greater than min.",
+        "Positive float; must be greater than dtmax-hours-min.",
     ),
 }
 
@@ -224,7 +444,7 @@ def _prompt_mass_vary_selection(state: argparse.Namespace) -> bool:
     yn = "Y/n" if default_yes else "y/N"
     what = (
         "Include Apophis mass as a varied Sobol dimension (you will set min/max and unit next)? "
-        "If no, the template m_apophis_in line is left unchanged."
+        "If no, mass remains at the template density (scale_rho=1)."
     )
     valid = "y, n, yes, no, t, f, 1, 0; or Enter for the suggested default."
     while True:
@@ -271,6 +491,127 @@ def _prompt_scale_vary_selection(state: argparse.Namespace) -> FrozenSet[str]:
             print("  Please enter y or n (empty = suggested default).", file=sys.stderr)
         if choice:
             vary.append(param)
+    return frozenset(vary)
+
+
+def _prompt_dem_contact_vary_selection(state: argparse.Namespace) -> FrozenSet[str]:
+    """Ask which DEM contact parameters (.in-file) become Sobol dimensions."""
+    print(
+        "DEM Contact parameters: choose which become Sobol dimensions "
+        "(patched into each run's .in after phantomsetup; only active when DEM is enabled).",
+        flush=True,
+    )
+    vary: List[str] = []
+    for param, lo_attr, hi_attr in IN_BOUND_PAIRS:
+        lo = getattr(state, lo_attr, None)
+        hi = getattr(state, hi_attr, None)
+        default_yes = lo is not None and hi is not None
+        yn = "Y/n" if default_yes else "y/N"
+        label = IN_PARAM_LABELS.get(param, param)
+        what = f"Include {label} as a varied Sobol dimension (you will set min and max next)?"
+        valid = "y, n, yes, no, t, f, 1, 0; or Enter for the suggested default."
+        while True:
+            raw = _read_line(
+                f"{what}\n  Option: (DEM contact gate) vary {param}\n  Valid answers: {valid}\n  [{yn}]: "
+            ).strip().lower()
+            if not raw:
+                choice = default_yes
+                break
+            if raw in ("y", "yes", "t", "true", "1"):
+                choice = True
+                break
+            if raw in ("n", "no", "f", "false", "0"):
+                choice = False
+                break
+            print("  Please enter y or n (empty = suggested default).", file=sys.stderr)
+        if choice:
+            vary.append(param)
+    return frozenset(vary)
+
+
+def _prompt_time_vary_selection(state: argparse.Namespace, out: List[str]) -> FrozenSet[str]:
+    """Ask which timeframe parameters become Sobol dimensions, fixed overrides, or are left unchanged.
+
+    Emits argv tokens for any fixed values directly into ``out`` (same as the main loop would).
+    Returns the frozenset of param names the user chose to vary as Sobol dimensions.
+    """
+    print(
+        "\nTimeframe: optionally vary tmax_in (end time) and/or dtmax_in (dump interval) across runs "
+        "as Sobol dimensions, set a fixed override for all runs in this batch, or leave unchanged "
+        "from the template.",
+        flush=True,
+    )
+    TIME_LABELS = {
+        "tmax_hours":  "tmax_in (simulation end time)",
+        "dtmax_hours": "dtmax_in (dump interval)",
+    }
+    vary: List[str] = []
+    for param, lo_attr, hi_attr in TIME_BOUND_PAIRS:
+        lo_current = getattr(state, lo_attr, None)
+        hi_current = getattr(state, hi_attr, None)
+        fixed_current = getattr(state, param, None)
+        label = TIME_LABELS.get(param, param)
+        print(f"\n  {label}", flush=True)
+        # Determine default suggestion based on any CLI-seeded values
+        if lo_current is not None and hi_current is not None:
+            default_choice = "vary"
+        elif fixed_current is not None:
+            default_choice = "fix"
+        else:
+            default_choice = "skip"
+        default_hint = f"(default: {default_choice})"
+        while True:
+            raw = _read_line(
+                f"  Vary as Sobol dimension, Fix for all runs, or Skip? {default_hint}\n"
+                f"  [v=vary / f=fix / s=skip]: "
+            ).strip().lower()
+            if not raw:
+                choice = default_choice
+                break
+            if raw in ("v", "vary", "y", "yes", "1"):
+                choice = "vary"
+                break
+            if raw in ("f", "fix", "fixed", "x"):
+                choice = "fix"
+                break
+            if raw in ("s", "skip", "n", "no", "0"):
+                choice = "skip"
+                break
+            print("  Please enter v (vary), f (fix), or s (skip).", file=sys.stderr)
+        if choice == "vary":
+            # Bounds will be prompted by the main wizard loop; clear any stale fixed value.
+            setattr(state, param, None)
+            vary.append(param)
+        elif choice == "fix":
+            # Prompt for the fixed value and emit directly to out; bounds will be skipped.
+            what, valid = INTERACTIVE_BRIEF.get(param, (f"Fixed value for {param} (hours).", "Positive float."))
+            flag = f"--{param.replace('_', '-')}"
+            while True:
+                cur_s = f"{fixed_current:.6g}" if fixed_current is not None else ""
+                raw_val = _read_line(
+                    f"{what}\n  Option: {flag}\n  Valid answers: {valid}\n{flag} [{cur_s}]: "
+                ).strip()
+                if not raw_val:
+                    if fixed_current is not None:
+                        # Keep pre-seeded value and emit it
+                        _append_kv(out, flag, fixed_current)
+                    # else: no value — treat as skip
+                    break
+                try:
+                    v = float(raw_val)
+                    if v <= 0:
+                        print("  Value must be positive.", file=sys.stderr)
+                        continue
+                    setattr(state, param, v)
+                    _append_kv(out, flag, v)
+                    break
+                except ValueError:
+                    print("  Please enter a positive float.", file=sys.stderr)
+        else:
+            # Skip — clear any pre-seeded values; leave template unchanged
+            setattr(state, param, None)
+            setattr(state, lo_attr, None)
+            setattr(state, hi_attr, None)
     return frozenset(vary)
 
 
@@ -362,74 +703,6 @@ def _append_kv(out: List[str], flag: str, value: object) -> None:
     out.append(str(value))
 
 
-def _prompt_use_dem_fixed_preset() -> Optional[str]:
-    """Return None (leave base .setup), 'true', or 'false' for --use-dem-fixed when not varying."""
-    what = (
-        "If you do not vary use_dem next: force it True (y), False (n), or leave the base "
-        "<prefix>.setup value unchanged (Enter)."
-    )
-    valid = "y / n / Enter (leave template)."
-    while True:
-        raw = _read_line(
-            f"{what}\n  Option: --use-dem-fixed (preset when not varying)\n  Valid answers: {valid}\n  [y/n/Enter]: "
-        ).strip().lower()
-        if not raw:
-            return None
-        if raw in ("y", "yes", "t", "true", "1"):
-            return "true"
-        if raw in ("n", "no", "f", "false", "0"):
-            return "false"
-        print("  Please enter y, n, or Enter for template.", file=sys.stderr)
-
-
-def _collect_use_dem_interactive(
-    _action: argparse.Action, state: argparse.Namespace, flag: str, out: List[str]
-) -> None:
-    vary_current = bool(getattr(state, "vary_use_dem", False))
-    what = "Vary use_dem across Sobol samples (adds one Sobol dimension; u>=0.5 -> T)?"
-    yn = "Y/n" if vary_current else "y/N"
-    valid = "y, n, yes, no, t, f, 1, 0; or Enter for the suggested default."
-    while True:
-        raw = _read_line(
-            f"{what}\n  Option: {flag}\n  Valid answers: {valid}\n{flag} [{yn}]: "
-        ).strip().lower()
-        if not raw:
-            vary = vary_current
-            break
-        if raw in ("y", "yes", "t", "true", "1"):
-            vary = True
-            break
-        if raw in ("n", "no", "f", "false", "0"):
-            vary = False
-            break
-        print("  Please enter y or n (empty = suggested default).", file=sys.stderr)
-
-    setattr(state, "vary_use_dem", vary)
-
-    if vary:
-        setattr(state, "use_dem_fixed", None)
-        _append_flag(out, "--vary-use-dem")
-    else:
-        fixed_preset = _prompt_use_dem_fixed_preset()
-        setattr(state, "use_dem_fixed", fixed_preset)
-        if fixed_preset is not None:
-            _append_kv(out, "--use-dem-fixed", fixed_preset)
-
-
-WIZARD_CUSTOM_HANDLERS["vary_use_dem"] = _collect_use_dem_interactive
-
-
-def _collect_saltelli_second_order_interactive(
-    action: argparse.Action, state: argparse.Namespace, _flag: str, out: List[str]
-) -> None:
-    if getattr(state, "saltelli_n", None) is None:
-        return
-    _collect_store_true(action, state, out)
-
-
-WIZARD_CUSTOM_HANDLERS["saltelli_calc_second_order"] = _collect_saltelli_second_order_interactive
-
-
 def _collect_store_true(action: argparse.Action, state: argparse.Namespace, out: List[str]) -> None:
     current = bool(getattr(state, action.dest))
     final = _prompt_bool(action, current)
@@ -463,12 +736,17 @@ def run_interactive_wizard(parser: argparse.ArgumentParser, initial_args: argpar
     skipped_mass_dests: set[str] = set()
     scale_gate_done = False
     skipped_scale_dests: set[str] = set()
+    in_gate_done = False
+    skipped_in_dests: set[str] = set()
+    time_gate_done = False
+    skipped_time_dests: set[str] = set()
 
     for action in parser._actions:  # noqa: SLF001
         if _skip_action(action):
             continue
 
-        if action.dest in WIZARD_SKIP_DESTS:
+        if action.nargs == "+":
+            _collect_list(action, state, out)
             continue
 
         sec = _section_for_dest(action.dest)
@@ -476,14 +754,11 @@ def run_interactive_wizard(parser: argparse.ArgumentParser, initial_args: argpar
             print(f"\n=== {sec} ===", flush=True)
             last_section = sec
 
-        if action.dest in WIZARD_CUSTOM_HANDLERS:
-            WIZARD_CUSTOM_HANDLERS[action.dest](action, state, _primary_flag(action), out)
-            continue
-
         if action.dest == "mass_min_kg" and not mass_gate_done:
             if not _prompt_mass_vary_selection(state):
                 setattr(state, "mass_min_kg", None)
                 setattr(state, "mass_max_kg", None)
+                setattr(state, "apophis_ref_mass_kg", None)
                 skipped_mass_dests.update(MASS_GATE_DESTS)
             mass_gate_done = True
 
@@ -503,6 +778,33 @@ def run_interactive_wizard(parser: argparse.ArgumentParser, initial_args: argpar
         if action.dest in skipped_scale_dests:
             continue
 
+        if action.dest in IN_BOUND_DESTS and not in_gate_done:
+            vary_params = _prompt_dem_contact_vary_selection(state)
+            for param, lo_attr, hi_attr in IN_BOUND_PAIRS:
+                if param not in vary_params:
+                    setattr(state, lo_attr, None)
+                    setattr(state, hi_attr, None)
+                    skipped_in_dests.add(lo_attr)
+                    skipped_in_dests.add(hi_attr)
+            in_gate_done = True
+
+        if action.dest in skipped_in_dests:
+            continue
+
+        if (action.dest in TIME_BOUND_DESTS or action.dest in TIME_FIXED_DESTS) and not time_gate_done:
+            vary_params = _prompt_time_vary_selection(state, out)
+            for param, lo_attr, hi_attr in TIME_BOUND_PAIRS:
+                # Fixed dest is always handled by the gate (emit or cleared); skip it in main loop.
+                skipped_time_dests.add(param)
+                if param not in vary_params:
+                    # Not sweeping: skip the bound dests too (gate set fixed or cleared everything)
+                    skipped_time_dests.add(lo_attr)
+                    skipped_time_dests.add(hi_attr)
+            time_gate_done = True
+
+        if action.dest in skipped_time_dests:
+            continue
+
         if action.__class__.__name__ == "_StoreTrueAction":  # noqa: SLF001
             _collect_store_true(action, state, out)
             continue
@@ -510,21 +812,51 @@ def run_interactive_wizard(parser: argparse.ArgumentParser, initial_args: argpar
         if action.nargs not in (None, 0):
             raise RuntimeError(
                 f"Interactive wizard: unsupported nargs={action.nargs!r} for --{action.dest}; "
-                "add a WIZARD_CUSTOM_HANDLERS entry."
+                "only nargs='+' lists are supported."
             )
 
         _collect_store(action, state, out)
+
+    # Cross-field validation: min must be strictly less than max for every active pair.
+    errors: List[str] = []
+    m_lo = getattr(state, "mass_min_kg", None)
+    m_hi = getattr(state, "mass_max_kg", None)
+    if m_lo is not None and m_hi is not None and m_lo >= m_hi:
+        errors.append(f"mass: min ({m_lo}) must be < max ({m_hi})")
+    for _param, lo_attr, hi_attr in SCALE_BOUND_PAIRS:
+        lo = getattr(state, lo_attr, None)
+        hi = getattr(state, hi_attr, None)
+        if lo is not None and hi is not None and lo >= hi:
+            errors.append(f"{lo_attr}/{hi_attr}: min ({lo}) must be < max ({hi})")
+    for _param, lo_attr, hi_attr in IN_BOUND_PAIRS:
+        lo = getattr(state, lo_attr, None)
+        hi = getattr(state, hi_attr, None)
+        if lo is not None and hi is not None and lo >= hi:
+            errors.append(f"{lo_attr}/{hi_attr}: min ({lo}) must be < max ({hi})")
+    for _param, lo_attr, hi_attr in TIME_BOUND_PAIRS:
+        lo = getattr(state, lo_attr, None)
+        hi = getattr(state, hi_attr, None)
+        if lo is not None and hi is not None and lo >= hi:
+            errors.append(f"{lo_attr}/{hi_attr}: min ({lo}) must be < max ({hi})")
+    if errors:
+        for msg in errors:
+            print(f"[ERROR] {msg}", file=sys.stderr)
+        raise SystemExit(1)
 
     return out
 
 
 __all__ = [
     "DEST_TO_SECTION",
+    "IN_BOUND_DESTS",
+    "IN_BOUND_PAIRS",
+    "IN_PARAM_LABELS",
     "INTERACTIVE_BRIEF",
     "MASS_GATE_DESTS",
     "SCALE_BOUND_DESTS",
     "SCALE_BOUND_PAIRS",
-    "WIZARD_CUSTOM_HANDLERS",
-    "WIZARD_SKIP_DESTS",
+    "TIME_BOUND_DESTS",
+    "TIME_BOUND_PAIRS",
+    "TIME_FIXED_DESTS",
     "run_interactive_wizard",
 ]

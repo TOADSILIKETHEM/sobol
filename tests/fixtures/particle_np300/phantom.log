@@ -1,0 +1,788 @@
+ MPI parallelisation is OFF
+
+   _ \  |                 |                       ___|   _ \  |   |
+  |   | __ \   _` | __ \  __|  _ \  __ `__ \    \___ \  |   | |   |
+  ___/  | | | (   | |   | |   (   | |   |   |         | ___/  ___ |
+ _|    _| |_|\__,_|_|  _|\__|\___/ _|  _|  _|   _____/ _|    _|  _|
+
+ Version: 2026.0.1
+phantom_version not found; no git information to display
+ 
+
+ Running on 12th Gen Intel(R) Core(TM) i7-12650H
+  16 cpus @  2.69 Ghz, cache size 24576 KB
+ Running in openMP on   1 threads
+ opening database from sobol.in with 48 entries
+ starting run sobol.in
+ Started on 26/09/2026 at 14:10:11.3
+
+ Read input from   : sobol.in
+ Writing energy to : sobol01.ev
+ Writing log to    : sobol01.log
+
+
+# job name
+             logfile =  sobol01.log   ! file to which output is directed
+            dumpfile =  sobol_00000.tmp   ! dump file to start from
+
+# options controlling run time and input/output
+                tmax =   1.311E+09    ! end time
+               dtmax =   4.372E+08    ! time between dumps
+                nmax =          -1    ! maximum number of timesteps (0=just get derivs and stop)
+                nout =          -1    ! write dumpfile every n dtmax (-ve=ignore)
+            twallmax =      000:00    ! maximum wall time (hhh:mm, 000:00=ignore)
+           nfulldump =           1    ! full dump every n dumps
+            iverbose =           0    ! verboseness of log (-1=quiet 0=default 1=allsteps 2=debug 5=max)
+           dtwallmax =      024:00    ! maximum wall time between dumps (hhh:mm, 000:00=ignore)
+
+# options controlling accuracy
+              C_cour =       0.300    ! Courant factor
+             C_force =       0.250    ! dt_force factor
+                tolv =   1.000E-02    ! tolerance on v iterations in timestepping
+       tree_accuracy =       0.500    ! tree opening criterion (0.0-1.0)
+               hfact =       1.000    ! h in units of particle spacing [h = hfact(m/rho)^(1/3)]
+                tolh =   1.000E-04    ! tolerance on h-rho iterations
+
+# shock capturing
+               alpha =       0.000    ! MINIMUM shock viscosity parameter
+            alphamax =       1.000    ! MAXIMUM shock viscosity parameter
+                beta =       2.000    ! non-linear shock viscosity parameter
+              alphau =       1.000    ! shock conductivity parameter
+
+# options controlling equation of state
+                ieos =           2    ! eqn of state (1=isoth;2=adiab;3=locally iso;8=barotropic)
+                  mu =       2.381    ! mean molecular weight
+        ipdv_heating =           1    ! heating from PdV work (0=off, 1=on)
+      ishock_heating =           1    ! shock heating (0=off, 1=on)
+
+# options controlling cooling
+            icooling =           0    ! cooling function (0=off, 1=library (step), 2=library (force),3=Gammie, 4=ISM, 5,6=KI02, 7=powerlaw, 9=radiative approx)
+
+# options controlling sink particles
+     isink_potential =           0    ! sink potential (0=1/r,1=surf,2=dem)
+       icreate_sinks =           0    ! allow automatic sink particle creation
+     h_soft_sinksink =       0.000    ! softening length between sink particles
+               f_acc =       0.800    ! particles < f_acc*h_acc accreted without checks
+
+# options relating to external forces
+      iexternalforce =           0    ! 1=star,2=coro,3=bina,4=prdr,5=toru,6=toys,7=exte,8=spir,9=Lens,10=dens,11=Eins,
+
+# options controlling physical viscosity
+           irealvisc =           0    ! physical viscosity type (0=none,1=const,2=Shakura/Sunyaev)
+          shearparam =       0.100    ! magnitude of shear viscosity (irealvisc=1) or alpha_SS (irealvisc=2)
+            bulkvisc =       0.000    ! magnitude of bulk viscosity
+
+# options controlling dust
+               idrag =           1    ! gas/dust drag (0=off,1=Epstein/Stokes,2=const K,3=const ts)
+           grainsize =       0.100    ! Grain size in cm
+           graindens =       3.000    ! Intrinsic grain density in g/cm^3
+              irecon =           1    ! use reconstruction in gas/dust drag (-1=off,0=no slope limiter,1=van leer MC)
+       drag_implicit =           F    ! gas/dust drag implicit scheme (works only with IND_TIMESTEPS=no)
+   icut_backreaction =           0    ! cut the drag on the gas phase (0=no, 1=yes)
+
+# options for injecting/removing particles
+               rkill =      -1.000    ! deactivate particles outside this radius (<0 is off)
+
+# optional outputs
+               curlv =           F    ! output curl v in dump files
+           track_lum =           F    ! write du/dt to dump files (for a "lightcurve")
+                  gw =           F    ! calculate gravitational wave strain
+
+ >>> reading setup from file: sobol_00000.tmp on unit   9
+ FT:Phantom:2026.0.1: (hydro+grav): 26/09/2026 14:10:11.3
+ npart =          307
+ npart(total) =                   307
+ adiabatic eos: gamma =    1.0000000000000000     
+ time =    0.0000000000000000     
+
+--> ALLOCATING ALL ARRAYS
+------------------------------------------------------------
+ Total memory allocated to arrays:   19.919 MB n =          307
+------------------------------------------------------------
+ reading particles          1:       307, from block     1 lims=         1-       307
+ got   30 sink properties from   10 sink particles
+ ----------------------------------------------------------
+ ID| Mass     | Racc     | Macc     | hsoft    | Lsink    |
+ ----------------------------------------------------------
+  1|  1.0     | 6.96E+05 |  0.0     |  0.0     |  0.0     |
+  2| 1.66E-07 | 2.44E+03 |  0.0     |  0.0     |  0.0     |
+  3| 2.45E-06 | 6.05E+03 |  0.0     |  0.0     |  0.0     |
+  4| 3.00E-06 | 6.37E+03 |  0.0     |  0.0     |  0.0     |
+  5| 3.69E-08 | 1.74E+03 |  0.0     |  0.0     |  0.0     |
+  6| 3.23E-07 | 3.39E+03 |  0.0     |  0.0     |  0.0     |
+  7| 9.55E-04 | 6.99E+04 |  0.0     |  0.0     |  0.0     |
+  8| 2.86E-04 | 5.82E+04 |  0.0     |  0.0     |  0.0     |
+  9| 4.37E-05 | 2.54E+04 |  0.0     |  0.0     |  0.0     |
+ 10| 5.15E-05 | 2.46E+04 |  0.0     |  0.0     |  0.0     |
+ ----------------------------------------------------------
+ <<< finished reading (hydro) file 
+
+ Centre of mass is at (x,y,z) = ( 9.446E-11,  0.000E+00, -9.083E-13)
+ Particle setup OK
+ npart total   =          307
+ mean alpha  initial:    0.0000000000000000     
+ nptmass       =           10
+ dt(sink-sink) =    11770135187.219112     
+ dt(sink-gas)  =    69003093831.303604     
+ dt(forces)    =    8.9999999999999994E+028
+ dt(courant)   =    437200000.00000000     
+ dt initial    =    2593493.3307857835     
+
+ Number of particles =          307
+      dem:         307 particles of mass   5.095987E-23
+ 
+ No boundaries set 
+
+ Using M_6 quintic kernel
+       h =  1.00*[ 0.00E+00/rho]^(1/3); htol =  1.00E-04
+       Number of neighbours =  113
+
+ Self-gravity is ON, please cite Bernard et al. (2026) and Price & Monaghan (2007)
+ Two-fluid dust explicit scheme is ON
+ Cooling is OFF
+
+ Ideal gas equation of state: P = (gamma-1)*rho*u, gamma =   1.000000 gmw =   2.381000
+
+ Shock capturing w/Cullen & Dehnen switch    : alpha  =   0.000000 ->  1.000000
+ Shock conductivity w/divv switch (gravity)  : alphau =   1.000000
+
+ Using Epstein/Stokes drag with constant grain size: 
+
+ --- code units --- 
+
+     Mass:  1.989E+33 g       Length:  1.000E+05 cm    Time:  2.745E-06 s
+  Density:  1.989E+18 g/cm^3  Energy:  2.640E+54 erg   En/m:  1.327E+21 erg/g
+ Velocity:  3.643E+10 cm/s    Bfield:  1.821E+20 G  opacity:  5.027E-24 cm^2/g
+        G:  1.000E+00              c:  8.229E-01       mu_0:  1.000E+00
+        a:  2.866E-54          kB/mH:  6.220E-14
+
+ npart=       307, n_alive=       307, n_dead_or_accreted=         0, nptmass=        10
+ Etot=-7.509E-13, Ekin= 7.024E-13, Etherm= 0.000E+00, Epot=-1.453E-12
+ Linm= 3.966E-24, Angm= 4.322E+01
+ Centre of Mass =  9.446E-11,  0.000E+00, -9.083E-13
+ density  (max)= 7.679E-18 (mean)= 0.000E+00 (max)= 1.527E+01 g/cm^3
+ Mgas =  0.000E+00
+ RMS Mach #= 0.000E+00
+
+
+ Initial total dust mass:      0.000000E+00
+
+
+-------->   TIME =    0.000    : full dump written to file sobol_00000   <--------
+
+
+ input file sobol.in written successfully
+
+ ---> DELETING temporary dump file sobol_00000.tmp <---
+
+ t =  0.25935E+07 dt =  2.593E+06 (dem contact), np = 307
+ t =  0.51870E+07 dt =  2.593E+06 (dem contact)
+ t =  0.77805E+07 dt =  2.593E+06 (dem contact)
+ t =  0.10374E+08 dt =  2.593E+06 (dem contact)
+ t =  0.12967E+08 dt =  2.593E+06 (dem contact)
+ t =  0.15561E+08 dt =  2.593E+06 (dem contact)
+ t =  0.18154E+08 dt =  2.593E+06 (dem contact)
+ t =  0.20748E+08 dt =  2.593E+06 (dem contact)
+ t =  0.23341E+08 dt =  2.593E+06 (dem contact)
+ t =  0.25935E+08 dt =  2.593E+06 (dem contact)
+ t =  0.28528E+08 dt =  2.593E+06 (dem contact)
+ t =  0.31122E+08 dt =  2.593E+06 (dem contact)
+ t =  0.33715E+08 dt =  2.593E+06 (dem contact)
+ t =  0.36309E+08 dt =  2.593E+06 (dem contact)
+ t =  0.38902E+08 dt =  2.593E+06 (dem contact)
+ t =  0.41496E+08 dt =  2.593E+06 (dem contact)
+ t =  0.44089E+08 dt =  2.593E+06 (dem contact)
+ t =  0.46683E+08 dt =  2.593E+06 (dem contact)
+ t =  0.49276E+08 dt =  2.593E+06 (dem contact)
+ t =  0.51870E+08 dt =  2.593E+06 (dem contact)
+ t =  0.54463E+08 dt =  2.593E+06 (dem contact)
+ t =  0.57057E+08 dt =  2.593E+06 (dem contact)
+ t =  0.59650E+08 dt =  2.593E+06 (dem contact)
+ t =  0.62244E+08 dt =  2.593E+06 (dem contact)
+ t =  0.64837E+08 dt =  2.593E+06 (dem contact)
+ t =  0.67431E+08 dt =  2.593E+06 (dem contact)
+ t =  0.70024E+08 dt =  2.593E+06 (dem contact)
+ t =  0.72618E+08 dt =  2.593E+06 (dem contact)
+ t =  0.75211E+08 dt =  2.593E+06 (dem contact)
+ t =  0.77805E+08 dt =  2.593E+06 (dem contact)
+ t =  0.80398E+08 dt =  2.593E+06 (dem contact)
+ t =  0.82992E+08 dt =  2.593E+06 (dem contact)
+ t =  0.85585E+08 dt =  2.593E+06 (dem contact)
+ t =  0.88179E+08 dt =  2.593E+06 (dem contact)
+ t =  0.90772E+08 dt =  2.593E+06 (dem contact)
+ t =  0.93366E+08 dt =  2.593E+06 (dem contact)
+ t =  0.95959E+08 dt =  2.593E+06 (dem contact)
+ t =  0.98553E+08 dt =  2.593E+06 (dem contact)
+ t =  0.10115E+09 dt =  2.593E+06 (dem contact)
+ t =  0.10374E+09 dt =  2.593E+06 (dem contact)
+ t =  0.10633E+09 dt =  2.593E+06 (dem contact)
+ t =  0.10893E+09 dt =  2.593E+06 (dem contact)
+ t =  0.11152E+09 dt =  2.593E+06 (dem contact)
+ t =  0.11411E+09 dt =  2.593E+06 (dem contact)
+ t =  0.11671E+09 dt =  2.593E+06 (dem contact)
+ t =  0.11930E+09 dt =  2.593E+06 (dem contact)
+ t =  0.12189E+09 dt =  2.593E+06 (dem contact)
+ t =  0.12449E+09 dt =  2.593E+06 (dem contact)
+ t =  0.12708E+09 dt =  2.593E+06 (dem contact)
+ t =  0.12967E+09 dt =  2.593E+06 (dem contact)
+ t =  0.13227E+09 dt =  2.593E+06 (dem contact)
+ t =  0.13486E+09 dt =  2.593E+06 (dem contact)
+ t =  0.13746E+09 dt =  2.593E+06 (dem contact)
+ t =  0.14005E+09 dt =  2.593E+06 (dem contact)
+ t =  0.14264E+09 dt =  2.593E+06 (dem contact)
+ t =  0.14524E+09 dt =  2.593E+06 (dem contact)
+ t =  0.14783E+09 dt =  2.593E+06 (dem contact)
+ t =  0.15042E+09 dt =  2.593E+06 (dem contact)
+ t =  0.15302E+09 dt =  2.593E+06 (dem contact)
+ t =  0.15561E+09 dt =  2.593E+06 (dem contact)
+ t =  0.15820E+09 dt =  2.593E+06 (dem contact)
+ t =  0.16080E+09 dt =  2.593E+06 (dem contact)
+ t =  0.16339E+09 dt =  2.593E+06 (dem contact)
+ t =  0.16598E+09 dt =  2.593E+06 (dem contact)
+ t =  0.16858E+09 dt =  2.593E+06 (dem contact)
+ t =  0.17117E+09 dt =  2.593E+06 (dem contact)
+ t =  0.17376E+09 dt =  2.593E+06 (dem contact)
+ t =  0.17636E+09 dt =  2.593E+06 (dem contact)
+ t =  0.17895E+09 dt =  2.593E+06 (dem contact)
+ t =  0.18154E+09 dt =  2.593E+06 (dem contact)
+ t =  0.18414E+09 dt =  2.593E+06 (dem contact)
+ t =  0.18673E+09 dt =  2.593E+06 (dem contact)
+ t =  0.18933E+09 dt =  2.593E+06 (dem contact)
+ t =  0.19192E+09 dt =  2.593E+06 (dem contact)
+ t =  0.19451E+09 dt =  2.593E+06 (dem contact)
+ t =  0.19711E+09 dt =  2.593E+06 (dem contact)
+ t =  0.19970E+09 dt =  2.593E+06 (dem contact)
+ t =  0.20229E+09 dt =  2.593E+06 (dem contact)
+ t =  0.20489E+09 dt =  2.593E+06 (dem contact)
+ t =  0.20748E+09 dt =  2.593E+06 (dem contact)
+ t =  0.21007E+09 dt =  2.593E+06 (dem contact)
+ t =  0.21267E+09 dt =  2.593E+06 (dem contact)
+ t =  0.21526E+09 dt =  2.593E+06 (dem contact)
+ t =  0.21785E+09 dt =  2.593E+06 (dem contact)
+ t =  0.22045E+09 dt =  2.593E+06 (dem contact)
+ t =  0.22304E+09 dt =  2.593E+06 (dem contact)
+ t =  0.22563E+09 dt =  2.593E+06 (dem contact)
+ t =  0.22823E+09 dt =  2.593E+06 (dem contact)
+ t =  0.23082E+09 dt =  2.593E+06 (dem contact)
+ t =  0.23341E+09 dt =  2.593E+06 (dem contact)
+ t =  0.23601E+09 dt =  2.593E+06 (dem contact)
+ t =  0.23860E+09 dt =  2.593E+06 (dem contact)
+ t =  0.24119E+09 dt =  2.593E+06 (dem contact)
+ t =  0.24379E+09 dt =  2.593E+06 (dem contact)
+ t =  0.24638E+09 dt =  2.593E+06 (dem contact)
+ t =  0.24898E+09 dt =  2.593E+06 (dem contact)
+ t =  0.25157E+09 dt =  2.593E+06 (dem contact)
+ t =  0.25416E+09 dt =  2.593E+06 (dem contact)
+ t =  0.25676E+09 dt =  2.593E+06 (dem contact)
+ t =  0.25935E+09 dt =  2.593E+06 (dem contact)
+ t =  0.26194E+09 dt =  2.593E+06 (dem contact)
+ t =  0.26454E+09 dt =  2.593E+06 (dem contact)
+ t =  0.26713E+09 dt =  2.593E+06 (dem contact)
+ t =  0.26972E+09 dt =  2.593E+06 (dem contact)
+ t =  0.27232E+09 dt =  2.593E+06 (dem contact)
+ t =  0.27491E+09 dt =  2.593E+06 (dem contact)
+ t =  0.27750E+09 dt =  2.593E+06 (dem contact)
+ t =  0.28010E+09 dt =  2.593E+06 (dem contact)
+ t =  0.28269E+09 dt =  2.593E+06 (dem contact)
+ t =  0.28528E+09 dt =  2.593E+06 (dem contact)
+ t =  0.28788E+09 dt =  2.593E+06 (dem contact)
+ t =  0.29047E+09 dt =  2.593E+06 (dem contact)
+ t =  0.29306E+09 dt =  2.593E+06 (dem contact)
+ t =  0.29566E+09 dt =  2.593E+06 (dem contact)
+ t =  0.29825E+09 dt =  2.593E+06 (dem contact)
+ t =  0.30085E+09 dt =  2.593E+06 (dem contact)
+ t =  0.30344E+09 dt =  2.593E+06 (dem contact)
+ t =  0.30603E+09 dt =  2.593E+06 (dem contact)
+ t =  0.30863E+09 dt =  2.593E+06 (dem contact)
+ t =  0.31122E+09 dt =  2.593E+06 (dem contact)
+ t =  0.31381E+09 dt =  2.593E+06 (dem contact)
+ t =  0.31641E+09 dt =  2.593E+06 (dem contact)
+ t =  0.31900E+09 dt =  2.593E+06 (dem contact)
+ t =  0.32159E+09 dt =  2.593E+06 (dem contact)
+ t =  0.32419E+09 dt =  2.593E+06 (dem contact)
+ t =  0.32678E+09 dt =  2.593E+06 (dem contact)
+ t =  0.32937E+09 dt =  2.593E+06 (dem contact)
+ t =  0.33197E+09 dt =  2.593E+06 (dem contact)
+ t =  0.33456E+09 dt =  2.593E+06 (dem contact)
+ t =  0.33715E+09 dt =  2.593E+06 (dem contact)
+ t =  0.33975E+09 dt =  2.593E+06 (dem contact)
+ t =  0.34234E+09 dt =  2.593E+06 (dem contact)
+ t =  0.34493E+09 dt =  2.593E+06 (dem contact)
+ t =  0.34753E+09 dt =  2.593E+06 (dem contact)
+ t =  0.35012E+09 dt =  2.593E+06 (dem contact)
+ t =  0.35272E+09 dt =  2.593E+06 (dem contact)
+ t =  0.35531E+09 dt =  2.593E+06 (dem contact)
+ t =  0.35790E+09 dt =  2.593E+06 (dem contact)
+ t =  0.36050E+09 dt =  2.593E+06 (dem contact)
+ t =  0.36309E+09 dt =  2.593E+06 (dem contact)
+ t =  0.36568E+09 dt =  2.593E+06 (dem contact)
+ t =  0.36828E+09 dt =  2.593E+06 (dem contact)
+ t =  0.37087E+09 dt =  2.593E+06 (dem contact)
+ t =  0.37346E+09 dt =  2.593E+06 (dem contact)
+ t =  0.37606E+09 dt =  2.593E+06 (dem contact)
+ t =  0.37865E+09 dt =  2.593E+06 (dem contact)
+ t =  0.38124E+09 dt =  2.593E+06 (dem contact)
+ t =  0.38384E+09 dt =  2.593E+06 (dem contact)
+ t =  0.38643E+09 dt =  2.593E+06 (dem contact)
+ t =  0.38902E+09 dt =  2.593E+06 (dem contact)
+ t =  0.39162E+09 dt =  2.593E+06 (dem contact)
+ t =  0.39421E+09 dt =  2.593E+06 (dem contact)
+ t =  0.39680E+09 dt =  2.593E+06 (dem contact)
+ t =  0.39940E+09 dt =  2.593E+06 (dem contact)
+ t =  0.40199E+09 dt =  2.593E+06 (dem contact)
+ t =  0.40458E+09 dt =  2.593E+06 (dem contact)
+ t =  0.40718E+09 dt =  2.593E+06 (dem contact)
+ t =  0.40977E+09 dt =  2.593E+06 (dem contact)
+ t =  0.41237E+09 dt =  2.593E+06 (dem contact)
+ t =  0.41496E+09 dt =  2.593E+06 (dem contact)
+ t =  0.41755E+09 dt =  2.593E+06 (dem contact)
+ t =  0.42015E+09 dt =  2.593E+06 (dem contact)
+ t =  0.42274E+09 dt =  2.593E+06 (dem contact)
+ t =  0.42533E+09 dt =  2.593E+06 (dem contact)
+ t =  0.42793E+09 dt =  2.593E+06 (dem contact)
+ t =  0.43052E+09 dt =  2.593E+06 (dem contact)
+ t =  0.43311E+09 dt =  2.593E+06 (dem contact)
+ t =  0.43571E+09 dt =  1.493E+06 (dtprint)
+ t =  0.43720E+09 dt =  2.593E+06 (dem contact)
+
+
+-------->   TIME =   0.4372E+09: full dump written to file sobol_00001   <--------
+
+
+ input file sobol.in written successfully
+ Since code start: 169 timesteps, wall: 0.50s cpu: 0.31s cpu/wall: 0.63
+ Since last dump : 169 timesteps, wall: 0.25s cpu: 0.16s cpu/wall: 0.63
+
+                           wall         cpu  cpu/wall  load bal      frac
+ ├─step             :     0.25s       0.16s      0.63   100.00%   100.00%
+ │ ├─force          :     0.25s       0.13s      0.53   100.00%   100.00%
+ │ │ ├─local        :     0.25s       0.13s      0.53   100.00%   100.00%
+------------------------------------------------------------------------------
+|** Number of steps since last summary:                    169             **|
+|** Wall time since last summary:                        0.250 seconds     **|
+------------------------------------------------------------------------------
+|* ptmass: particles within hacc that failed to accrete                     *|
+| # sinks | # steps  | max # fails| total #                                  |
+|         | w/ fails | per step   | fails                                    |
+|       10|       169|         307|    51883                                 |
+------------------------------------------------------------------------------
+ npart=       307, n_alive=       307, n_dead_or_accreted=         0, nptmass=        10
+ Etot=-7.509E-13, Ekin= 7.024E-13, Etherm= 0.000E+00, Epot=-1.453E-12
+ Linm= 7.343E-23, Angm= 4.322E+01
+ Centre of Mass =  1.235E-10,  1.570E-09,  1.726E-11
+ density  (max)= 7.679E-18 (mean)= 0.000E+00 (max)= 1.527E+01 g/cm^3
+ Mgas =  0.000E+00
+ RMS Mach #= 0.000E+00
+
+
+ t =  0.43979E+09 dt =  2.593E+06 (dem contact)
+ t =  0.44239E+09 dt =  2.593E+06 (dem contact)
+ t =  0.44498E+09 dt =  2.593E+06 (dem contact)
+ t =  0.44757E+09 dt =  2.593E+06 (dem contact)
+ t =  0.45017E+09 dt =  2.593E+06 (dem contact)
+ t =  0.45276E+09 dt =  2.593E+06 (dem contact)
+ t =  0.45535E+09 dt =  2.593E+06 (dem contact)
+ t =  0.45795E+09 dt =  2.593E+06 (dem contact)
+ t =  0.46054E+09 dt =  2.593E+06 (dem contact)
+ t =  0.46313E+09 dt =  2.593E+06 (dem contact)
+ t =  0.46573E+09 dt =  2.593E+06 (dem contact)
+ t =  0.46832E+09 dt =  2.593E+06 (dem contact)
+ t =  0.47092E+09 dt =  2.593E+06 (dem contact)
+ t =  0.47351E+09 dt =  2.593E+06 (dem contact)
+ t =  0.47610E+09 dt =  2.593E+06 (dem contact)
+ t =  0.47870E+09 dt =  2.593E+06 (dem contact)
+ t =  0.48129E+09 dt =  2.593E+06 (dem contact)
+ t =  0.48388E+09 dt =  2.593E+06 (dem contact)
+ t =  0.48648E+09 dt =  2.593E+06 (dem contact)
+ t =  0.48907E+09 dt =  2.593E+06 (dem contact)
+ t =  0.49166E+09 dt =  2.593E+06 (dem contact)
+ t =  0.49426E+09 dt =  2.593E+06 (dem contact)
+ t =  0.49685E+09 dt =  2.593E+06 (dem contact)
+ t =  0.49944E+09 dt =  2.593E+06 (dem contact)
+ t =  0.50204E+09 dt =  2.593E+06 (dem contact)
+ t =  0.50463E+09 dt =  2.593E+06 (dem contact)
+ t =  0.50722E+09 dt =  2.593E+06 (dem contact)
+ t =  0.50982E+09 dt =  2.593E+06 (dem contact)
+ t =  0.51241E+09 dt =  2.593E+06 (dem contact)
+ t =  0.51500E+09 dt =  2.593E+06 (dem contact)
+ t =  0.51760E+09 dt =  2.593E+06 (dem contact)
+ t =  0.52019E+09 dt =  2.593E+06 (dem contact)
+ t =  0.52279E+09 dt =  2.593E+06 (dem contact)
+ t =  0.52538E+09 dt =  2.593E+06 (dem contact)
+ t =  0.52797E+09 dt =  2.593E+06 (dem contact)
+ t =  0.53057E+09 dt =  2.593E+06 (dem contact)
+ t =  0.53316E+09 dt =  2.593E+06 (dem contact)
+ t =  0.53575E+09 dt =  2.593E+06 (dem contact)
+ t =  0.53835E+09 dt =  2.593E+06 (dem contact)
+ t =  0.54094E+09 dt =  2.593E+06 (dem contact)
+ t =  0.54353E+09 dt =  2.593E+06 (dem contact)
+ t =  0.54613E+09 dt =  2.593E+06 (dem contact)
+ t =  0.54872E+09 dt =  2.593E+06 (dem contact)
+ t =  0.55131E+09 dt =  2.593E+06 (dem contact)
+ t =  0.55391E+09 dt =  2.593E+06 (dem contact)
+ t =  0.55650E+09 dt =  2.593E+06 (dem contact)
+ t =  0.55909E+09 dt =  2.593E+06 (dem contact)
+ t =  0.56169E+09 dt =  2.593E+06 (dem contact)
+ t =  0.56428E+09 dt =  2.593E+06 (dem contact)
+ t =  0.56687E+09 dt =  2.593E+06 (dem contact)
+ t =  0.56947E+09 dt =  2.593E+06 (dem contact)
+ t =  0.57206E+09 dt =  2.593E+06 (dem contact)
+ t =  0.57466E+09 dt =  2.593E+06 (dem contact)
+ t =  0.57725E+09 dt =  2.593E+06 (dem contact)
+ t =  0.57984E+09 dt =  2.593E+06 (dem contact)
+ t =  0.58244E+09 dt =  2.593E+06 (dem contact)
+ t =  0.58503E+09 dt =  2.593E+06 (dem contact)
+ t =  0.58762E+09 dt =  2.593E+06 (dem contact)
+ t =  0.59022E+09 dt =  2.593E+06 (dem contact)
+ t =  0.59281E+09 dt =  2.593E+06 (dem contact)
+ t =  0.59540E+09 dt =  2.593E+06 (dem contact)
+ t =  0.59800E+09 dt =  2.593E+06 (dem contact)
+ t =  0.60059E+09 dt =  2.593E+06 (dem contact)
+ t =  0.60318E+09 dt =  2.593E+06 (dem contact)
+ t =  0.60578E+09 dt =  2.593E+06 (dem contact)
+ t =  0.60837E+09 dt =  2.593E+06 (dem contact)
+ t =  0.61096E+09 dt =  2.593E+06 (dem contact)
+ t =  0.61356E+09 dt =  2.593E+06 (dem contact)
+ t =  0.61615E+09 dt =  2.593E+06 (dem contact)
+ t =  0.61874E+09 dt =  2.593E+06 (dem contact)
+ t =  0.62134E+09 dt =  2.593E+06 (dem contact)
+ t =  0.62393E+09 dt =  2.593E+06 (dem contact)
+ t =  0.62653E+09 dt =  2.593E+06 (dem contact)
+ t =  0.62912E+09 dt =  2.593E+06 (dem contact)
+ t =  0.63171E+09 dt =  2.593E+06 (dem contact)
+ t =  0.63431E+09 dt =  2.593E+06 (dem contact)
+ t =  0.63690E+09 dt =  2.593E+06 (dem contact)
+ t =  0.63949E+09 dt =  2.593E+06 (dem contact)
+ t =  0.64209E+09 dt =  2.593E+06 (dem contact)
+ t =  0.64468E+09 dt =  2.593E+06 (dem contact)
+ t =  0.64727E+09 dt =  2.593E+06 (dem contact)
+ t =  0.64987E+09 dt =  2.593E+06 (dem contact)
+ t =  0.65246E+09 dt =  2.593E+06 (dem contact)
+ t =  0.65505E+09 dt =  2.593E+06 (dem contact)
+ t =  0.65765E+09 dt =  2.593E+06 (dem contact)
+ t =  0.66024E+09 dt =  2.593E+06 (dem contact)
+ t =  0.66283E+09 dt =  2.593E+06 (dem contact)
+ t =  0.66543E+09 dt =  2.593E+06 (dem contact)
+ t =  0.66802E+09 dt =  2.593E+06 (dem contact)
+ t =  0.67061E+09 dt =  2.593E+06 (dem contact)
+ t =  0.67321E+09 dt =  2.593E+06 (dem contact)
+ t =  0.67580E+09 dt =  2.593E+06 (dem contact)
+ t =  0.67839E+09 dt =  2.593E+06 (dem contact)
+ t =  0.68099E+09 dt =  2.593E+06 (dem contact)
+ t =  0.68358E+09 dt =  2.593E+06 (dem contact)
+ t =  0.68618E+09 dt =  2.593E+06 (dem contact)
+ t =  0.68877E+09 dt =  2.593E+06 (dem contact)
+ t =  0.69136E+09 dt =  2.593E+06 (dem contact)
+ t =  0.69396E+09 dt =  2.593E+06 (dem contact)
+ t =  0.69655E+09 dt =  2.593E+06 (dem contact)
+ t =  0.69914E+09 dt =  2.593E+06 (dem contact)
+ t =  0.70174E+09 dt =  2.593E+06 (dem contact)
+ t =  0.70433E+09 dt =  2.593E+06 (dem contact)
+ t =  0.70692E+09 dt =  2.593E+06 (dem contact)
+ t =  0.70952E+09 dt =  2.593E+06 (dem contact)
+ t =  0.71211E+09 dt =  2.593E+06 (dem contact)
+ t =  0.71470E+09 dt =  2.593E+06 (dem contact)
+ t =  0.71730E+09 dt =  2.593E+06 (dem contact)
+ t =  0.71989E+09 dt =  2.593E+06 (dem contact)
+ t =  0.72248E+09 dt =  2.593E+06 (dem contact)
+ t =  0.72508E+09 dt =  2.593E+06 (dem contact)
+ t =  0.72767E+09 dt =  2.593E+06 (dem contact)
+ t =  0.73026E+09 dt =  2.593E+06 (dem contact)
+ t =  0.73286E+09 dt =  2.593E+06 (dem contact)
+ t =  0.73545E+09 dt =  2.593E+06 (dem contact)
+ t =  0.73805E+09 dt =  2.593E+06 (dem contact)
+ t =  0.74064E+09 dt =  2.593E+06 (dem contact)
+ t =  0.74323E+09 dt =  2.593E+06 (dem contact)
+ t =  0.74583E+09 dt =  2.593E+06 (dem contact)
+ t =  0.74842E+09 dt =  2.593E+06 (dem contact)
+ t =  0.75101E+09 dt =  2.593E+06 (dem contact)
+ t =  0.75361E+09 dt =  2.593E+06 (dem contact)
+ t =  0.75620E+09 dt =  2.593E+06 (dem contact)
+ t =  0.75879E+09 dt =  2.593E+06 (dem contact)
+ t =  0.76139E+09 dt =  2.593E+06 (dem contact)
+ t =  0.76398E+09 dt =  2.593E+06 (dem contact)
+ t =  0.76657E+09 dt =  2.593E+06 (dem contact)
+ t =  0.76917E+09 dt =  2.593E+06 (dem contact)
+ t =  0.77176E+09 dt =  2.593E+06 (dem contact)
+ t =  0.77435E+09 dt =  2.593E+06 (dem contact)
+ t =  0.77695E+09 dt =  2.593E+06 (dem contact)
+ t =  0.77954E+09 dt =  2.593E+06 (dem contact)
+ t =  0.78213E+09 dt =  2.593E+06 (dem contact)
+ t =  0.78473E+09 dt =  2.593E+06 (dem contact)
+ t =  0.78732E+09 dt =  2.593E+06 (dem contact)
+ t =  0.78992E+09 dt =  2.593E+06 (dem contact)
+ t =  0.79251E+09 dt =  2.593E+06 (dem contact)
+ t =  0.79510E+09 dt =  2.593E+06 (dem contact)
+ t =  0.79770E+09 dt =  2.593E+06 (dem contact)
+ t =  0.80029E+09 dt =  2.593E+06 (dem contact)
+ t =  0.80288E+09 dt =  2.593E+06 (dem contact)
+ t =  0.80548E+09 dt =  2.593E+06 (dem contact)
+ t =  0.80807E+09 dt =  2.593E+06 (dem contact)
+ t =  0.81066E+09 dt =  2.593E+06 (dem contact)
+ t =  0.81326E+09 dt =  2.593E+06 (dem contact)
+ t =  0.81585E+09 dt =  2.593E+06 (dem contact)
+ t =  0.81844E+09 dt =  2.593E+06 (dem contact)
+ t =  0.82104E+09 dt =  2.593E+06 (dem contact)
+ t =  0.82363E+09 dt =  2.593E+06 (dem contact)
+ t =  0.82622E+09 dt =  2.593E+06 (dem contact)
+ t =  0.82882E+09 dt =  2.593E+06 (dem contact)
+ t =  0.83141E+09 dt =  2.593E+06 (dem contact)
+ t =  0.83400E+09 dt =  2.593E+06 (dem contact)
+ t =  0.83660E+09 dt =  2.593E+06 (dem contact)
+ t =  0.83919E+09 dt =  2.593E+06 (dem contact)
+ t =  0.84178E+09 dt =  2.593E+06 (dem contact)
+ t =  0.84438E+09 dt =  2.593E+06 (dem contact)
+ t =  0.84697E+09 dt =  2.593E+06 (dem contact)
+ t =  0.84957E+09 dt =  2.593E+06 (dem contact)
+ t =  0.85216E+09 dt =  2.593E+06 (dem contact)
+ t =  0.85475E+09 dt =  2.593E+06 (dem contact)
+ t =  0.85735E+09 dt =  2.593E+06 (dem contact)
+ t =  0.85994E+09 dt =  2.593E+06 (dem contact)
+ t =  0.86253E+09 dt =  2.593E+06 (dem contact)
+ t =  0.86513E+09 dt =  2.593E+06 (dem contact)
+ t =  0.86772E+09 dt =  2.593E+06 (dem contact)
+ t =  0.87031E+09 dt =  2.593E+06 (dem contact)
+ t =  0.87291E+09 dt =  1.493E+06 (dtprint)
+ t =  0.87440E+09 dt =  2.593E+06 (dem contact)
+
+
+-------->   TIME =   0.8744E+09: full dump written to file sobol_00002   <--------
+
+
+ input file sobol.in written successfully
+ Since code start: 338 timesteps, wall: 0.75s cpu: 0.48s cpu/wall: 0.64
+ Since last dump : 169 timesteps, wall: 0.25s cpu: 0.15s cpu/wall: 0.62
+
+                           wall         cpu  cpu/wall  load bal      frac
+ ├─step             :     0.25s       0.15s      0.61   100.00%   100.00%
+ │ ├─force          :     0.25s       0.13s      0.51   100.00%   100.00%
+ │ │ ├─local        :     0.25s       0.13s      0.51   100.00%   100.00%
+------------------------------------------------------------------------------
+|** Number of steps since last summary:                    169             **|
+|** Wall time since last summary:                        0.250 seconds     **|
+------------------------------------------------------------------------------
+|* ptmass: particles within hacc that failed to accrete                     *|
+| # sinks | # steps  | max # fails| total #                                  |
+|         | w/ fails | per step   | fails                                    |
+|       10|       169|         307|    51883                                 |
+------------------------------------------------------------------------------
+ npart=       307, n_alive=       307, n_dead_or_accreted=         0, nptmass=        10
+ Etot=-7.509E-13, Ekin= 7.024E-13, Etherm= 0.000E+00, Epot=-1.453E-12
+ Linm= 1.685E-23, Angm= 4.322E+01
+ Centre of Mass =  1.526E-10,  2.848E-09,  2.906E-11
+ density  (max)= 7.679E-18 (mean)= 0.000E+00 (max)= 1.527E+01 g/cm^3
+ Mgas =  0.000E+00
+ RMS Mach #= 0.000E+00
+
+
+ t =  0.87699E+09 dt =  2.593E+06 (dem contact)
+ t =  0.87959E+09 dt =  2.593E+06 (dem contact)
+ t =  0.88218E+09 dt =  2.593E+06 (dem contact)
+ t =  0.88477E+09 dt =  2.593E+06 (dem contact)
+ t =  0.88737E+09 dt =  2.593E+06 (dem contact)
+ t =  0.88996E+09 dt =  2.593E+06 (dem contact)
+ t =  0.89255E+09 dt =  2.593E+06 (dem contact)
+ t =  0.89515E+09 dt =  2.593E+06 (dem contact)
+ t =  0.89774E+09 dt =  2.593E+06 (dem contact)
+ t =  0.90033E+09 dt =  2.593E+06 (dem contact)
+ t =  0.90293E+09 dt =  2.593E+06 (dem contact)
+ t =  0.90552E+09 dt =  2.593E+06 (dem contact)
+ t =  0.90812E+09 dt =  2.593E+06 (dem contact)
+ t =  0.91071E+09 dt =  2.593E+06 (dem contact)
+ t =  0.91330E+09 dt =  2.593E+06 (dem contact)
+ t =  0.91590E+09 dt =  2.593E+06 (dem contact)
+ t =  0.91849E+09 dt =  2.593E+06 (dem contact)
+ t =  0.92108E+09 dt =  2.593E+06 (dem contact)
+ t =  0.92368E+09 dt =  2.593E+06 (dem contact)
+ t =  0.92627E+09 dt =  2.593E+06 (dem contact)
+ t =  0.92886E+09 dt =  2.593E+06 (dem contact)
+ t =  0.93146E+09 dt =  2.593E+06 (dem contact)
+ t =  0.93405E+09 dt =  2.593E+06 (dem contact)
+ t =  0.93664E+09 dt =  2.593E+06 (dem contact)
+ t =  0.93924E+09 dt =  2.593E+06 (dem contact)
+ t =  0.94183E+09 dt =  2.593E+06 (dem contact)
+ t =  0.94442E+09 dt =  2.593E+06 (dem contact)
+ t =  0.94702E+09 dt =  2.593E+06 (dem contact)
+ t =  0.94961E+09 dt =  2.593E+06 (dem contact)
+ t =  0.95220E+09 dt =  2.593E+06 (dem contact)
+ t =  0.95480E+09 dt =  2.593E+06 (dem contact)
+ t =  0.95739E+09 dt =  2.593E+06 (dem contact)
+ t =  0.95999E+09 dt =  2.593E+06 (dem contact)
+ t =  0.96258E+09 dt =  2.593E+06 (dem contact)
+ t =  0.96517E+09 dt =  2.593E+06 (dem contact)
+ t =  0.96777E+09 dt =  2.593E+06 (dem contact)
+ t =  0.97036E+09 dt =  2.593E+06 (dem contact)
+ t =  0.97295E+09 dt =  2.593E+06 (dem contact)
+ t =  0.97555E+09 dt =  2.593E+06 (dem contact)
+ t =  0.97814E+09 dt =  2.593E+06 (dem contact)
+ t =  0.98073E+09 dt =  2.593E+06 (dem contact)
+ t =  0.98333E+09 dt =  2.593E+06 (dem contact)
+ t =  0.98592E+09 dt =  2.593E+06 (dem contact)
+ t =  0.98851E+09 dt =  2.593E+06 (dem contact)
+ t =  0.99111E+09 dt =  2.593E+06 (dem contact)
+ t =  0.99370E+09 dt =  2.593E+06 (dem contact)
+ t =  0.99629E+09 dt =  2.593E+06 (dem contact)
+ t =  0.99889E+09 dt =  2.593E+06 (dem contact)
+ t =  0.10015E+10 dt =  2.593E+06 (dem contact)
+ t =  0.10041E+10 dt =  2.593E+06 (dem contact)
+ t =  0.10067E+10 dt =  2.593E+06 (dem contact)
+ t =  0.10093E+10 dt =  2.593E+06 (dem contact)
+ t =  0.10119E+10 dt =  2.593E+06 (dem contact)
+ t =  0.10144E+10 dt =  2.593E+06 (dem contact)
+ t =  0.10170E+10 dt =  2.593E+06 (dem contact)
+ t =  0.10196E+10 dt =  2.593E+06 (dem contact)
+ t =  0.10222E+10 dt =  2.593E+06 (dem contact)
+ t =  0.10248E+10 dt =  2.593E+06 (dem contact)
+ t =  0.10274E+10 dt =  2.593E+06 (dem contact)
+ t =  0.10300E+10 dt =  2.593E+06 (dem contact)
+ t =  0.10326E+10 dt =  2.593E+06 (dem contact)
+ t =  0.10352E+10 dt =  2.593E+06 (dem contact)
+ t =  0.10378E+10 dt =  2.593E+06 (dem contact)
+ t =  0.10404E+10 dt =  2.593E+06 (dem contact)
+ t =  0.10430E+10 dt =  2.593E+06 (dem contact)
+ t =  0.10456E+10 dt =  2.593E+06 (dem contact)
+ t =  0.10482E+10 dt =  2.593E+06 (dem contact)
+ t =  0.10508E+10 dt =  2.593E+06 (dem contact)
+ t =  0.10534E+10 dt =  2.593E+06 (dem contact)
+ t =  0.10559E+10 dt =  2.593E+06 (dem contact)
+ t =  0.10585E+10 dt =  2.593E+06 (dem contact)
+ t =  0.10611E+10 dt =  2.593E+06 (dem contact)
+ t =  0.10637E+10 dt =  2.593E+06 (dem contact)
+ t =  0.10663E+10 dt =  2.593E+06 (dem contact)
+ t =  0.10689E+10 dt =  2.593E+06 (dem contact)
+ t =  0.10715E+10 dt =  2.593E+06 (dem contact)
+ t =  0.10741E+10 dt =  2.593E+06 (dem contact)
+ t =  0.10767E+10 dt =  2.593E+06 (dem contact)
+ t =  0.10793E+10 dt =  2.593E+06 (dem contact)
+ t =  0.10819E+10 dt =  2.593E+06 (dem contact)
+ t =  0.10845E+10 dt =  2.593E+06 (dem contact)
+ t =  0.10871E+10 dt =  2.593E+06 (dem contact)
+ t =  0.10897E+10 dt =  2.593E+06 (dem contact)
+ t =  0.10923E+10 dt =  2.593E+06 (dem contact)
+ t =  0.10948E+10 dt =  2.593E+06 (dem contact)
+ t =  0.10974E+10 dt =  2.593E+06 (dem contact)
+ t =  0.11000E+10 dt =  2.593E+06 (dem contact)
+ t =  0.11026E+10 dt =  2.593E+06 (dem contact)
+ t =  0.11052E+10 dt =  2.593E+06 (dem contact)
+ t =  0.11078E+10 dt =  2.593E+06 (dem contact)
+ t =  0.11104E+10 dt =  2.593E+06 (dem contact)
+ t =  0.11130E+10 dt =  2.593E+06 (dem contact)
+ t =  0.11156E+10 dt =  2.593E+06 (dem contact)
+ t =  0.11182E+10 dt =  2.593E+06 (dem contact)
+ t =  0.11208E+10 dt =  2.593E+06 (dem contact)
+ t =  0.11234E+10 dt =  2.593E+06 (dem contact)
+ t =  0.11260E+10 dt =  2.593E+06 (dem contact)
+ t =  0.11286E+10 dt =  2.593E+06 (dem contact)
+ t =  0.11312E+10 dt =  2.593E+06 (dem contact)
+ t =  0.11337E+10 dt =  2.593E+06 (dem contact)
+ t =  0.11363E+10 dt =  2.593E+06 (dem contact)
+ t =  0.11389E+10 dt =  2.593E+06 (dem contact)
+ t =  0.11415E+10 dt =  2.593E+06 (dem contact)
+ t =  0.11441E+10 dt =  2.593E+06 (dem contact)
+ t =  0.11467E+10 dt =  2.593E+06 (dem contact)
+ t =  0.11493E+10 dt =  2.593E+06 (dem contact)
+ t =  0.11519E+10 dt =  2.593E+06 (dem contact)
+ t =  0.11545E+10 dt =  2.593E+06 (dem contact)
+ t =  0.11571E+10 dt =  2.593E+06 (dem contact)
+ t =  0.11597E+10 dt =  2.593E+06 (dem contact)
+ t =  0.11623E+10 dt =  2.593E+06 (dem contact)
+ t =  0.11649E+10 dt =  2.593E+06 (dem contact)
+ t =  0.11675E+10 dt =  2.593E+06 (dem contact)
+ t =  0.11701E+10 dt =  2.593E+06 (dem contact)
+ t =  0.11727E+10 dt =  2.593E+06 (dem contact)
+ t =  0.11752E+10 dt =  2.593E+06 (dem contact)
+ t =  0.11778E+10 dt =  2.593E+06 (dem contact)
+ t =  0.11804E+10 dt =  2.593E+06 (dem contact)
+ t =  0.11830E+10 dt =  2.593E+06 (dem contact)
+ t =  0.11856E+10 dt =  2.593E+06 (dem contact)
+ t =  0.11882E+10 dt =  2.593E+06 (dem contact)
+ t =  0.11908E+10 dt =  2.593E+06 (dem contact)
+ t =  0.11934E+10 dt =  2.593E+06 (dem contact)
+ t =  0.11960E+10 dt =  2.593E+06 (dem contact)
+ t =  0.11986E+10 dt =  2.593E+06 (dem contact)
+ t =  0.12012E+10 dt =  2.593E+06 (dem contact)
+ t =  0.12038E+10 dt =  2.593E+06 (dem contact)
+ t =  0.12064E+10 dt =  2.593E+06 (dem contact)
+ t =  0.12090E+10 dt =  2.593E+06 (dem contact)
+ t =  0.12116E+10 dt =  2.593E+06 (dem contact)
+ t =  0.12141E+10 dt =  2.593E+06 (dem contact)
+ t =  0.12167E+10 dt =  2.593E+06 (dem contact)
+ t =  0.12193E+10 dt =  2.593E+06 (dem contact)
+ t =  0.12219E+10 dt =  2.593E+06 (dem contact)
+ t =  0.12245E+10 dt =  2.593E+06 (dem contact)
+ t =  0.12271E+10 dt =  2.593E+06 (dem contact)
+ t =  0.12297E+10 dt =  2.593E+06 (dem contact)
+ t =  0.12323E+10 dt =  2.593E+06 (dem contact)
+ t =  0.12349E+10 dt =  2.593E+06 (dem contact)
+ t =  0.12375E+10 dt =  2.593E+06 (dem contact)
+ t =  0.12401E+10 dt =  2.593E+06 (dem contact)
+ t =  0.12427E+10 dt =  2.593E+06 (dem contact)
+ t =  0.12453E+10 dt =  2.593E+06 (dem contact)
+ t =  0.12479E+10 dt =  2.593E+06 (dem contact)
+ t =  0.12505E+10 dt =  2.593E+06 (dem contact)
+ t =  0.12531E+10 dt =  2.593E+06 (dem contact)
+ t =  0.12556E+10 dt =  2.593E+06 (dem contact)
+ t =  0.12582E+10 dt =  2.593E+06 (dem contact)
+ t =  0.12608E+10 dt =  2.593E+06 (dem contact)
+ t =  0.12634E+10 dt =  2.593E+06 (dem contact)
+ t =  0.12660E+10 dt =  2.593E+06 (dem contact)
+ t =  0.12686E+10 dt =  2.593E+06 (dem contact)
+ t =  0.12712E+10 dt =  2.593E+06 (dem contact)
+ t =  0.12738E+10 dt =  2.593E+06 (dem contact)
+ t =  0.12764E+10 dt =  2.593E+06 (dem contact)
+ t =  0.12790E+10 dt =  2.593E+06 (dem contact)
+ t =  0.12816E+10 dt =  2.593E+06 (dem contact)
+ t =  0.12842E+10 dt =  2.593E+06 (dem contact)
+ t =  0.12868E+10 dt =  2.593E+06 (dem contact)
+ t =  0.12894E+10 dt =  2.593E+06 (dem contact)
+ t =  0.12920E+10 dt =  2.593E+06 (dem contact)
+ t =  0.12945E+10 dt =  2.593E+06 (dem contact)
+ t =  0.12971E+10 dt =  2.593E+06 (dem contact)
+ t =  0.12997E+10 dt =  2.593E+06 (dem contact)
+ t =  0.13023E+10 dt =  2.593E+06 (dem contact)
+ t =  0.13049E+10 dt =  2.593E+06 (dem contact)
+ t =  0.13075E+10 dt =  2.593E+06 (dem contact)
+ t =  0.13101E+10 dt =  8.931E+05 (dtprint)
+ t =  0.13110E+10 dt =  2.593E+06 (dem contact)
+
+
+-------->   TIME =   0.1311E+10: full dump written to file sobol_00003   <--------
+
+
+ input file sobol.in written successfully
+ Since code start: 507 timesteps, wall: 0.50s cpu: 0.62s cpu/wall: 1.2
+ Since last dump : 169 timesteps, wall: 0.00E+00s cpu: 0.14s cpu/wall: 1.16E+06
+
+                           wall         cpu  cpu/wall  load bal      frac
+ WARNING: 100.00% of time was in unusual routines (not dens/force/tree)
+------------------------------------------------------------------------------
+|** Number of steps since last summary:                    169             **|
+|** Wall time since last summary:                        0.000 seconds     **|
+------------------------------------------------------------------------------
+|* ptmass: particles within hacc that failed to accrete                     *|
+| # sinks | # steps  | max # fails| total #                                  |
+|         | w/ fails | per step   | fails                                    |
+|       10|       169|         307|    51883                                 |
+------------------------------------------------------------------------------
+ npart=       307, n_alive=       307, n_dead_or_accreted=         0, nptmass=        10
+ Etot=-7.509E-13, Ekin= 7.024E-13, Etherm= 0.000E+00, Epot=-1.453E-12
+ Linm= 4.343E-23, Angm= 4.322E+01
+ Centre of Mass =  1.017E-10,  3.226E-09,  2.271E-11
+ density  (max)= 7.679E-18 (mean)= 0.000E+00 (max)= 1.527E+01 g/cm^3
+ Mgas =  0.000E+00
+ RMS Mach #= 0.000E+00
+
+
+
+>__________________________________________________________________________<
+
+ Run finished on 26/09/2026 at 14:10:11.8
+
+ Total wall time:   0.50 s
+
+       |   |           |               | |   _|       | |         
+       __| __ \   _` | __|  __|   _` | | |  |    _ \  | |  /  __| 
+       |   | | | (   | |  \__ \  (   | | |  __| (   | |   < \__ \ 
+      \__|_| |_|\__,_|\__|____/ \__,_|_|_| _|  \___/ _|_|\_\____/ 
+
+>__________________________________________________________________________<

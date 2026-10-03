@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# PHANTOM binaries and build artefacts
+phantom
+phantomsetup
+phantommoddump
+phantomflyby
+phantomanalysis
+bin/
+tq
+*.o
+*.mod
+phantom_version
+
+# Simulation run outputs — large, reproducible, never commit
+sobol_mass_runs/
+*.dump
+*.ev
+!tests/fixtures/particle_np300/*.ev
+*.tmp
+*.dmp
+
+# PHANTOM scratch / queue files
+sobol_00000.tmp
+tests/fixtures/sink_np300/
+
+# Local-only: Claude worktrees, binary backups, campaign staging dirs
+.claude/
+*.bak-*
+staging_*/

@@ -1,0 +1,344 @@
+Sobol Runner Archive — sobol/sobol_mass_runs
+Generated: 2026-05-31
+Project: Apophis 2029 Flyby — Honours Thesis (Maxwell Boyle, Monash SCI4501)
+Supervisor: Daniel
+
+==============================================================================
+FEATURE PROGRESSION HISTORY
+==============================================================================
+
+PHASE 1 — Point-mass baseline, velocity/position scaling (May 1)
+  First working batch: 3 runs varying only scale_vel (sv0.9-1.1)
+  Confirmed runner architecture works: Sobol samples map to .setup patches correctly
+  Bug: run paths used old prefix /home/mboyle/sobol/ before repo moved to Honours/
+  Result: scale_vel has strong effect on CA (36k km to 772k km across 3 samples)
+
+PHASE 2 — Scale_pos added as second dimension (May 1)
+  50-run Sobol (n50_s42_sv_sp): first multi-dimensional sensitivity run
+  Also launched Saltelli-64 with sv only (salt64_s42_sv0.9-1.1, 192 runs)
+  Bug: scale_pos dimension wiring broke runner when mass was also added
+    → 3 incomplete attempts before fixed (182643, 182729, 183920 — all no CSV)
+
+PHASE 3 — Mass (m_apophis_in) added as third dimension (May 1-2)
+  Fixed mass dimension: 50-run and 20-run batches completed successfully
+  n50 batch (211924) is the canonical 3D point-mass SA result
+  Note: n20 (133244) has identical parameter space, 20 samples — kept as cross-check
+
+PHASE 4 — Saltelli variance-based indices, full SA (May 6)
+  Multiple incomplete attempts at Saltelli-256 (4 batches) and Saltelli-64 (5 batches)
+  Bug identified: runner memory handling caused crashes under high run counts
+  Bug: incomplete Saltelli run (150531, 198/320 runs, 934 MB) produced no CSV
+  Final complete Saltelli-64 run (151708, 320 runs) succeeded — primary SA result
+
+PHASE 5 — DEM (discrete element) particle count testing (May 14)
+  Added use_dem=T and np_apophis as varying dimension
+  Bug: phantomsetup binary not found at bin/phantomsetup — runner looked in wrong location
+    → fixed by adding bin/ symlinks in sobol/ (154417 had this error)
+  Bug: phantom (not phantomsetup) crashed when DEM sinks exceeded MAXPTMASS default
+    → MAXPTMASS=2000 added to sobol/Makefile and binaries rebuilt
+    → 154653 and 161542 both failed (Command failed (1): phantom) before fix
+  First successful DEM run: 161939 (3 runs, np=41/50/57, CA~38,354 km)
+    This was the first confirmation that DEM sinks produce a valid close approach
+
+PHASE 6 — DEM particle count convergence study (May 23)
+  175041: np=100/250/500, all 3 failed — maxp still wrong (pre-rebuild)
+  175328: dry run (prepared_only) to verify fix before re-running
+  175535: np=100/250/500 all succeeded after binary rebuild
+    → CA converges: 100→38,366 km, 250→38,357 km, 500→38,357 km
+    → Justification for using np=500 as the production particle count
+
+PHASE 7 — Spin orientation sensitivity (May 26)
+  Added apophis_spin_period, apophis_spin_obliquity, apophis_spin_azimuth as parameters
+  111819: 1-run aborted (no CSV) — initial test
+  Bug: stale phantomsetup binary lacked apply_apophis_spin (added 2026-05-24)
+    → 112133 and 115314 produced CA=38,167 km regardless of spin (spin silently ignored)
+    → 131043 also stale binary (same CA=38,167 for all runs)
+    → Diagnosed via: strings sobol/phantomsetup | grep -i apophis_spin (empty = stale)
+    → Fixed by: cd sobol && make setup && make (full rebuild from current source)
+  132150: 8 runs, all failed after rebuild — configuration issue
+  132401: 8 runs, all OK after fixing configuration (CA=37,998 km, correct result)
+    → Confirmed spin orientation (20-35 hr, 0-360° obliquity/azimuth) has no effect on CA
+
+PHASE 8 — Flyby cohesion null + Earth-present spin sweep (May 31)
+  Runner: incremental CSV on --jobs>1; --no-cleanup flag; auto-cleanup default
+  Laptop tuning: i7-12650H WSL2 → --jobs 2 recommended (not 4)
+  flyby_kc_v3 (153147): Earth, spin=30 hr fixed, kc 0-1e8, n=16, np=500
+    → S_kc ≈ 0: all CA≈37998 km, disp≈1.025, unbound=0
+  flyby_spin_earth (172510): Earth, spin 2-4 hr, kc=0, n=16, ~53 min (--jobs 2)
+    → disp rises below ~2.5 hr (max 1.24 at 2.07 hr); unbound=0 all runs
+    → Priority 2 still needed: apophis_only=T, same tmax=4.5d, same spin range
+  Thesis context documented in CLAUDE.md § Thesis research context
+
+==============================================================================
+KEPT BATCHES (still on disk)
+==============================================================================
+
+--- sobol_20260501_211924_n50_s42_m1e10-1e11_sv0.9-1.1_sp0.9-1.1  [170 MB] ---
+Purpose: Primary 3-parameter point-mass Sobol sensitivity analysis
+Params: mass (1e10-1e11 kg), scale_vel (0.9-1.1), scale_pos (0.9-1.1), n=50 runs
+CA range: 137,966 – 14,838,993 km
+All 50 runs: ok
+Note: paths point to Honours/sobol/sobol_mass_runs (correct)
+
+--- sobol_20260506_151708_salt64_s42_m1e10-1e11_sv0.9-1.1_sp0.9-1.1  [1.5 GB] ---
+Purpose: Primary Saltelli variance-based Sobol index calculation (3 parameters)
+Params: mass (1e10-1e11 kg), scale_vel (0.9-1.1), scale_pos (0.9-1.1)
+Saltelli n=64 → 320 evaluations total (64*(2*3+2))
+All 320 runs: ok
+CA range: 137,966 – 14,838,993 km (same parameter space as 211924, much more structure)
+Note: The repeating CA values in runs 1-2 (both 9,242,969 km) are expected Saltelli design behavior
+
+--- sobol_20260514_161939_n3_s42_np24-64_demT  [42 MB] ---
+Purpose: First successful DEM run (development milestone), np_apophis varied
+Params: np_apophis (41, 50, 57), use_dem=T
+All 3 runs: ok, CA = 38,354.7 km (all identical — np doesn't change CA at this distance)
+Note: Preceded by two failed batches (154417: bin path error; 154653: MAXPTMASS too small)
+  This batch was the first to show DEM with np<100 works with the rebuilt binary
+
+--- sobol_20260523_175535_n8_s42  [175 MB] ---
+Purpose: DEM particle count convergence study (justifies np=500 choice)
+Params: np_apophis (100, 250, 500), use_dem=T
+All 3 runs: ok
+  np=100: CA = 38,366.4 km   (9 km above np=500 value)
+  np=250: CA = 38,357.1 km   (0.2 km above np=500 value)
+  np=500: CA = 38,357.3 km   ← chosen production resolution
+Conclusion: np converges by 250; np=500 adds negligible change (<0.3 km)
+
+--- sobol_20260530_155434_spin_kc0_12hr  [on disk under Honours/sobol_mass_runs/] ---
+Purpose: Intrinsic spin disruption threshold, no Earth, kc=0, tmax=12 hr
+Params: apophis_spin_period ~0.66-5 hr (Sobol), np=500, use_dem=T
+Key: catastrophic disruption below ~2 hr spin; mild spreading ~2-3 hr
+Note: tmax=12 hr — NOT matched to 4.5 day flyby batches; use for threshold only
+
+--- sobol_20260530_165003_spin_kc1e7_12hr  [on disk] ---
+Purpose: Same as spin_kc0_12hr but kc~1e7 — cohesion shifts threshold slightly
+
+--- sobol_20260531_153147_flyby_kc_v3  [on disk] ---
+Purpose: Flyby cohesion sensitivity at REAL Apophis spin (~30 hr)
+Params: kc 0-1e8 (16 runs), Earth present, np=500, ~80 min (--jobs 1)
+All 16 ok: CA≈37998 km, disp≈1.025, unbound=0 → S_kc ≈ 0
+
+--- sobol_20260531_172510_flyby_spin_earth  [on disk] ---
+Purpose: Earth tidal effect on near-threshold spin (thesis Priority 1)
+Params: spin 2-4 hr (16 runs), kc=0, Earth, tmax=4.5d, np=500, ~53 min (--jobs 2)
+All 16 ok: unbound=0; disp 1.02-1.24 (trend vs spin)
+Next: Priority 2 control (apophis_only=T, same spins, 4.5d)
+
+==============================================================================
+DELETED BATCHES — FULL RESULTS ARCHIVED BELOW
+==============================================================================
+
+--- sobol_20260501_152604_n3_s42_sv0.9-1.1  [11 MB, DELETED] ---
+Reason: 3-run pilot, old paths (/home/mboyle/sobol/...), superseded by 211924
+Status: 3/3 ok
+run_id,scale_vel,closest_approach_km,closest_approach_au
+1,0.959660176793,398971.784221,0.00266696165095
+2,0.909660176793,771679.457207,0.00515835856217
+3,1.00966017679,36047.5810859,0.000240963196316
+
+--- sobol_20260501_153356_n3_s42_sv0.9-1.1  [11 MB, DELETED] ---
+Reason: Duplicate of 152604 (identical results, re-run with same parameters), old paths
+Status: 3/3 ok (identical to 152604)
+
+--- sobol_20260501_155655_n50_s42_sv0.9-1.1_sp0.9-1.1  [170 MB, DELETED] ---
+Reason: sv+sp only (no mass), 50 runs, old paths — superseded by 211924 (adds mass)
+Status: 50/50 ok, CA range: 295,384 – 15,157,689 km
+Note: old paths /home/mboyle/sobol/... (runner ran before repo moved to Honours/)
+
+--- sobol_20260501_164728_salt64_s42_sv0.9-1.1  [654 MB, DELETED] ---
+Reason: Saltelli with scale_vel ONLY (1 parameter, 192 runs) — superseded by 151708 (3 param)
+Status: 192/192 ok
+Parameters: scale_vel 0.9-1.1 only. Old paths /home/mboyle/sobol/...
+CA range: 165,315 – 809,968 km (narrower than 3D SA, only vel variation)
+First/last rows:
+  run_1: sv=0.9862, CA=165,315 km
+  run_192: sv=0.9082, CA=781,098 km
+
+--- sobol_20260501_182643_n50_s42_m1e10-1e11_sv0.9-1.1_sp0.9-1.1  [136 KB, DELETED] ---
+Reason: 8 runs, no CSV — crashed during mass dimension integration bug (May 1 evening)
+
+--- sobol_20260501_182729_n50_s42_m1e10-1e11_sv0.9-1.1_sp0.9-1.1  [200 KB, DELETED] ---
+Reason: 4 runs, no CSV — same bug, second attempt
+
+--- sobol_20260501_183920_n50_s42_m1e10-1e11_sv0.9-1.1_sp0.9-1.1  [38 MB, DELETED] ---
+Reason: 14 runs, no CSV — same bug, more progress before crash
+
+--- sobol_20260501_212821_n3_s42_m1e10-1e11_sv0.9-1.1  [60 KB, DELETED] ---
+Reason: 3 runs all prepared_only (dry run mode left on), no simulation executed
+
+--- sobol_20260502_133244_n20_s42_m1e10-1e11_sv0.9-1.1_sp0.9-1.1  [68 MB, DELETED] ---
+Reason: 20-run mass+sv+sp — same parameters as 211924 (50-run), fewer samples
+Status: 20/20 ok, CA range: 137,966 – 14,838,993 km (same space as 211924)
+Note: 211924 is strictly better (50 runs, same space) — 133244 results redundant
+
+--- sobol_20260506_141134_salt512_s42_..._dem_ao  [1.7 MB, DELETED] ---
+Reason: 4 runs, no CSV — Saltelli-512 DEM+apophis_only attempt; failed (MAXPTMASS not yet fixed)
+Bug: DEM sinks became dust (MAXPTMASS default too small); phantom aborted
+
+--- sobol_20260506_141359_salt256_s42_...  [2.8 MB, DELETED] ---
+Reason: 6 runs, no CSV — Saltelli-256 early attempt; crashed
+
+--- sobol_20260506_142230_salt256_s42_...  [11 MB, DELETED] ---
+Reason: 19 runs, no CSV — Saltelli-256; runner memory issue
+
+--- sobol_20260506_143640_salt256_s42_...  [46 MB, DELETED] ---
+Reason: 17 runs, no CSV — Saltelli-256; runner crashed again
+
+--- sobol_20260506_143820_salt256_s42_...  [27 MB, DELETED] ---
+Reason: 9 runs, no CSV — Saltelli-256; incomplete
+
+--- sobol_20260506_145253_salt64_s42_...  [18 MB, DELETED] ---
+Reason: 12 runs, no CSV — Saltelli-64 attempt; crashed before completion
+
+--- sobol_20260506_145553_salt64_s42_...  [12 MB, DELETED] ---
+Reason: 8 runs, no CSV — Saltelli-64; crashed
+
+--- sobol_20260506_150151_salt64_s42_...  [12 MB, DELETED] ---
+Reason: 8 runs, no CSV — Saltelli-64; crashed
+
+--- sobol_20260506_150238_salt64_s42_...  [12 MB, DELETED] ---
+Reason: 8 runs, no CSV — Saltelli-64; crashed
+
+--- sobol_20260506_150515_salt64_s42_...  [8.8 MB, DELETED] ---
+Reason: 6 runs, no CSV — Saltelli-64; crashed
+
+--- sobol_20260506_150531_salt64_s42_m1e10-1e11_sv0.9-1.1_sp0.9-1.1  [934 MB, DELETED] ---
+Reason: 198 runs, no CSV — incomplete Saltelli-64 (198/320 runs before crash)
+Directly superseded by 151708 (complete, 320/320 runs)
+
+--- sobol_20260514_141749_np20  [28 KB, DELETED] ---
+Reason: prepared_only — dry run for np=20, binary path error (bin/phantomsetup not found)
+Bug discovered: runner looked for phantomsetup at bin/ relative path before symlinks were created
+
+--- sobol_20260514_141750_np30  [28 KB, DELETED] ---
+Reason: prepared_only — same binary path error
+
+--- sobol_20260514_141751_np64  [28 KB, DELETED] ---
+Reason: prepared_only — same binary path error
+
+--- sobol_20260514_154417_n8_s42_np20-64  [140 KB, DELETED] ---
+Reason: 8 runs all failed — [Errno 2] No such file or directory: 'bin/phantomsetup'
+Bug: symlinks in sobol/bin/ not yet created at this point
+
+--- sobol_20260514_154653_n8_s42_np20-64  [1.8 MB, DELETED] ---
+Reason: 8 runs all failed — Command failed (1): phantom sobol.in
+Bug: phantomsetup ran OK but phantom itself crashed; MAXPTMASS too small for DEM
+  DEM sinks silently became dust particles → phantom crashed with "nlive=0"
+  Fix came in PHASE 5 milestone (161939): rebuilt with MAXPTMASS=2000
+
+--- sobol_20260514_161542_n3_s42_np24-64  [652 KB, DELETED] ---
+Reason: 3 runs all failed — Command failed (1): phantom sobol.in
+Same MAXPTMASS issue as 154653, but without use_dem=T flag (run with np>1 but DEM not set)
+
+--- sobol_20260515_221421_n20_s42_sv0.9-1.1_sp0.9-1.1  [69 MB, DELETED] ---
+Reason: 20-run sv+sp (no mass) — superseded by 144116 (same params, same Sobol seed)
+Status: 20/20 ok, CA range: 438,033 – 14,325,062 km
+
+--- sobol_20260515_225104_n8_s42_sv0.9-1.1_sp0.9-1.1  [28 MB, DELETED] ---
+Reason: 8-run sv+sp (no mass) — superseded by 144116 (identical CA values)
+Status: 8/8 ok, CA range: 438,033 – 12,613,623 km
+
+--- sobol_20260516_140250_n8_s42_sv0.9-1.1_sp0.9-1.1  [236 KB, DELETED] ---
+Reason: 8 runs all failed — Command failed (1): phantom sobol.in
+Bug: configuration issue (suspected path or phantom binary problem, fixed for 142728)
+
+--- sobol_20260516_142728_n8_s42_sv0.9-1.1_sp0.9-1.1  [28 MB, DELETED] ---
+Reason: 8-run sv+sp — superseded by 144116 (same results)
+Status: 8/8 ok, CA range: 438,033 – 12,613,623 km
+
+--- sobol_20260516_144116_n8_s42_sv0.9-1.1_sp0.9-1.1  [38 MB, DELETED] ---
+Reason: Latest 8-run sv+sp point-mass (no mass dim) — superseded by 211924 which adds mass
+Status: 8/8 ok
+run_id,scale_vel,scale_pos,closest_approach_km,closest_approach_au
+1,0.9862,1.0629,9594120.6,0.06413
+2,1.0923,0.9623,4010139.4,0.02681
+3,1.0129,1.0196,2953106.1,0.01974
+4,0.9070,0.9053,12585470.4,0.08413
+5,0.9476,1.0279,4369124.6,0.02921
+6,1.0286,0.9469,6310065.1,0.04218
+7,1.0517,1.0834,12613623.4,0.08432
+8,0.9706,0.9917,438032.6,0.00293
+Note: paths point to old /home/mboyle/Honours/sobol_mass_runs/ (pre-runner reorganisation)
+
+--- sobol_20260523_175041_n8_s42  [96 KB, DELETED] ---
+Reason: 3 runs all failed — Command failed (1): phantom sobol.in
+Bug: MAXPTMASS still not updated before this run (pre-rebuild)
+  np=100/250/500 all failed → triggered rebuild → fixed in 175535
+
+--- sobol_20260523_175328_verify_fix  [4.4 MB, DELETED] ---
+Reason: 3 runs all prepared_only — dry run used to verify binary fix before re-running
+  Confirmed phantomsetup worked correctly after rebuild (not a full simulation run)
+
+--- sobol_20260526_111819_n8_s42_sspd20-35_sobl0-360_saz0-360  [24 KB, DELETED] ---
+Reason: 1 run, no CSV — aborted immediately (setup configuration check only)
+
+--- sobol_20260526_112133_n8_s42_sspd20-35_sobl0-360_saz0-360  [169 MB, DELETED] ---
+Reason: Stale binary — apply_apophis_spin not compiled in; spin silently ignored
+Status: 8/8 ok but CA=38,167 km for all runs (wrong — ignoring spin)
+Bug: phantomsetup binary predated 2026-05-24 spin commit; strings | grep apophis_spin = empty
+Note: 38,167 km vs 37,998 km (correct binary) — 169 km error from stale binary
+
+--- sobol_20260526_115314_n8_s42_sspd20-35_sobl0-360_saz0-360  [191 MB, DELETED] ---
+Reason: Stale binary (same as 112133) — identical byte-for-byte results
+Status: 8/8 ok, CA=38,167 km all runs — spin still silently ignored
+
+--- sobol_20260526_131043_n8_s42_sspd20-35_sobl0-360_saz0-360  [191 MB, DELETED] ---
+Reason: Stale binary — added dispersion_ratio/unbound_fraction columns but still stale binary
+Status: 8/8 ok, CA=38,167 km, disp/unbound all zero — spin still not working
+
+--- sobol_20260526_132150_n8_s42_sspd20-35_sobl0-360_saz0-360  [236 KB, DELETED] ---
+Reason: 8 runs all failed — Command failed (1): phantom sobol.in
+  First run after binary rebuild; configuration issue (fixed for 132401)
+
+--- sobol_20260526_132401_n8_s42_sspd20-35_sobl0-360_saz0-360  [11 GB, DELETED] ---
+Reason: Results fully captured below — 11 GB binary dumps not needed (all unbound=0, no disruption)
+Status: 8/8 ok — FIRST WORKING SPIN SENSITIVITY BATCH (rebuilt binary with apply_apophis_spin)
+Scientific result: spin period (20-35 hr) and orientation (0-360° obliquity/azimuth) have
+  NO effect on closest approach distance during the 2029 flyby at 38,000 km.
+  All runs: CA ≈ 37,998 km, dispersion ≈ 1.0, unbound = 0%
+Full results:
+run_id,spin_period_hr,obliquity_deg,azimuth_deg,closest_approach_km,dispersion_ratio,unbound_fraction
+1,26.47,293.17,290.31,37997.87,1.00597,0
+2,33.05,157.50,179.54,37998.08,1.02968,0
+3,28.67,183.66,261.53,37997.89,1.02420,0
+4,22.05,85.94,11.46,37998.11,1.04216,0
+5,20.65,257.39,128.22,37997.97,1.02599,0
+6,31.01,12.02,330.39,37998.21,1.01846,0
+7,34.46,323.32,62.79,37998.19,1.02495,0
+8,24.12,127.17,221.46,37998.28,1.02564,0
+Key note: CA shifted from 38,167 km (stale binary) to 37,998 km (rebuilt binary).
+  The ~169 km shift is the effect of including proper DEM spin initialisation.
+
+==============================================================================
+BUG TIMELINE SUMMARY
+==============================================================================
+
+BUG 1 — Old file paths (May 1, RESOLVED)
+  Runner initially ran from /home/mboyle/sobol/ before repo moved to /home/mboyle/Honours/
+  CSVs contain old paths; simulations themselves are valid
+
+BUG 2 — scale_pos/mass dimension wiring crash (May 1, RESOLVED by May 1 evening)
+  Adding mass as third dimension broke the runner for ~3 attempts
+  Fixed: correct dimension ordering in build_run_samples()
+
+BUG 3 — bin/phantomsetup path not found (May 14, RESOLVED)
+  Runner looked for phantomsetup at relative bin/ path before symlinks existed
+  Fix: create sobol/bin/phantom → sobol/phantom and sobol/bin/phantomsetup symlinks
+
+BUG 4 — MAXPTMASS too small for DEM sinks (May 14, RESOLVED)
+  Default MAXPTMASS allows ~100 point masses. DEM with np>30 overflows.
+  Symptom: DEM sinks silently become dust → phantom crashes "nlive=0"
+  Fix: add MAXPTMASS=2000 to sobol/Makefile, rebuild phantom and phantomsetup
+  Documented in CLAUDE.md under "DEM run: Apophis particles become dust instead of sinks"
+
+BUG 5 — new setup keys don't appear after phantomsetup (May 26, RESOLVED)
+  read_inopt with default= doesn't trigger .setup rewrite (nerr stays 0)
+  Fix: manually add new keys to .setup file
+  Documented in CLAUDE.md under "New .setup keys don't appear"
+
+BUG 6 — Stale phantomsetup binary ignores spin (May 26, RESOLVED)
+  apply_apophis_spin added 2026-05-24; binaries built before that silently ignore spin keys
+  Symptom: all runs produce byte-identical .ev files regardless of spin params
+  Diagnosis: strings sobol/phantomsetup | grep -i apophis_spin (empty = stale)
+  Fix: cd sobol && make setup && make (rebuilds both binaries from current source)
+  Documented in CLAUDE.md under "DEM spin sweep produces byte-identical results"

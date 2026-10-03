@@ -1,0 +1,26 @@
+# input file for solar system setup routines
+             tmax_in =    4.5 days    ! end time of simulation (e.g. 3 days)
+            dtmax_in =     30 min    ! time between dumps (e.g. 1 hr)
+           asteroids =           F    ! add distant minor bodies as km-sized dust particles
+          np_apophis =           1    ! number of particles used to represent apophis (0=none; 1=sink; n=gas)
+  apophis_shape_file =                ! shape config file for lattice cropping (blank = sphere)
+         pack_settle =           F    ! start from a loose cloud and settle under gravity
+        packing_file =                ! dump holding a pre-built body (settled+cropped); blank = build one
+         pack_expand =       1.800    ! initial cloud radius / target radius (settling mode)
+            pack_phi =       0.640    ! packing fraction used to size DEM grains (settling mode)
+               epoch =  2029-04-10    ! epoch to query ephemeris, YYYY-MMM-DD HH:MM:SS.fff, blank = today
+             use_dem =           F    ! Apophis as DEM particles (Mia tree DEM)
+    use_dem_as_sinks =           F    ! legacy: Apophis as DEM sink particles (all-pairs, slow)
+        apophis_only =           F    ! only add apophis
+      add_mars_moons =           F    ! add Phobos and Deimos as point masses
+     scale_earth_sep =       1.000    ! scale geocentric Earth-Apophis distance (1=ephemeris; apophis_only=F)
+           scale_vel =       1.000    ! scaling factor for apophis velocity
+           scale_pos =       1.000    ! scaling factor for apophis initial position
+     scale_r_apophis =       1.000    ! scaling factor for apophis radius
+           scale_rho =       1.000    ! scaling factor for apophis bulk density
+        mass_apophis =       0.000    ! Apophis mass in g (0 = scale_rho x actual body volume)
+ apophis_spin_period =  108000.    ! seconds (= 30 hr); runner overwrites per run
+ apophis_spin_axis_x =       0.276 ! ecliptic unit axis (no-Earth ~177° ref); runner overwrites
+ apophis_spin_axis_y =      -0.116
+ apophis_spin_axis_z =       0.954
+apophis_spin_torque_align_deg =      -1.000    ! >=0 torque-align (needs Earth); -1 = use axis vector
