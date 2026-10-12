@@ -12,7 +12,6 @@ HONOURS_PATHS_FILE points at a different config file (e.g. a throwaway test).
 import argparse
 import json
 import os
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -78,8 +77,17 @@ def write_config(values: dict, path: Path) -> Path:
     return path
 
 
-def _exe_ok(p: str) -> bool:
-    return Path(p).is_file() or shutil.which(p) is not None
+_BLENDER_PROBE = "import bpy; print('BLENDER_VERSION', bpy.app.version_string, flush=True); import pandas"
+
+
+def _run(cmd, timeout=300):
+    """(CompletedProcess, None), or (None, why) when the program can't start or hangs."""
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout), None
+    except subprocess.TimeoutExpired:
+        return None, f"{cmd[0]} timed out after {timeout} s"
+    except OSError as exc:
+        return None, f"could not run {cmd[0]}: {exc.strerror or exc}"
 
 
 def check():
@@ -91,30 +99,32 @@ def check():
     rows.append(("assets_dir", Path(cfg["assets_dir"]).is_dir(), False, cfg["assets_dir"]))
     for label, rel, why in _assets():
         rows.append((f"asset:{label}", (Path(cfg["assets_dir"]) / rel).is_file(), False, why))
-    blender_ok = _exe_ok(cfg["blender_exe"])
+    blender_ok = hp.exe_available(cfg["blender_exe"])
     rows.append(("blender_exe", blender_ok, True, cfg["blender_exe"]))
     if blender_ok:
-        r = subprocess.run([cfg["blender_exe"], "--version"], capture_output=True, text=True, timeout=300)
-        first = ((r.stdout or r.stderr).splitlines() or ["?"])[0]
-        rows.append(("blender_version", first.startswith("Blender 5.2"), False, f"{first} (tested: 5.2.x)"))
-        # DEMCinematicSetup.py / DEMGrainsBlenderEarthCam.py import pandas inside
-        # Blender; stock Blender only bundles numpy.
-        r = subprocess.run([cfg["blender_exe"], "--background", "--factory-startup", "--python-exit-code", "1",
-                            "--python-expr", "import pandas"], capture_output=True, text=True, timeout=300)
-        rows.append(("blender_deps", r.returncode == 0, True,
-                     "pandas ok" if r.returncode == 0 else
+        # one start: print the version first, so it shows even when pandas is missing
+        # (DEMCinematicSetup.py / DEMGrainsBlenderEarthCam.py import pandas inside
+        # Blender; stock Blender only bundles numpy)
+        r, err = _run([cfg["blender_exe"], "--background", "--factory-startup", "--python-exit-code", "1",
+                       "--python-expr", _BLENDER_PROBE])
+        version = next((ln.split(None, 1)[1] for ln in (r.stdout if r else "").splitlines()
+                        if ln.startswith("BLENDER_VERSION ")), None)
+        if version:
+            rows.append(("blender_version", version.startswith("5.2"), False, f"Blender {version} (tested: 5.2.x)"))
+        ok = r is not None and r.returncode == 0
+        rows.append(("blender_deps", ok, True,
+                     "pandas ok" if ok else err or
                      "Blender's python lacks pandas: <blender dir>/5.2/python/bin/python3.13 -m pip "
                      "install pandas (Code/README.md)"))
     py = cfg["preprocess_python"]
-    py_ok = _exe_ok(py)
+    py_ok = hp.exe_available(py)
     rows.append(("preprocess_python", py_ok, True, py))
     if py_ok:
-        r = subprocess.run([py, "-c", _MISSING_PROBE, *PREPROCESS_IMPORTS],
-                           capture_output=True, text=True, timeout=300)
-        missing = r.stdout.strip()
-        ok = r.returncode == 0 and not missing
-        detail = "ok" if ok else (f"missing: {missing} (pip install -r Code/requirements-preprocess.txt)"
-                                  if missing else (r.stderr.strip().splitlines() or ["failed"])[-1])
+        r, err = _run([py, "-c", _MISSING_PROBE, *PREPROCESS_IMPORTS])
+        missing = r.stdout.strip() if r else ""
+        ok = r is not None and r.returncode == 0 and not missing
+        detail = "ok" if ok else err or (f"missing: {missing} (pip install -r Code/requirements-preprocess.txt)"
+                                         if missing else (r.stderr.strip().splitlines() or ["failed"])[-1])
         rows.append(("preprocess_deps", ok, True, detail))
     rows.append(("cycles_device", True, True, cfg["cycles_device"]))
     return rows

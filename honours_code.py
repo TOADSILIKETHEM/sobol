@@ -7,7 +7,12 @@ import os
 import sys
 from pathlib import Path
 
-CODE_DIR = Path(os.environ.get("HONOURS_CODE_DIR") or Path(__file__).resolve().parent.parent / "Code")
+if os.environ.get("HONOURS_CODE_DIR"):
+    # absolute for children too: they run with cwd=CODE_DIR and inherit this env var
+    CODE_DIR = Path(os.environ["HONOURS_CODE_DIR"]).expanduser().absolute()
+    os.environ["HONOURS_CODE_DIR"] = str(CODE_DIR)
+else:
+    CODE_DIR = Path(__file__).resolve().parent.parent / "Code"
 if not (CODE_DIR / "honours_paths.py").is_file():
     sys.exit(f"Code repo not found at {CODE_DIR} (set HONOURS_CODE_DIR to the HonoursWin checkout).")
 if str(CODE_DIR) not in sys.path:

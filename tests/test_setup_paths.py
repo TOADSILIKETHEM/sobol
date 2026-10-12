@@ -70,12 +70,47 @@ def test_check_exit_code_ignores_optional_rows(cfgfile, tmp_path, monkeypatch):
 
 
 def _fake_blender(tmp_path, has_pandas: bool):
+    """Prints the version from the probe expression, then fails the pandas import if asked;
+    logs each start to <tmp>/blender_calls."""
     exe = tmp_path / "blender"
     exe.write_text("#!/bin/sh\n"
-                   'case "$*" in *--python-expr*) exit ' + ("0" if has_pandas else "1") + ";; esac\n"
-                   'echo "Blender 5.2.1 LTS"\n')
+                   f'echo x >> "{tmp_path}/blender_calls"\n'
+                   'echo "Blender 5.2.1 LTS (hash x)"\n'
+                   'case "$*" in *--python-expr*) echo "BLENDER_VERSION 5.2.1 LTS"; exit '
+                   + ("0" if has_pandas else "1") + ";; esac\n")
     exe.chmod(0o755)
     return exe
+
+
+def test_check_starts_blender_once(cfgfile, tmp_path):
+    sp.main(["--data-dir", str(tmp_path), "--blender", str(_fake_blender(tmp_path, True)),
+             "--python", sys.executable])
+    rows = {item: (ok, d) for item, ok, _, d in sp.check()}
+    assert (tmp_path / "blender_calls").read_text().count("x") == 1
+    assert rows["blender_version"][0] and "5.2.1" in rows["blender_version"][1]
+
+
+def test_check_reports_blender_that_cannot_start(cfgfile, tmp_path):
+    exe = tmp_path / "blender"
+    exe.write_text("not a program")  # a file, but not executable
+    sp.main(["--data-dir", str(tmp_path), "--blender", str(exe), "--python", sys.executable])
+    rows = {item: (ok, required, d) for item, ok, required, d in sp.check()}
+    assert rows["blender_deps"][:2] == (False, True) and "could not run" in rows["blender_deps"][2]
+
+
+def test_check_reports_hung_blender(cfgfile, tmp_path, monkeypatch):
+    import subprocess
+    sp.main(["--data-dir", str(tmp_path), "--blender", str(_fake_blender(tmp_path, True)),
+             "--python", sys.executable])
+    real = subprocess.run
+
+    def run(cmd, *a, **kw):
+        if "blender" in str(cmd[0]):
+            raise subprocess.TimeoutExpired(cmd, kw.get("timeout"))
+        return real(cmd, *a, **kw)
+    monkeypatch.setattr(sp.subprocess, "run", run)
+    rows = {item: (ok, d) for item, ok, _, d in sp.check()}
+    assert rows["blender_deps"][0] is False and "timed out" in rows["blender_deps"][1]
 
 
 def test_check_flags_blender_without_pandas(cfgfile, tmp_path):

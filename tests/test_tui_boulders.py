@@ -194,6 +194,57 @@ def test_sim_gates_follow_body_source():
     assert not d["f-boulder"] and not d["lobe-ratio"] and d["boulder-axis-min"]
 
 
+def _sim_switch_body(after, untick=False):
+    """Tick boulders on a settled body, switch body_source to `after`, optionally untick."""
+    async def _scenario():
+        app = tsr.SimRenderTUIApp()
+        async with app.run_test() as pilot:
+            app.query_one("#body-source", Select).value = "settled"
+            await pilot.pause()
+            app.query_one("#boulders", Checkbox).value = True
+            app.query_one("#bond-sigma-pa", Input).value = "10"
+            await pilot.pause()
+            app.query_one("#body-source", Select).value = after
+            await pilot.pause()
+            box = app.query_one("#boulders", Checkbox)
+            if untick:
+                box.toggle()
+                await pilot.pause()
+            try:
+                built = app._build_sim_params(False)
+            except ValueError as exc:
+                built = exc
+            return box.disabled, box.value, built
+    return asyncio.run(_scenario())
+
+
+def test_sim_ticked_boulders_stay_untickable_off_settled():
+    # Greyed-out + ticked could not be unticked by hand; now the box stays enabled until unticked.
+    disabled, ticked, built = _sim_switch_body("lattice")
+    assert not disabled and ticked and isinstance(built, ValueError) and "settled" in str(built)
+    disabled, ticked, built = _sim_switch_body("lattice", untick=True)
+    assert disabled and not ticked and built.sample.boulders is None
+
+
+def test_sweep_ticked_boulders_stay_untickable_off_settled():
+    async def _scenario():
+        app = tr.SobolTUIApp(runner.build_parser().parse_args([]))
+        async with app.run_test() as pilot:
+            app.query_one("#body-source", Select).value = "settled"
+            await pilot.pause()
+            app.query_one("#boulders", Checkbox).value = True
+            await pilot.pause()
+            app.query_one("#body-source", Select).value = "lattice"
+            await pilot.pause()
+            box = app.query_one("#boulders", Checkbox)
+            before = box.disabled
+            box.toggle()
+            await pilot.pause()
+            return before, box.disabled, app._build_argv(force_dry=True)
+    before, after, argv = asyncio.run(_scenario())
+    assert not before and after and "--boulders" not in argv
+
+
 @pytest.mark.parametrize("selects,fields,match", [
     ({}, {"bond-sigma-pa": "10"}, "settled"),                                     # lattice body
     ({"body-source": "settled"}, {}, "bond_sigma_pa"),                            # sigma missing

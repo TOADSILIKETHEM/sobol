@@ -78,6 +78,12 @@ def test_device_flag_default_follows_configured_cycles_device(monkeypatch):
     assert _parse(["--grains-dir", "/g", "--bodies-dir", "/b", "--device", "gpu"]).device == "gpu"
 
 
+def test_render_banner_names_the_device_in_use():
+    line = dhr.render_banner("instance", 1, 51, 1920, 1080, 500, "cpu", "/o")
+    assert ", CPU," in line and "GPU" not in line
+    assert ", GPU," in dhr.render_banner("instance", 1, 51, 1920, 1080, 500, "gpu", "/o")
+
+
 def test_gpu_backend_order_keeps_optix_then_cuda_first():
     assert dhr.GPU_BACKENDS[:2] == ("OPTIX", "CUDA")
     assert set(dhr.GPU_BACKENDS) >= {"HIP", "ONEAPI", "METAL"}

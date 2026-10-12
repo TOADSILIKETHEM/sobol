@@ -153,7 +153,11 @@ def _parse(argv):
     p.add_argument("--stage-dir", type=Path,
                    help="where renamed dumps are staged, in _staged_<run dir name>/ (default: beside "
                         "the dumps, so hardlinks; removed after the preprocess)")
-    return p.parse_args(argv)
+    a = p.parse_args(argv)
+    if a.dem_model is None and (a.np_apophis is not None or a.apophis_only):
+        p.error("--np-apophis / --apophis-only only apply with --dem-model "
+                "(without it the run's own sobol.setup is used as is)")
+    return a
 
 
 def main(argv=None) -> int:
@@ -171,7 +175,7 @@ def main(argv=None) -> int:
     # sobol_mass_runs/<batch>/run_0007 -> DEMCSVs/<batch>/run_0007_*, as the TUI names it
     run_name = src.name if re.fullmatch(r"run_\d+", src.name) else "run_0001"
     # Windows python.exe (WSL host) cannot follow WSL symlinks
-    windows_reader = os.name != "nt" and str(t.WIN_VENV_PYTHON).lower().endswith(".exe")
+    windows_reader = t._paths.is_windows_tool(t.WIN_VENV_PYTHON)
     if a.stage_dir is not None:
         stage_root = a.stage_dir.expanduser().resolve()
     else:  # beside the dumps = same filesystem = hardlinks, no copy

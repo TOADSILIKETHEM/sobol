@@ -234,3 +234,11 @@ def test_output_run_name_follows_source_run_dir(tmp_path, monkeypatch):
     rd.main([str(run), "--out-root", str(tmp_path / "out")])
     assert seen["ctx"].run_name == "run_0007"
     assert (tmp_path / "out" / "batch" / "run_0007_viz_instance").is_dir()
+
+
+@pytest.mark.parametrize("flag", [["--np-apophis", "40000"], ["--apophis-only"]])
+def test_setup_flags_without_dem_model_are_refused(flag, capsys):
+    # Without --dem-model the run's own sobol.setup is used, so these would do nothing.
+    with pytest.raises(SystemExit):
+        rd._parse(["run_0003", *flag])
+    assert "--dem-model" in capsys.readouterr().err

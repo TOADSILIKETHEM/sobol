@@ -362,3 +362,43 @@ def test_blender_rock_material_falls_back_without_11_blend():
     assert result.returncode == 0, combined[-3000:]
     assert "FALLBACK_OK" in combined
     assert "WARNING" in combined and "11.blend" in combined
+
+
+_NO_EARTH_ASSET = '''
+import os, sys, traceback
+os.environ["HONOURS_BLENDER_ASSETS_DIR"] = {assets!r}  # empty: no TheEarth1.blend
+sys.path.insert(0, {bc!r})
+import bpy
+from pathlib import Path
+import DEMHeadlessRender as dhr
+try:
+    script = Path({bc!r}) / "DEMGrainsBlenderEarthCam.py"
+    src = dhr.patch_script_source("per_sphere", script.read_text(encoding="utf-8"),
+                                  grains_dir={grains!r}, bodies_dir={bodies!r}, max_frames=2)
+    exec(compile(src, str(script), "exec"), {{"__name__": "__main__", "__file__": str(script)}})
+    earth = bpy.data.objects.get("Earth")
+    assert earth is not None, "no Earth empty"
+    kids = [o.name for o in earth.children]
+    assert any(n.startswith("Surface") for n in kids), kids
+    print("BARE_EARTH_OK")
+except Exception:
+    traceback.print_exc()
+    sys.exit(1)
+'''
+
+
+@pytest.mark.skipif(not BLENDER_EXE.is_file(), reason="blender.exe not installed")
+@pytest.mark.skipif(not WIN_TEMP.is_dir(), reason="Windows Temp not mounted")
+@pytest.mark.skipif(not FIXTURE_RUN.is_dir(), reason="fixture run not on disk")
+def test_per_sphere_without_earth_model_gets_bare_sphere():
+    # README promises a bare-sphere Earth when the asset pack has no TheEarth1.blend.
+    (WIN_TEMP / "no_assets").mkdir(exist_ok=True)
+    script = WIN_TEMP / "per_sphere_bare_earth.py"
+    script.write_text(_NO_EARTH_ASSET.format(
+        assets=WIN_TEMP_WIN + "/no_assets", bc=BLENDERCONVERT_WIN,
+        grains=FIXTURE_RUN_WIN + "/run_0001_grains_output/",
+        bodies=FIXTURE_RUN_WIN + "/run_0001_bodies_output/"), encoding="utf-8")
+    r = subprocess.run([str(BLENDER_EXE), "--background", "--python", WIN_TEMP_WIN + "/per_sphere_bare_earth.py"],
+                       capture_output=True, text=True, check=False)
+    out = (r.stdout or "") + (r.stderr or "")
+    assert r.returncode == 0 and "BARE_EARTH_OK" in out, out[-3000:]

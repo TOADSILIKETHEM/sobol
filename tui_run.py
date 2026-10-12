@@ -599,8 +599,10 @@ class SobolTUIApp(App[Optional[List[str]]]):
         for wid in _HYPERBOLA_IDS:
             self.query_one(f"#{wid}").disabled = not hyper
         settled = self._sel("body-source") == "settled"
-        self.query_one("#boulders").disabled = not settled
-        on = settled and self._cb("boulders")
+        box = self.query_one("#boulders", Checkbox)
+        # off a settled body it can't be ticked, but a ticked box stays enabled so it can be unticked
+        box.disabled = not settled and not box.value
+        on = settled and box.value
         shape, placed = self._sel("boulder-shape"), self._sel("boulder-placed")
         only = {"boulder-axis-min": shape == "ellipsoid", "boulder-jagged": shape == "grown",
                 "lobe-ratio": placed == "binary", "boulder-file": placed == "file"}

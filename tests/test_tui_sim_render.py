@@ -714,7 +714,7 @@ def test_check_blender_exe_passes_when_present(tmp_path):
 
 def test_check_blender_exe_accepts_name_on_path(monkeypatch):
     # Native Linux: blender_exe = "blender" found on PATH
-    monkeypatch.setattr(tsr.shutil, "which", lambda n: "/usr/bin/blender" if n == "blender" else None)
+    monkeypatch.setattr(tsr._paths.shutil, "which", lambda n: "/usr/bin/blender" if n == "blender" else None)
     tsr.check_blender_exe("blender")  # must not raise
 
 

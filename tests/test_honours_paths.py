@@ -28,6 +28,16 @@ def _write(f, **kv):
     hp.load(reload=True)
 
 
+def test_windows_form_paths_open_from_wsl(cfg, monkeypatch):
+    # setup_paths stores "C:/..." as typed; WSL-side python must get /mnt/c/...
+    monkeypatch.setattr(hp.os, "name", "posix")
+    _write(cfg, data_dir="C:/viz/data", blender_exe="D:\\Blender\\blender.exe")
+    assert hp.data_dir() == "/mnt/c/viz/data"
+    assert hp.assets_dir() == "/mnt/c/viz/data/BlenderConvert"
+    assert hp.blender_exe() == "/mnt/d/Blender/blender.exe"
+    assert hp.to_windows_path(hp.data_dir()) == "C:/viz/data"
+
+
 def test_code_dir_is_sibling_of_sobol():
     assert (CODE_DIR / "honours_paths.py").is_file()
 
@@ -253,3 +263,34 @@ def test_tui_placeholder_shape_is_under_assets_dir():
                          capture_output=True, text=True, env=env, cwd=str(CODE_DIR.parent / "sobol"), timeout=60)
     assert out.stdout.strip().startswith("/y/pack/Shapes/"), out.stdout + out.stderr
     assert out.stdout.strip().endswith("apophis_v233s7.obj")
+
+
+@pytest.mark.parametrize("value", ["~/codecopy", "rel/codecopy"])
+def test_code_dir_env_is_made_absolute_for_children(tmp_path, value):
+    # Children run with cwd=CODE_DIR and get HONOURS_CODE_DIR via env: both need it absolute.
+    import os as _os
+    (tmp_path / "rel").mkdir()
+    for d in (tmp_path / "codecopy", tmp_path / "rel" / "codecopy"):
+        d.symlink_to(CODE_DIR)
+    env = dict(_os.environ, HOME=str(tmp_path), HONOURS_CODE_DIR=value)
+    code = (f"import sys; sys.path.insert(0, {str(CODE_DIR.parent / 'sobol')!r}); import os, honours_code as h; "
+            "print(h.CODE_DIR); print(os.environ['HONOURS_CODE_DIR'])")
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env, cwd=str(tmp_path))
+    lines = out.stdout.split()
+    assert len(lines) == 2 and lines[0] == lines[1], out.stdout + out.stderr
+    assert lines[0].startswith("/") and "~" not in lines[0]
+
+
+def test_is_windows_tool(monkeypatch):
+    monkeypatch.setattr(hp.os, "name", "posix")
+    assert hp.is_windows_tool("/mnt/c/B/blender.EXE")
+    assert not hp.is_windows_tool("/usr/bin/blender")
+    monkeypatch.setattr(hp.os, "name", "nt")
+    assert not hp.is_windows_tool("C:/B/blender.exe")  # Windows host: no path translation
+
+
+def test_exe_available(tmp_path):
+    f = tmp_path / "tool"
+    f.write_text("")
+    assert hp.exe_available(f) and hp.exe_available("sh")
+    assert not hp.exe_available(tmp_path / "missing") and not hp.exe_available("no-such-tool-xyz")

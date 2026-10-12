@@ -15,7 +15,6 @@ import json
 import os
 import platform
 import re
-import shutil
 import subprocess
 import sys
 import time
@@ -143,7 +142,7 @@ def from_windows_path(s: str) -> Path:
 
 def check_blender_exe(path: str = BLENDER_EXE) -> None:
     # A bare name ("blender") is fine if it is on PATH (native Linux install).
-    if not Path(path).is_file() and shutil.which(path) is None:
+    if not _paths.exe_available(path):
         raise FileNotFoundError(
             f"Blender not found at {path} -- confirm the Blender 5.2.1 LTS "
             "install path (see CLAUDE.md) or set blender_exe with "
@@ -1422,8 +1421,10 @@ class SimRenderTUIApp(App[None]):
         for wid in ("flyby-rp", "flyby-vinf", "flyby-sep"):
             self.query_one(f"#{wid}").disabled = not hyper
         settled = self.query_one("#body-source", Select).value == "settled"
-        self.query_one("#boulders").disabled = not settled
-        on = settled and self.query_one("#boulders", Checkbox).value
+        box = self.query_one("#boulders", Checkbox)
+        # off a settled body it can't be ticked, but a ticked box stays enabled so it can be unticked
+        box.disabled = not settled and not box.value
+        on = settled and box.value
         shape = self.query_one("#boulder-shape", Select).value
         placed = self.query_one("#boulder-placed", Select).value
         only = {"boulder-axis-min": shape == "ellipsoid", "boulder-jagged": shape == "grown",
@@ -1630,8 +1631,7 @@ class SimRenderTUIApp(App[None]):
                 )
             if not placeholder_obj or not from_windows_path(placeholder_obj).is_file():
                 raise ValueError(f"placeholder_obj not found: {placeholder_obj!r}")
-        if ({"composite", "instance_grains"} & set(paths) and not Path(WIN_VENV_PYTHON).is_file()
-                and shutil.which(str(WIN_VENV_PYTHON)) is None):
+        if {"composite", "instance_grains"} & set(paths) and not _paths.exe_available(WIN_VENV_PYTHON):
             raise ValueError(
                 f"preprocess python not found at {WIN_VENV_PYTHON} -- needed by the "
                 "composite / instance_grains preprocess (set preprocess_python with "

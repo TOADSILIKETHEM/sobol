@@ -155,3 +155,48 @@ def test_real_run_subsolar_and_apophis_closest_approach():
     ut_hours = (t - eo.DELTA_T_S) / 3600.0 - 72.0
     assert 21.0 < ut_hours < 22.5
     assert -60.0 < _wrap180(lon) < 0.0
+
+
+def _nlerp(q0, q1, t):
+    m = [(1 - t) * a + t * b for a, b in zip(q0, q1)]
+    n = math.sqrt(sum(c * c for c in m))
+    return [c / n for c in m]
+
+
+def _lerped_turn_deg(step_deg):
+    """Spin the per-component-lerped keys actually show (Blender quaternion keys)."""
+    dt = step_deg / 360.0 * eo.EARTH_SIDEREAL_DAY_S
+    q0, q1 = eo.earth_quaternion(0.0), eo.earth_quaternion(dt)
+    lon = lambda q: math.degrees(math.atan2(*reversed(eo.rotate(q, (1, 0, 0))[:2])))
+    prev, total = lon(q0), 0.0
+    for k in range(1, 41):
+        cur = lon(_nlerp(q0, q1, k / 40))
+        total += (cur - prev + 180) % 360 - 180
+        prev = cur
+    return total
+
+
+def test_lerped_spin_keys_reverse_only_past_360_deg():
+    # Unwrapped GMST keeps the quaternions continuous: keys up to 360 deg apart
+    # still turn forward; past 360 they turn backwards.
+    assert _lerped_turn_deg(270) > 0
+    assert _lerped_turn_deg(350) > 0
+    assert _lerped_turn_deg(370) < 0
+
+
+def test_spin_step_check_quiet_for_small_steps():
+    chk = eo.SpinStepCheck()
+    day = eo.EARTH_SIDEREAL_DAY_S
+    assert [chk.warning(t, f) for f, t in enumerate((0.0, 700.0, 0.4 * day, 0.8 * day))] == [None] * 4
+
+
+def test_spin_step_check_flags_uneven_then_backwards_once_each_run():
+    day = eo.EARTH_SIDEREAL_DAY_S
+    chk = eo.SpinStepCheck()
+    assert chk.warning(0.0, 1) is None
+    msg = chk.warning(0.75 * day, 2)  # 270 deg: forward but uneven
+    assert "uneven" in msg and "frame 2" in msg
+    assert chk.warning(1.5 * day, 3) is None  # one warning per run, not per frame
+    chk = eo.SpinStepCheck()
+    chk.warning(0.0, 1)
+    assert "backwards" in chk.warning(1.2 * day, 2)  # 432 deg
