@@ -11,7 +11,7 @@ from tests._paths import CODE, CODE_WIN, DATA, DATA_WIN
 
 BLENDERCONVERT = CODE / "BlenderConvert"
 BLENDERCONVERT_WIN = CODE_WIN + r"\BlenderConvert"
-BLENDER_EXE = Path("/mnt/c/Program Files/Blender Foundation/Blender 5.2/blender.exe")
+from tests._paths import BLENDER_EXE  # noqa: E402  (configured Windows blender.exe, else skip)
 WIN_TEMP = Path("/mnt/c/Users/22boy/AppData/Local/Temp")
 WIN_TEMP_WIN = "C:/Users/22boy/AppData/Local/Temp"
 FIXTURE_RUN = DATA / "DEMCSVs/_verify_lattice_fix/sobol_20260705_131545_baseline_58deg"
@@ -335,3 +335,30 @@ def test_blender_per_sphere_max_frames_builds_only_those_frames():
     assert len(list(out_dir.glob("frame_*.png"))) == 2
     assert "Keyframing 2 frames" in combined, combined[-3000:]
     assert f"Keyframing {n_fixture} frames" not in combined
+
+
+@pytest.mark.skipif(not BLENDER_EXE.is_file(), reason="blender.exe not installed")
+@pytest.mark.skipif(not WIN_TEMP.is_dir(), reason="Windows Temp not mounted")
+def test_blender_rock_material_falls_back_without_11_blend():
+    # Shared asset pack has no 11.blend (2026-10-10): the instance path must still
+    # render, with a plain stand-in under the same name, and say so.
+    script = WIN_TEMP / "dhr_rock_fallback.py"
+    script.write_text("\n".join([
+        "import sys",
+        f"sys.path.insert(0, {BLENDERCONVERT_WIN!r})",
+        "import bpy",
+        "import DEMHeadlessRender as dhr",
+        "dhr.ensure_procedural_rock_material('D:/no/such/11.blend')",
+        "mat = bpy.data.materials.get(dhr.ROCK_MATERIAL_NAME)",
+        "assert mat is not None and mat.use_nodes",
+        "bsdf = mat.node_tree.nodes.get('Principled BSDF')",
+        "assert bsdf is not None",
+        "print('FALLBACK_OK')",
+    ]) + "\n", encoding="utf-8")
+    result = subprocess.run([str(BLENDER_EXE), "--background", "--factory-startup", "--python-exit-code", "1",
+                             "--python", f"{WIN_TEMP_WIN}/dhr_rock_fallback.py"],
+                            capture_output=True, text=True, check=False)
+    combined = (result.stdout or "") + (result.stderr or "")
+    assert result.returncode == 0, combined[-3000:]
+    assert "FALLBACK_OK" in combined
+    assert "WARNING" in combined and "11.blend" in combined

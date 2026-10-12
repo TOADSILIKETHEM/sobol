@@ -68,7 +68,7 @@ Parent: `../CLAUDE.md`. Shared facts: `../docs/SHARED_FACTS.md`. Merge/rename ca
   - `.venv` python existence is checked at click time when `composite` or `instance_grains` is ticked (each runs its preprocess script in the Windows `.venv`).
 
 **Behaviour.**
-- At startup it checks `blender.exe` exists at `/mnt/c/Program Files/Blender Foundation/Blender 5.2/blender.exe`.
+- At startup it checks `BLENDER_EXE` exists (from `Code/honours_paths.py`; default `/mnt/c/Program Files/Blender Foundation/Blender 5.2/blender.exe`; a bare name on `PATH` is accepted). Tool path args are Windows-form only when the tool is a `.exe` (`blender_arg` / `python_arg`).
 - The status bar updates about every 2 s. During sim it counts `<prefix>_[0-9]*` dump files (`Running sim...`). When PHANTOM exits it flips to `Converting... N/M npz`, then cycles per ticked path (dump route instead: `Preprocessing dumps... k/N dump(s)`, counting composite's camera files, then renders only): `Preprocessing [<path> i/n]...` (composite/instance_grains/instance_static only) and `Rendering [<path> i/n]... k/N frame(s)` (`frame_*.png` under that path's Windows render dir), then `Comparing... k/N frame(s)` (`compare_*.png`) when `compare` is ticked. The last dump count no longer freezes the bar.
 - The final status is one of: `[Ns] Done (done): converted N frame(s); rendered M frame(s) to …` (dump route: `read N dump(s) directly (convert skipped); …`), `[Ns] Finished with failures: …` (`partial` — one or more ticked render paths failed while others succeeded), `Failed at sim|convert: …`, or `Failed at error: <Type>: …` for an unexpected exception.
 - Only one pipeline can run at a time: the buttons are disabled and a second launch is refused.

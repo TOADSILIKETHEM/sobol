@@ -17,6 +17,7 @@ import pytest
 # sobol/tests/test_metric_fixes.py.
 sys.path.insert(0, str(Path(__file__).parent.parent))
 import tui_sim_render as tsr
+from tests._paths import max_laptop, windows_tools  # noqa: E402
 
 
 def test_to_windows_path_translates_mnt_c():
@@ -44,6 +45,8 @@ def test_to_windows_path_home_with_spaces(monkeypatch):
     assert result == r"\\wsl.localhost\Ubuntu\home\mboyle\Honours\Code\Data analysis\x.py"
 
 
+@max_laptop
+@windows_tools
 def test_code_and_data_dirs_split():
     assert tsr.CODE_DIR == Path("/home/mboyle/Honours/Code")
     assert tsr.DATA_DIR == Path("/mnt/c/Users/22boy/OneDrive/Documents/GC-Max_desktop/Honours/Code")
@@ -166,6 +169,7 @@ def test_run_convert_stage_skips_when_sim_not_ok(monkeypatch):
     fake_convert.assert_not_called()
 
 
+@windows_tools
 def test_build_render_command_without_max_frames():
     params = tsr.RenderParams(
         grains_dir=Path("/mnt/c/DEMCSVs/batch/run_0001_grains_output"),
@@ -708,6 +712,33 @@ def test_check_blender_exe_passes_when_present(tmp_path):
     tsr.check_blender_exe(str(fake_exe))  # must not raise
 
 
+def test_check_blender_exe_accepts_name_on_path(monkeypatch):
+    # Native Linux: blender_exe = "blender" found on PATH
+    monkeypatch.setattr(tsr.shutil, "which", lambda n: "/usr/bin/blender" if n == "blender" else None)
+    tsr.check_blender_exe("blender")  # must not raise
+
+
+def test_check_blender_exe_names_setup_paths(tmp_path):
+    with pytest.raises(FileNotFoundError, match="setup_paths.py"):
+        tsr.check_blender_exe(str(tmp_path / "nope.exe"))
+
+
+def test_native_linux_blender_gets_posix_args(monkeypatch):
+    monkeypatch.setattr(tsr, "BLENDER_EXE", "/usr/bin/blender")
+    assert tsr.blender_arg(Path("/home/jane/run")) == "/home/jane/run"
+
+
+def test_windows_blender_gets_windows_args(monkeypatch):
+    # Max's laptop: WSL launching blender.exe under /mnt/c
+    monkeypatch.setattr(tsr, "BLENDER_EXE", "/mnt/c/Program Files/Blender Foundation/Blender 5.2/blender.exe")
+    assert tsr.blender_arg(Path("/mnt/c/Users/x")) == "C:/Users/x"
+
+
+def test_native_preprocess_python_gets_posix_args(monkeypatch):
+    monkeypatch.setattr(tsr, "WIN_VENV_PYTHON", Path("/usr/bin/python3"))
+    assert tsr.python_arg(Path("/home/jane/run")) == "/home/jane/run"
+
+
 def test_warn_if_high_grain_count_below_threshold():
     assert tsr.warn_if_high_grain_count(500) is None
     assert tsr.warn_if_high_grain_count(2000) is None  # boundary is inclusive
@@ -1185,6 +1216,7 @@ def test_render_path_registry_order_and_wiring():
     assert tsr.RENDER_PATHS["instance_static"].headless_viz_path == "instance"
 
 
+@windows_tools
 def test_render_form_values_new_defaults():
     r = tsr.RenderFormValues()
     assert r.paths == ("instance_grains",)
@@ -1195,6 +1227,7 @@ def test_render_form_values_new_defaults():
     assert r.n_points == 1_000_000
 
 
+@windows_tools
 def test_composite_preprocess_command():
     ctx = _mnt_ctx(envelope_method="sdf", max_frames=3)
     cmd = tsr.build_composite_preprocess_command(ctx, ctx.batch_dir / "run_0001_viz")
@@ -1215,6 +1248,7 @@ def test_composite_preprocess_command_without_max_frames():
     assert cmd[cmd.index("--envelope-method") + 1] == "hull"
 
 
+@windows_tools
 def test_instance_grains_preprocess_command():
     ctx = _mnt_ctx(max_frames=2)
     cmd = tsr.build_instance_grains_preprocess_command(ctx, ctx.batch_dir / "run_0001_viz_instance")
@@ -1228,6 +1262,7 @@ def test_instance_grains_preprocess_command():
     assert "--envelope-method" not in cmd
 
 
+@windows_tools
 def test_instance_static_preprocess_command():
     ctx = _mnt_ctx(placeholder_obj="C:/shapes/a.obj", n_points=5000, max_frames=2)
     cmd = tsr.build_instance_static_preprocess_command(
@@ -1245,12 +1280,14 @@ def test_instance_static_preprocess_command():
     assert "--max-frames" not in cmd
 
 
+@windows_tools
 def test_instance_static_preprocess_command_converts_wsl_obj_path():
     ctx = _mnt_ctx(placeholder_obj="/mnt/c/shapes/a.obj")
     cmd = tsr.build_instance_static_preprocess_command(ctx, ctx.batch_dir / "x")
     assert cmd[cmd.index("--shape-obj") + 1] == "C:/shapes/a.obj"
 
 
+@windows_tools
 def test_build_render_command_bulk_path_uses_manifest():
     params = tsr.RenderParams(
         grains_dir=Path("/mnt/c/g"), bodies_dir=Path("/mnt/c/b"),
@@ -2158,6 +2195,7 @@ def _ctx(tmp_path, **form):
     )
 
 
+@windows_tools
 def test_build_dump_preprocess_command_both_targets(tmp_path):
     ctx = _ctx(tmp_path, paths=("composite", "instance_grains"), envelope_method="sdf", max_frames=3)
     targets = {"composite": tmp_path / "v", "instance_grains": tmp_path / "vi"}
@@ -2616,3 +2654,26 @@ def test_report_result_names_timing_file(tmp_path, stage, ok):
             return str(app.query_one("#status", tsr.Static).content)
 
     assert f"timing: {timing}" in asyncio.run(_scenario())
+
+
+def test_render_result_names_missing_asset_fallbacks(tmp_path, monkeypatch):
+    # A thesis render must not quietly lose its rock material / Earth / starfield.
+    def fake_render(params):
+        params.output_dir.mkdir(parents=True, exist_ok=True)
+        (params.output_dir / "frame_0001.png").write_bytes(b"")
+        (params.output_dir / "render.log").write_text(
+            "[DEMHeadlessRender] WARNING: X/Blenders/11.blend not found -- plain stand-in\n"
+            "WARNING: EARTH_MODEL_PATH not found (X/TheEarth1.blend) — falling back to bare sphere.\n"
+            "[DEMHeadlessRender] WARNING: HDRI not found at X.exr; black sky instead\n")
+
+    monkeypatch.setattr(tsr, "run_render_stage", fake_render)
+    manifest = tmp_path / "m.json"
+    manifest.write_text("{}")
+    ctx = tsr.PathContext(grains_dir=tmp_path, bodies_dir=tmp_path, batch_dir=tmp_path, run_name="run_0001",
+                          render_form=tsr.RenderFormValues(), n_expected_frames=1,
+                          preprocessed={"instance_grains": manifest})
+    r = tsr.run_render_path(tsr.RENDER_PATHS["instance_grains"], ctx)
+    assert r.ok
+    assert "missing assets" in r.message
+    for name in ("rock material", "Earth model", "HDRI"):
+        assert name in r.message

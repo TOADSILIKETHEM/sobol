@@ -15,6 +15,7 @@ import json
 import os
 import platform
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -67,53 +68,49 @@ except ImportError:
         "(sobol/tui_run.py already depends on it, so it should already be present.)"
     )
 
-# Code (HonoursWin repo) lives in WSL since 2026-09-25; data and Blender
-# assets stayed in OneDrive (reached over /mnt/c) so OneDrive backs them up.
-# Hardcoded like sobol/Analysis/run_demtocsv_batch.py, not derived.
-CODE_DIR = Path("/home/mboyle/Honours/Code")
-DATA_DIR = Path("/mnt/c/Users/22boy/OneDrive/Documents/GC-Max_desktop/Honours/Code")
-BLENDER_EXE = "/mnt/c/Program Files/Blender Foundation/Blender 5.2/blender.exe"
+# Code (HonoursWin repo) is found by sobol/honours_code.py (HONOURS_CODE_DIR, else
+# the sibling Code/ dir); data, Blender assets and tool paths come from
+# Code/honours_paths.py (env > Code/local_paths.json > Max's laptop defaults,
+# i.e. the OneDrive data folder and Windows blender.exe hardcoded here before
+# 2026-10-10).
+from honours_code import CODE_DIR, paths as _paths  # noqa: E402
 
-_MNT_DRIVE_RE = re.compile(r"^/mnt/([a-zA-Z])(/.*)?$")
+try:
+    DATA_DIR = Path(_paths.data_dir())
+except _paths.ConfigError as _exc:  # one line, not an import-time traceback
+    sys.exit(f"{_exc}\nRewrite it with: python3 sobol/setup_paths.py")
+BLENDER_EXE = _paths.blender_exe()
+CYCLES_DEVICE = _paths.cycles_device()  # "gpu" | "cpu"; DEMHeadlessRender.py --device
+
 _RESOLUTION_RE = re.compile(r"^(\d+)x(\d+)$")
 
+to_windows_path = _paths.to_windows_path
 
-def to_windows_path(p: Path) -> str:
-    """WSL path -> path string a Windows program can open.
-
-    /mnt/<drive>/... -> <DRIVE>:/...; any other POSIX-absolute path (e.g. the
-    code under /home) -> \\\\wsl.localhost\\<distro>\\... . Only POSIX-absolute
-    inputs are resolved first (so "/mnt/c/foo/../bar" normalizes before the
-    swap); a string that doesn't start with "/" -- e.g. an already
-    Windows-style "C:/Users/..." -- is returned unchanged.
-    """
-    s = str(p)
-    if not s.startswith("/"):
-        return s
-    s = str(Path(s).resolve())
-    m = _MNT_DRIVE_RE.match(s)
-    if m:
-        drive = m.group(1).upper()
-        rest = m.group(2) or "/"
-        return f"{drive}:{rest}"
-    distro = os.environ.get("WSL_DISTRO_NAME", "Ubuntu")
-    return "\\\\wsl.localhost\\" + distro + s.replace("/", "\\")
+# Runs the composite and real-grain preprocess scripts, which need scipy /
+# numpy that Blender's bundled Python lacks. On Max's laptop this is the
+# Windows venv in the OneDrive data folder, executed directly from WSL (so a
+# /mnt/c path) and reading the WSL scripts via their UNC path; on Linux it is
+# any python3 with Code/requirements-preprocess.txt. The name predates that
+# (honours_paths key: preprocess_python).
+WIN_VENV_PYTHON = Path(_paths.preprocess_python())
 
 
-# Windows blender.exe cannot open a /mnt/c path passed to --python, so this
-# must be a Windows-style path (unlike BLENDER_EXE, which WSL executes and
-# therefore stays a /mnt/c path).
-DEM_HEADLESS_RENDER = to_windows_path(CODE_DIR / "BlenderConvert" / "DEMHeadlessRender.py")
+def blender_arg(p) -> str:
+    """Path argument for BLENDER_EXE. Windows blender.exe cannot open a /mnt/c
+    path, so WSL -> .exe gets the Windows form; a native blender gets p as is."""
+    return _paths.tool_path(p, BLENDER_EXE)
 
-# Executed directly from WSL like BLENDER_EXE (so a /mnt/c path); runs the
-# composite and real-grain preprocess scripts, which need scipy / numpy that
-# Blender's bundled Python lacks. The Windows venv stays in the OneDrive data
-# folder and runs the WSL preprocess scripts via their UNC path.
-WIN_VENV_PYTHON = DATA_DIR / ".venv" / "Scripts" / "python.exe"
-# Static placeholder shape model -- opened by Windows blender.exe, so a
-# Windows-style path.
-DEFAULT_PLACEHOLDER_OBJ = to_windows_path(
-    DATA_DIR / "BlenderConvert" / "Shapes"
+
+def python_arg(p) -> str:
+    """Path argument for WIN_VENV_PYTHON (Windows .venv python.exe or native)."""
+    return _paths.tool_path(p, WIN_VENV_PYTHON)
+
+
+DEM_HEADLESS_RENDER = blender_arg(CODE_DIR / "BlenderConvert" / "DEMHeadlessRender.py")
+# Static placeholder shape model -- opened by BLENDER_EXE. Under assets_dir
+# (default <data_dir>/BlenderConvert), where Code/make_asset_pack.py ships it.
+DEFAULT_PLACEHOLDER_OBJ = blender_arg(
+    Path(_paths.assets_dir()) / "Shapes"
     / "gbo.ast-apophis.jpl.radar.shape_model_v1.0"
     / "gbo.ast-apophis.jpl.radar.shape_model_v1.0" / "data" / "apophis_v233s7.obj"
 )
@@ -141,10 +138,12 @@ def from_windows_path(s: str) -> Path:
 
 
 def check_blender_exe(path: str = BLENDER_EXE) -> None:
-    if not Path(path).is_file():
+    # A bare name ("blender") is fine if it is on PATH (native Linux install).
+    if not Path(path).is_file() and shutil.which(path) is None:
         raise FileNotFoundError(
-            f"blender.exe not found at {path} -- confirm the Blender 5.2.1 LTS "
-            "install path (see CLAUDE.md) or update BLENDER_EXE in tui_sim_render.py."
+            f"Blender not found at {path} -- confirm the Blender 5.2.1 LTS "
+            "install path (see CLAUDE.md) or set blender_exe with "
+            "`python3 sobol/setup_paths.py`."
         )
 
 
@@ -392,6 +391,8 @@ def _run_logged(
             proc = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, errors="replace", cwd=cwd, bufsize=1,
+                # HONOURS_* overrides reach a Windows .exe only via WSLENV
+                env=_paths.child_env(cmd[0]),
             )
         except OSError as exc:
             log.write(f"could not start {cmd[0]}: {exc}\n")
@@ -414,13 +415,13 @@ def build_render_command(params: RenderParams) -> List[str]:
     ]
     if params.viz_path == "per_sphere":
         cmd += [
-            "--grains-dir", to_windows_path(params.grains_dir),
-            "--bodies-dir", to_windows_path(params.bodies_dir),
+            "--grains-dir", blender_arg(params.grains_dir),
+            "--bodies-dir", blender_arg(params.bodies_dir),
         ]
     else:
-        cmd += ["--manifest", to_windows_path(params.manifest)]
+        cmd += ["--manifest", blender_arg(params.manifest)]
     cmd += [
-        "--output-dir", to_windows_path(params.output_dir),
+        "--output-dir", blender_arg(params.output_dir),
         "--resolution", params.resolution,
         "--samples", str(params.samples),
         "--fps", str(params.fps),
@@ -432,6 +433,8 @@ def build_render_command(params: RenderParams) -> List[str]:
         cmd += ["--encode-video"]
         if params.video_fps is not None:
             cmd += ["--video-fps", str(params.video_fps)]
+    if CYCLES_DEVICE != "gpu":  # default GPU stays off the command line
+        cmd += ["--device", CYCLES_DEVICE]
     return cmd
 
 
@@ -477,10 +480,10 @@ def _max_frames_args(ctx: PathContext) -> List[str]:
 # output reaches preprocess.log and the status line only when it exits.
 def build_composite_preprocess_command(ctx: PathContext, output_dir: Path) -> List[str]:
     return [
-        str(WIN_VENV_PYTHON), "-u", to_windows_path(CODE_DIR / "viz" / "viz_preprocess.py"),
-        "--grains-dir", to_windows_path(ctx.grains_dir),
-        "--bodies-dir", to_windows_path(ctx.bodies_dir),
-        "--output-dir", to_windows_path(output_dir),
+        str(WIN_VENV_PYTHON), "-u", python_arg(CODE_DIR / "viz" / "viz_preprocess.py"),
+        "--grains-dir", python_arg(ctx.grains_dir),
+        "--bodies-dir", python_arg(ctx.bodies_dir),
+        "--output-dir", python_arg(output_dir),
         "--envelope-method", ctx.render_form.envelope_method,
     ] + _max_frames_args(ctx)
 
@@ -488,10 +491,10 @@ def build_composite_preprocess_command(ctx: PathContext, output_dir: Path) -> Li
 def build_instance_grains_preprocess_command(ctx: PathContext, output_dir: Path) -> List[str]:
     return [
         str(WIN_VENV_PYTHON), "-u",
-        to_windows_path(CODE_DIR / "viz" / "viz_preprocess_grains_instance.py"),
-        "--grains-dir", to_windows_path(ctx.grains_dir),
-        "--bodies-dir", to_windows_path(ctx.bodies_dir),
-        "--output-dir", to_windows_path(output_dir),
+        python_arg(CODE_DIR / "viz" / "viz_preprocess_grains_instance.py"),
+        "--grains-dir", python_arg(ctx.grains_dir),
+        "--bodies-dir", python_arg(ctx.bodies_dir),
+        "--output-dir", python_arg(output_dir),
     ] + _max_frames_args(ctx)
 
 
@@ -504,11 +507,11 @@ def build_instance_static_preprocess_command(ctx: PathContext, output_dir: Path)
     # "wrote no manifest" and never the real error.
     return [
         BLENDER_EXE, "--background", "--python-exit-code", "1", "--python",
-        to_windows_path(CODE_DIR / "viz" / "viz_preprocess_lite.py"), "--",
-        "--grains-dir", to_windows_path(ctx.grains_dir),
-        "--bodies-dir", to_windows_path(ctx.bodies_dir),
-        "--output-dir", to_windows_path(output_dir),
-        "--shape-obj", to_windows_path(Path(ctx.render_form.placeholder_obj)),
+        blender_arg(CODE_DIR / "viz" / "viz_preprocess_lite.py"), "--",
+        "--grains-dir", blender_arg(ctx.grains_dir),
+        "--bodies-dir", blender_arg(ctx.bodies_dir),
+        "--output-dir", blender_arg(output_dir),
+        "--shape-obj", blender_arg(Path(ctx.render_form.placeholder_obj)),
         "--n-points", str(ctx.render_form.n_points),
     ]
 
@@ -543,12 +546,12 @@ def build_dump_preprocess_command(ctx: PathContext, run_dir: Path, targets: Dict
     # resolve(): to_windows_path only converts absolute paths, and the Windows
     # python cannot see a relative WSL path
     cmd = [
-        str(WIN_VENV_PYTHON), "-u", to_windows_path(CODE_DIR / "viz" / "viz_preprocess_dump.py"),
-        "--run-dir", to_windows_path(Path(run_dir).resolve()),
-        "--bodies-dir", to_windows_path(ctx.bodies_dir),
+        str(WIN_VENV_PYTHON), "-u", python_arg(CODE_DIR / "viz" / "viz_preprocess_dump.py"),
+        "--run-dir", python_arg(Path(run_dir).resolve()),
+        "--bodies-dir", python_arg(ctx.bodies_dir),
     ]
     for name, viz_dir in targets.items():
-        cmd += [DUMP_PREPROCESS_FLAGS[name], to_windows_path(viz_dir)]
+        cmd += [DUMP_PREPROCESS_FLAGS[name], python_arg(viz_dir)]
     if "composite" in targets:
         cmd += ["--envelope-method", ctx.render_form.envelope_method]
     return cmd + _max_frames_args(ctx)
@@ -705,6 +708,9 @@ def run_render_path(
             preprocess_s=preprocess_s, render_s=render_s,
         )
     message = f"{n_frames} frame(s) in {elapsed:.0f}s to {output_dir}"
+    missing = asset_fallbacks(output_dir / "render.log")
+    if missing:
+        message += f", WARNING missing assets (plain fallback): {', '.join(missing)}"
     if form.encode_video:
         video_path = output_dir / "animation.mp4"
         message += (
@@ -715,6 +721,24 @@ def run_render_path(
         spec.name, True, "done", message, n_frames, elapsed,
         preprocess_s=preprocess_s, render_s=render_s,
     )
+
+
+# DEMHeadlessRender / DEMCinematicSetup log lines when an optional asset is
+# missing and the render falls back (stand-in material, bare sphere, black sky).
+_ASSET_FALLBACK_MARKERS = (
+    ("11.blend not found", "rock material"),
+    ("EARTH_MODEL_PATH not found", "Earth model"),
+    ("HDRI not found", "HDRI"),
+)
+
+
+def asset_fallbacks(log_path: Path) -> List[str]:
+    """Names of the optional assets a finished render fell back on (empty = none)."""
+    try:
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    return [name for marker, name in _ASSET_FALLBACK_MARKERS if marker in text]
 
 
 def format_path_result(r: PathResult) -> str:
@@ -1481,10 +1505,12 @@ class SimRenderTUIApp(App[None]):
                 )
             if not placeholder_obj or not from_windows_path(placeholder_obj).is_file():
                 raise ValueError(f"placeholder_obj not found: {placeholder_obj!r}")
-        if {"composite", "instance_grains"} & set(paths) and not Path(WIN_VENV_PYTHON).is_file():
+        if ({"composite", "instance_grains"} & set(paths) and not Path(WIN_VENV_PYTHON).is_file()
+                and shutil.which(str(WIN_VENV_PYTHON)) is None):
             raise ValueError(
-                f"Windows venv python not found at {WIN_VENV_PYTHON} -- needed by the "
-                "composite / instance_grains preprocess"
+                f"preprocess python not found at {WIN_VENV_PYTHON} -- needed by the "
+                "composite / instance_grains preprocess (set preprocess_python with "
+                "`python3 sobol/setup_paths.py`)"
             )
         return RenderFormValues(
             resolution=resolution,

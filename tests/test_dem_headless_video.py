@@ -9,7 +9,7 @@ from tests._paths import CODE, CODE_WIN
 
 BLENDERCONVERT = CODE / "BlenderConvert"
 BLENDERCONVERT_WIN = CODE_WIN + r"\BlenderConvert"
-BLENDER_EXE = Path("/mnt/c/Program Files/Blender Foundation/Blender 5.2/blender.exe")
+from tests._paths import BLENDER_EXE  # noqa: E402  (configured Windows blender.exe, else skip)
 WIN_TEMP = Path("/mnt/c/Users/22boy/AppData/Local/Temp")
 
 sys.path.insert(0, str(BLENDERCONVERT))

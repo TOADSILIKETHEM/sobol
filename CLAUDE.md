@@ -80,6 +80,14 @@ bash sobol/campaigns/run_torque_align_blender_vis_obj.sh
 OMP_NUM_THREADS=2 JOBS=2 bash sobol/campaigns/run_metricfix_reruns.sh   # thesis spin campaigns, ../docs/BATCHES.md
 ```
 
+Render existing dumps without the sim (dump route; any prefix with `--dem-model`/`--np-apophis`; other-machine setup `Code/README.md`):
+```bash
+python3 sobol/render_dumps.py sobol_mass_runs/<batch>/run_0001 --name <out> [--samples 500 --fps 24 --max-frames N --video]
+python3 sobol/render_dumps.py <fly dir> --prefix fly --dem-model particle --np-apophis N --apophis-only \
+  --encounter hyperbola   # someone else's phantomflyby run (lone Earth sink, no Sun)
+python3 sobol/setup_paths.py --check   # paths, assets, Blender + pandas, preprocess deps
+```
+
 Dumps → Blender inputs (bodies CSV + grains `.npz`):
 ```bash
 python3 sobol/Analysis/run_demtocsv_batch.py --min-dem-grains 450 \

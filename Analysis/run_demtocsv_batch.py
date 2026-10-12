@@ -7,10 +7,17 @@ import argparse
 import sys
 from pathlib import Path
 
-DEFAULT_DEM_DUMP_CONVERT = Path("/home/mboyle/Honours/Code/CSVconvert/DEMDumpConvert.py")
-DEFAULT_BASE_OUT = Path(
-    "/mnt/c/Users/22boy/OneDrive/Documents/GC-Max_desktop/Honours/Code/DEMCSVs"
-)
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from honours_code import CODE_DIR, paths as _paths  # noqa: E402
+
+DEFAULT_DEM_DUMP_CONVERT = CODE_DIR / "CSVconvert" / "DEMDumpConvert.py"
+
+
+def default_base_out() -> Path:
+    """<data_dir>/DEMCSVs (Code/honours_paths.py; default Max's OneDrive data
+    folder). Read when called, not at import: tui_sim_render imports this
+    module before it can report a broken local_paths.json in one line."""
+    return Path(_paths.data_dir()) / "DEMCSVs"
 
 
 def _min_dem_grains_from_setup(run_dir: Path) -> int | None:
@@ -62,7 +69,8 @@ def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("run_dirs", nargs="+", type=Path, help="PHANTOM run directories with sobol_* dumps")
     p.add_argument("--dump-convert", type=Path, default=DEFAULT_DEM_DUMP_CONVERT)
-    p.add_argument("--base-output-dir", type=Path, default=DEFAULT_BASE_OUT)
+    p.add_argument("--base-output-dir", type=Path, default=None,
+                   help="default <data_dir>/DEMCSVs (Code/local_paths.json)")
     p.add_argument(
         "--min-dem-grains",
         type=int,
@@ -73,6 +81,8 @@ def main() -> int:
     if not args.dump_convert.is_file():
         print(f"[ERROR] DEMDumpConvert.py not found: {args.dump_convert}", file=sys.stderr)
         return 1
+    if args.base_output_dir is None:
+        args.base_output_dir = default_base_out()
     args.base_output_dir.mkdir(parents=True, exist_ok=True)
     for run_dir in args.run_dirs:
         min_grains = args.min_dem_grains
