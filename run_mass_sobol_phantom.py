@@ -51,6 +51,18 @@ HORIZONS_APOPHIS_RADIUS_KM = 0.170
 
 SPIN_PERIOD_HR_TO_SETUP_S = 3600.0
 DEFAULT_DN_COHES_FACTOR = 0.1
+DEFAULT_SEED = 42  # --seed; also the phantomclumps seed when --boulder-seed is unset
+# Sweeps pin sliding friction instead of inheriting the binary default (Mia 1fd4ceb88: 0.5),
+# so batches stay comparable with those run before friction existed. None = binary default.
+DEFAULT_MU_S: Optional[float] = 0.0
+# Keys a pre-1fd4ceb88 binary does not write: inserted when absent from the .in (phantom only
+# warns on unknown keys), so a stale phantomsetup cannot leave a new phantom on its 0.5 default.
+_OPTIONAL_IN_KEYS = frozenset({"mu_s", "mu_r", "mu_t", "epsilon_t_dem", "cohesion_pa",
+                               "kb_cgs", "bond_reach", "bond_sigma_pa", "bond_tau_pa"})
+# Acting only through tangential friction (dem.f90: gated by mu_s > 0; no friction for sink DEM)
+_FRICTION_ONLY_IN_KEYS = frozenset({"mu_r", "mu_t", "epsilon_t_dem"})
+# write_inopt description of mu_s (ptmass.F90): present only in binaries that have friction
+FRICTION_BINARY_MARKER = b"DEM static (sliding) friction coefficient"
 
 
 def spin_period_hr_to_setup_seconds(hours: float) -> float:
@@ -179,6 +191,12 @@ _IN_VARIATION_SPEC: Tuple[Tuple[str, str, str, str], ...] = (
     ("kt_cgs",        "kt_min",    "kt_max",    "kt"),
     ("epsilon_n_dem", "eps_n_min", "eps_n_max", "eps"),
     ("kn_cgs",        "kn_min",    "kn_max",    "kn"),
+    # Mia 1fd4ceb88 friction / cohesion keys; only in .in files from post-merge binaries
+    ("mu_s",          "mu_s_min",   "mu_s_max",   "mus"),
+    ("mu_r",          "mu_r_min",   "mu_r_max",   "mur"),
+    ("mu_t",          "mu_t_min",   "mu_t_max",   "mut"),
+    ("epsilon_t_dem", "eps_t_min",  "eps_t_max",  "epst"),
+    ("cohesion_pa",   "coh_pa_min", "coh_pa_max", "cohpa"),
 )
 
 # Simulation timeframe parameters: stored in hours, written as "X hr" strings to the .setup file.
@@ -194,6 +212,12 @@ _TIME_VARIATION_SPEC: Tuple[Tuple[str, str, str, str], ...] = (
 _FLYBY_VARIATION_SPEC: Tuple[Tuple[str, str, str, str], ...] = (
     ("flyby_rp_km",    "flyby_rp_km_min",    "flyby_rp_km_max",    "rp"),
     ("flyby_vinf_kms", "flyby_vinf_kms_min", "flyby_vinf_kms_max", "vinf"),
+)
+
+# Boulders (--boulders only): swept like the other optional dimensions.
+_BOULDER_VARIATION_SPEC: Tuple[Tuple[str, str, str, str], ...] = (
+    ("f_boulder", "f_boulder_min", "f_boulder_max", "fb"),
+    ("rb_max",    "rb_max_min",    "rb_max_max",    "rbx"),
 )
 
 
@@ -234,6 +258,17 @@ def _active_flyby_variations(args: argparse.Namespace) -> List[Tuple[str, float,
     """Hyperbola dimensions that are being swept (both min and max set), in canonical order."""
     out: List[Tuple[str, float, float, str]] = []
     for param, lo_attr, hi_attr, slug_tok in _FLYBY_VARIATION_SPEC:
+        lo = getattr(args, lo_attr, None)
+        hi = getattr(args, hi_attr, None)
+        if lo is not None and hi is not None:
+            out.append((param, lo, hi, slug_tok))
+    return out
+
+
+def _active_boulder_variations(args: argparse.Namespace) -> List[Tuple[str, float, float, str]]:
+    """Boulder dimensions that are active (both bounds set), in canonical order."""
+    out: List[Tuple[str, float, float, str]] = []
+    for param, lo_attr, hi_attr, slug_tok in _BOULDER_VARIATION_SPEC:
         lo = getattr(args, lo_attr, None)
         hi = getattr(args, hi_attr, None)
         if lo is not None and hi is not None:
@@ -331,6 +366,12 @@ class RunSample:
     dn_cohes_factor: Optional[float] = None  # coh gap = dn * grain diameter, resolved after phantomsetup
     epsilon_n_dem: Optional[float] = None  # normal restitution coefficient [0,1]
     kn_cgs:        Optional[float] = None  # normal spring constant (dyne/cm)
+    # Mia 1fd4ceb88 contact keys (binary defaults mu_s=0.5, epsilon_t_dem=0.5); particle DEM only
+    mu_s:          Optional[float] = None  # sliding friction coefficient; 0 = frictionless
+    mu_r:          Optional[float] = None  # rolling friction (acts only with mu_s > 0)
+    mu_t:          Optional[float] = None  # twisting friction (acts only with mu_s > 0)
+    epsilon_t_dem: Optional[float] = None  # tangential restitution (0,1]
+    cohesion_pa:   Optional[float] = None  # pkdgrav granular-bridge cohesion (Pa); exclusive with kt_cgs
     # Timeframe: patched into the .setup file before phantomsetup as "X hr" strings.
     tmax_hours:  Optional[float] = None   # simulation end time in hours
     dtmax_hours: Optional[float] = None   # dump interval in hours
@@ -342,6 +383,11 @@ class RunSample:
     flyby_vinf_kms: Optional[float] = None
     flyby_start_sep_km: Optional[float] = None
     flyby_perturber_earth_masses: Optional[float] = None
+    # Boulders (phantomclumps; docs/superpowers/specs/2026-10-06-boulders-in-sweeps-design.md)
+    f_boulder: Optional[float] = None   # per-sample axis value; None = boulders.f_boulder
+    rb_max: Optional[float] = None      # per-sample axis value; None = boulders.rb_max
+    boulders: Optional[Any] = None      # boulders.BoulderSpec (fixed part); None = boulders off
+    phantomclumps_bin: Optional[str] = None  # set by boulders.attach_tools before dispatch
 
 
 class RunWorkerPayload(NamedTuple):
@@ -442,7 +488,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--seed",
         type=int,
-        default=42,
+        default=DEFAULT_SEED,
         help="Scramble seed for Sobol sequence.",
     )
     # Real scalings and spin parameters — optional Sobol dimensions when both min and max are set.
@@ -479,6 +525,11 @@ def build_parser() -> argparse.ArgumentParser:
         ("kt",    "kt_cgs (tensile spring constant in dyne/cm; DEM only; 0=off)"),
         ("eps-n", "epsilon_n_dem (normal restitution coefficient [0,1]; DEM only)"),
         ("kn",    "kn_cgs (normal spring constant in dyne/cm; DEM only)"),
+        ("mu-s",  "mu_s (sliding friction coefficient; 0=frictionless; particle DEM only)"),
+        ("mu-r",  "mu_r (rolling friction coefficient; needs mu_s > 0; particle DEM only)"),
+        ("mu-t",  "mu_t (twisting friction coefficient; needs mu_s > 0; particle DEM only)"),
+        ("eps-t", "epsilon_t_dem (tangential restitution coefficient (0,1]; particle DEM only)"),
+        ("coh-pa", "cohesion_pa (pkdgrav granular-bridge cohesion in Pa; exclusive with kt_cgs)"),
     ):
         parser.add_argument(
             f"--{key}-min",
@@ -535,6 +586,24 @@ def build_parser() -> argparse.ArgumentParser:
             "When unset and kt_cgs>0, derived from --dn-cohes-factor and np_apophis."
         ),
     )
+    parser.add_argument(
+        "--mu-s",
+        type=float,
+        default=None,
+        metavar="MU",
+        help=(
+            f"Fix DEM sliding friction mu_s for every particle-DEM run (default {DEFAULT_MU_S}; "
+            "binary default 0.5). Exclusive with --mu-s-min/--mu-s-max."
+        ),
+    )
+    for flag, dest, what in (("--mu-r", "mu_r", "rolling friction mu_r (pkdgrav gravel 1.05)"),
+                             ("--mu-t", "mu_t", "twisting friction mu_t (pkdgrav gravel 1.3)"),
+                             ("--eps-t", "epsilon_t_dem", "tangential restitution epsilon_t_dem (0,1]")):
+        parser.add_argument(
+            flag, dest=dest, type=float, default=None, metavar="X",
+            help=f"Fix DEM {what} for every particle-DEM run (binary default when unset); needs "
+                 f"friction (--mu-s > 0). Exclusive with {flag}-min/{flag}-max.",
+        )
     parser.add_argument(
         "--kc-fixed",
         type=float,
@@ -673,8 +742,54 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Settle length in dynamical times t_dyn = 1/sqrt(G rho) (settled bodies).")
     parser.add_argument("--relax-tdyn", type=float, default=0.5, metavar="N",
                         help="Post-crop relax length in t_dyn (Mia: 0.5; 0 = skip).")
+    parser.add_argument("--settle-with-friction", action="store_true",
+                        help="Settle and relax the body with the run's mu_s/mu_r/mu_t (looser packing; own "
+                             "cache key). Default: settle frictionless (mu_s = 0) whatever the flyby uses.")
     parser.add_argument("--body-cache-dir", default=None, metavar="DIR",
                         help="Settled-body cache (default: <output-root>/settled_bodies).")
+    parser.add_argument("--boulders", action="store_true",
+                        help="Glue the settled body into bonded boulders with phantomclumps before each run "
+                             "(needs --body-source settled and --bond-sigma-pa).")
+    parser.add_argument("--f-boulder", type=float, default=None, metavar="F",
+                        help="Fraction of the body put into RANDOM boulders, 0-1 (default 0.3); placed "
+                             "boulders come on top.")
+    parser.add_argument("--rb-max", type=float, default=None, metavar="R",
+                        help="Largest random boulder radius in grain radii (default 4).")
+    for dest_flag, unit in (("f-boulder", "F"), ("rb-max", "R")):
+        parser.add_argument(f"--{dest_flag}-min", type=float, default=None, metavar=unit,
+                            help=f"Sweep lower bound for --{dest_flag} (boulders; set -max too).")
+        parser.add_argument(f"--{dest_flag}-max", type=float, default=None, metavar=unit,
+                            help=f"Sweep upper bound for --{dest_flag} (boulders; set -min too).")
+    parser.add_argument("--rb-min", type=float, default=None, metavar="R",
+                        help="Smallest random boulder radius in grain radii, >= 1 (default 1.5).")
+    parser.add_argument("--boulder-q", type=float, default=None, metavar="Q",
+                        help="Power-law slope q of the boulder size distribution dN/dR ~ R^-q (default 3.5).")
+    parser.add_argument("--boulder-shape", choices=("round", "ellipsoid", "grown"), default=None,
+                        help="Random boulder shape (default round).")
+    parser.add_argument("--boulder-axis-min", type=float, default=None, metavar="A",
+                        help="Smallest ellipsoid axis ratio, 0.1-1 (ellipsoid only; blank = phantomclumps default).")
+    parser.add_argument("--boulder-jagged", type=float, default=None, metavar="J",
+                        help="Jaggedness of grown boulders, 0-1 (grown only; blank = phantomclumps default).")
+    parser.add_argument("--boulder-placed", choices=("none", "binary", "file"), default=None,
+                        help="Placed boulders made before the random ones (default none).")
+    parser.add_argument("--lobe-ratio", type=float, default=None, metavar="R",
+                        help="Contact binary small/large lobe radius, 0.1-1 (binary only).")
+    parser.add_argument("--boulder-file", default=None, metavar="PATH",
+                        help="Placed boulders, one per line: x y z a b c [rx ry rz] (km, deg; file only).")
+    parser.add_argument("--boulder-nmin", type=int, default=None, metavar="N",
+                        help="Smallest random boulder kept, in grains (>= 2; blank = phantomclumps default).")
+    parser.add_argument("--boulder-seed", type=int, default=None, metavar="N",
+                        help="phantomclumps random seed, fixed per batch (default: --seed).")
+    parser.add_argument("--bond-sigma-pa", type=float, default=None, metavar="PA",
+                        help="Bond tensile strength in Pa, fixed per batch (required with --boulders; "
+                             "0 = break on stretch past bond_reach only).")
+    parser.add_argument("--bond-tau-ratio", type=float, default=None, metavar="X",
+                        help="Bond shear strength as a multiple of --bond-sigma-pa (default 1).")
+    parser.add_argument("--kb-cgs", type=float, default=None, metavar="K",
+                        help="Bond spring constant g/s^2 per cm (default: the run's kn_cgs).")
+    parser.add_argument("--bond-reach", type=float, default=None, metavar="X",
+                        help="Max bond surface gap as a fraction of R_i+R_j; written to phantomclumps and "
+                             "the .in (default 0.1).")
     parser.add_argument(
         "--np-apophis",
         type=int,
@@ -899,6 +1014,45 @@ def validate_args(args: argparse.Namespace) -> None:
             raise ValueError(f"{param}: set both min and max, or neither")
         if lo is not None and hi is not None and hi < lo:
             raise ValueError(f"{param}: require min <= max")
+    if getattr(args, "mu_s", None) is not None:
+        if args.mu_s_min is not None or args.mu_s_max is not None:
+            raise ValueError("--mu-s is mutually exclusive with --mu-s-min and --mu-s-max")
+        if args.mu_s < 0:
+            raise ValueError("--mu-s must be >= 0")
+    fixed_friction_only = []
+    for dest, flag, lo_attr, hi_attr in (("mu_r", "--mu-r", "mu_r_min", "mu_r_max"),
+                                         ("mu_t", "--mu-t", "mu_t_min", "mu_t_max"),
+                                         ("epsilon_t_dem", "--eps-t", "eps_t_min", "eps_t_max")):
+        v = getattr(args, dest, None)
+        if v is None:
+            continue
+        if getattr(args, lo_attr, None) is not None or getattr(args, hi_attr, None) is not None:
+            raise ValueError(f"{flag} is mutually exclusive with {flag}-min and {flag}-max")
+        if dest == "epsilon_t_dem" and not 0 < v <= 1:
+            raise ValueError("--eps-t must be in (0, 1]")
+        if v < 0:
+            raise ValueError(f"{flag} must be >= 0")
+        fixed_friction_only.append(dest)
+    in_axes = {p for p, *_ in _active_in_variations(args)}
+    friction_on = (getattr(args, "mu_s", None) or 0) > 0 or "mu_s" in in_axes
+    idle = sorted((in_axes & _FRICTION_ONLY_IN_KEYS) | set(fixed_friction_only))
+    if getattr(args, "settle_with_friction", False):
+        if getattr(args, "body_source", "lattice") != "settled":
+            raise ValueError("--settle-with-friction needs --body-source settled")
+        swept = sorted(in_axes & {"mu_s", "mu_r", "mu_t"})
+        if swept:
+            raise ValueError(f"--settle-with-friction with swept {swept} would settle one body per sample; "
+                             "fix them (--mu-s/--mu-r/--mu-t) instead")
+    if idle and not friction_on:
+        raise ValueError(f"{idle} act only through friction: set --mu-s > 0 or sweep mu_s")
+    if getattr(args, "dem_model", "particle") == "sink" and (friction_on or idle):
+        raise ValueError("DEM friction axes have no effect with --dem-model sink (sink DEM is frictionless)")
+    # dem.f90 get_ssdem_force: cohesion_pa > 0 wins over kt_cgs (if/elseif), so kt would be silently ignored
+    kt_on = ("kt_cgs" in in_axes or (getattr(args, "kt_fixed", None) or 0) > 0
+             or (getattr(args, "kc_fixed", None) or 0) > 0)
+    if "cohesion_pa" in in_axes and kt_on:
+        raise ValueError("set only one cohesion model: --coh-pa-min/max or kt_cgs "
+                         "(--kt-fixed/--kc-fixed/--kt-min/max); dem.f90 ignores kt_cgs when cohesion_pa > 0")
     if getattr(args, "kt_fixed", None) is not None:
         if args.kt_min is not None or args.kt_max is not None:
             raise ValueError("--kt-fixed is mutually exclusive with --kt-min and --kt-max")
@@ -1042,6 +1196,7 @@ def validate_args(args: argparse.Namespace) -> None:
         )
 
     _validate_body_encounter(args)
+    _boulders_module().validate_args(args)
 
 
 def _validate_body_encounter(args: argparse.Namespace) -> None:
@@ -1131,6 +1286,7 @@ def count_dimensions(args: argparse.Namespace) -> int:
     n += len(_active_in_variations(args))
     n += len(_active_time_variations(args))
     n += len(_active_flyby_variations(args))
+    n += len(_active_boulder_variations(args))
     if args.vary_use_dem:
         n += 1
     if args.vary_use_shape_crop:
@@ -1308,6 +1464,44 @@ def apply_run_sample_to_setup(
     return columns
 
 
+def insert_in_assignment(text: str, key: str, value_str: str) -> str:
+    """Append ``key = value`` to .in text (for keys an older phantomsetup did not write)."""
+    if text and not text.endswith("\n"):
+        text += "\n"
+    return text + f"{key:>20} =  {value_str}    ! set by sobol runner (not in this binary's .in)\n"
+
+
+def check_binary_supports_contact_keys(args: argparse.Namespace, phantom_bin: Path) -> None:
+    """Refuse explicit friction / Mia contact settings on a phantom built before 1fd4ceb88.
+
+    The default mu_s = 0 pin is fine on any binary (no friction either way); an explicit
+    --mu-s > 0 or a swept Mia contact axis would silently run frictionless."""
+    if not Path(phantom_bin).is_file():
+        return  # --dry-run: nothing will run
+    asked = [p for p, *_ in _active_in_variations(args) if p in _OPTIONAL_IN_KEYS]
+    if (getattr(args, "mu_s", None) or 0) > 0:
+        asked.append("mu_s")
+    _require_friction_binary(asked, phantom_bin)
+
+
+def check_sample_supports_contact_keys(sample: RunSample, phantom_bin: Path) -> None:
+    """One-run form of check_binary_supports_contact_keys (tui_sim_render)."""
+    if not Path(phantom_bin).is_file():
+        return
+    asked = [k for k in ("mu_s", "mu_r", "mu_t", "cohesion_pa") if (getattr(sample, k) or 0) > 0]
+    if sample.epsilon_t_dem is not None:
+        asked.append("epsilon_t_dem")
+    _require_friction_binary(asked, phantom_bin)
+
+
+def _require_friction_binary(asked: List[str], phantom_bin: Path) -> None:
+    if asked and not _binary_has_string(phantom_bin, FRICTION_BINARY_MARKER):
+        raise RuntimeError(
+            f"{phantom_bin} has no DEM friction (built before Mia 1fd4ceb88) but {sorted(set(asked))} "
+            "was requested; rebuild (cd sobol && make setup && make) or drop the flags"
+        )
+
+
 def apply_run_sample_to_in(in_path: Path, sample: RunSample) -> Dict[str, str]:
     """Patch DEM contact parameters into a run's .in file; returns column map for CSV.
 
@@ -1319,7 +1513,7 @@ def apply_run_sample_to_in(in_path: Path, sample: RunSample) -> Dict[str, str]:
     active = [(p, getattr(sample, p)) for p, *_ in _IN_VARIATION_SPEC if getattr(sample, p) is not None]
     if sample.coh_gap_max_cgs is not None:
         active.append(("coh_gap_max_cgs", sample.coh_gap_max_cgs))
-    if not active:
+    if not active and sample.boulders is None:
         return columns
 
     text = in_path.read_text(encoding="utf-8")
@@ -1328,8 +1522,18 @@ def apply_run_sample_to_in(in_path: Path, sample: RunSample) -> Dict[str, str]:
     if not re.search(r"^\s*kn_cgs\s*=", text, re.MULTILINE):
         return columns
 
+    bd = _boulders_module() if sample.boulders is not None else None
+    if bd is not None and bd.bonds_wanted(in_path.parent):
+        kn_m = re.search(r"^\s*kn_cgs\s*=\s*([^!\s]+)", text, re.MULTILINE)
+        kn = sample.kn_cgs if sample.kn_cgs is not None else float(kn_m.group(1))
+        active += list(bd.bond_in_keys(bd.resolve(sample), kn).items())
+
     for param, v in active:
         tok = format_real_token(v)
+        if param in _OPTIONAL_IN_KEYS and not re.search(rf"^\s*{re.escape(param)}\s*=", text, re.MULTILINE):
+            text = insert_in_assignment(text, param, tok)
+            columns[param] = f"{v:.12g}"
+            continue
         try:
             text = replace_setup_assignment(text, param, tok)
             validate_assignment(text, param, tok)
@@ -1388,8 +1592,11 @@ def attach_settled_bodies(
     phantom_dir: Path,
     ephemeris_cache_dir: Optional[Path],
     dry_run: bool,
+    settle_friction: bool = False,
 ) -> int:
     """Build (or reuse) one settled body per unique spec, serially, before workers start.
+
+    settle_friction: settle/relax with each sample's mu_s/mu_r/mu_t (else frictionless, SettleSpec default).
 
     Sets sample.settled_body_dir on every body_source == 'settled' sample; returns the number of
     unique bodies. Serial on purpose: two workers must never settle the same body at once.
@@ -1410,6 +1617,8 @@ def attach_settled_bodies(
             shape_file=str(Path(shape_file).resolve()),
             settle_tdyn=settle_tdyn,
             relax_tdyn=relax_tdyn,
+            **(dict(mu_s=s.mu_s if s.mu_s is not None else 0.0, mu_r=s.mu_r, mu_t=s.mu_t)
+               if settle_friction else {}),
         )
         if spec not in built:
             if dry_run:
@@ -1469,6 +1678,12 @@ def _kt_for_np(args: argparse.Namespace, np_val: int) -> Optional[float]:
     return kt_fixed
 
 
+def apply_contact_defaults(s: RunSample) -> None:
+    """Fill contact keys the sweep did not set, so the binary default never decides physics."""
+    if s.mu_s is None and DEFAULT_MU_S is not None:
+        s.mu_s = DEFAULT_MU_S
+
+
 def _ensure_coh_gap(s: RunSample, args: argparse.Namespace) -> None:
     """Set coh_gap_max_cgs from CLI or dn factor when kt > 0 and gap not already set."""
     if getattr(args, "coh_gap_max_cgs", None) is not None:
@@ -1503,12 +1718,24 @@ def _apply_fixed_run_sample_overrides(
         _ensure_coh_gap(s, args)
     if getattr(args, "spin_period_fixed", None) is not None:
         s.apophis_spin_period = args.spin_period_fixed
+    if getattr(args, "mu_s", None) is not None:
+        s.mu_s = args.mu_s
+    for dest in ("mu_r", "mu_t", "epsilon_t_dem"):
+        if getattr(args, dest, None) is not None:
+            setattr(s, dest, getattr(args, dest))
+    apply_contact_defaults(s)
     s.body_source = getattr(args, "body_source", "lattice")
     s.encounter = getattr(args, "encounter", "ephemeris")
     for dest in ("flyby_rp_km", "flyby_vinf_kms", "flyby_start_sep_km", "flyby_perturber_earth_masses"):
         v = getattr(args, dest, None)
         if v is not None and getattr(s, dest) is None:
             setattr(s, dest, v)
+    if getattr(args, "boulders", False):
+        s.boulders = _boulders_module().spec_from_args(args)
+        for dest in ("f_boulder", "rb_max"):
+            v = getattr(args, dest, None)
+            if v is not None and getattr(s, dest) is None:
+                setattr(s, dest, v)
 
 
 def _apply_np_list_fixed_flags(s: RunSample, args: argparse.Namespace) -> None:
@@ -1573,6 +1800,9 @@ def build_run_samples(num_samples: int, args: argparse.Namespace) -> List[RunSam
         for param, lo, hi, _ in _active_flyby_variations(args):
             setattr(s, param, lo + row[di] * (hi - lo))
             di += 1
+        for param, lo, hi, _ in _active_boulder_variations(args):
+            setattr(s, param, lo + row[di] * (hi - lo))
+            di += 1
         _apply_fixed_run_sample_overrides(s, args)
         _ensure_coh_gap(s, args)
         if args.vary_use_dem:
@@ -1611,6 +1841,8 @@ def sample_column_order(args: argparse.Namespace) -> List[str]:
         order.append(param)
     for param, _, _, _ in _active_flyby_variations(args):
         order.append(param)
+    for param, _, _, _ in _active_boulder_variations(args):
+        order.append(param)
     if args.vary_use_dem:
         order.append("use_dem")
     if args.vary_use_shape_crop:
@@ -1629,6 +1861,11 @@ def sample_column_order(args: argparse.Namespace) -> List[str]:
     # written for a settled-body batch, blank on dry-run rows.
     if args.body_source == "settled":
         order.append("np_kept")
+    if getattr(args, "boulders", False):
+        for c in ("f_boulder", "rb_max"):
+            if c not in order:
+                order.append(c)
+        order += ["f_boulder_actual", "n_boulders", "boulder_placed", "bond_sigma_pa"]
     return order
 
 
@@ -1649,6 +1886,9 @@ def build_salib_problem(args: argparse.Namespace) -> Dict[str, object]:
         names.append(param)
         bounds.append([float(lo), float(hi)])
     for param, lo, hi, _ in _active_flyby_variations(args):
+        names.append(param)
+        bounds.append([float(lo), float(hi)])
+    for param, lo, hi, _ in _active_boulder_variations(args):
         names.append(param)
         bounds.append([float(lo), float(hi)])
     if args.vary_use_dem:
@@ -1683,6 +1923,9 @@ def run_sample_from_salib_row(row: Sequence[float], args: argparse.Namespace) ->
         setattr(s, param, float(row[i]))
         i += 1
     for param, _, _, _ in _active_flyby_variations(args):
+        setattr(s, param, float(row[i]))
+        i += 1
+    for param, _, _, _ in _active_boulder_variations(args):
         setattr(s, param, float(row[i]))
         i += 1
     _apply_fixed_run_sample_overrides(s, args)
@@ -1760,6 +2003,12 @@ def canonical_sweep_descriptor(args: argparse.Namespace) -> str:
     for dest in ("flyby_rp_km", "flyby_vinf_kms", "flyby_start_sep_km", "settle_tdyn", "relax_tdyn"):
         if getattr(args, dest, None) is not None:
             parts.append(f"{dest}={getattr(args, dest)}")
+    if getattr(args, "boulders", False):
+        import dataclasses as _dc
+        spec = _boulders_module().spec_from_args(args)
+        parts.append(f"boulders={sorted(_dc.asdict(spec).items())}")
+        for _, lo, hi, _tok in _active_boulder_variations(args):
+            parts.append(f"{_tok}={lo}-{hi}")
     parts.append(f"vary_use_dem={args.vary_use_dem}")
     parts.append(f"dem_model={getattr(args, 'dem_model', 'particle')}")
     parts.append(f"vary_use_shape_crop={args.vary_use_shape_crop}")
@@ -1803,6 +2052,8 @@ def build_auto_batch_sweep_slug(args: argparse.Namespace, max_len: int) -> str:
         tokens.append(f"{slug_tok}{_fmt_slug_float(lo)}-{_fmt_slug_float(hi)}")
     for _, lo, hi, slug_tok in _active_flyby_variations(args):
         tokens.append(f"{slug_tok}{_fmt_slug_float(lo)}-{_fmt_slug_float(hi)}")
+    for _, lo, hi, slug_tok in _active_boulder_variations(args):
+        tokens.append(f"{slug_tok}{_fmt_slug_float(lo)}-{_fmt_slug_float(hi)}")
     for param, _, _, slug_tok in _TIME_VARIATION_SPEC:
         fixed_val = getattr(args, param, None)
         if fixed_val is not None:
@@ -1819,6 +2070,13 @@ def build_auto_batch_sweep_slug(args: argparse.Namespace, max_len: int) -> str:
         tokens.append("hyp")
     if args.body_source == "settled":
         tokens.append("settled")
+    if getattr(args, "boulders", False):
+        bspec = _boulders_module().spec_from_args(args)
+        tokens.append(f"bld{bspec.placed}")
+        tokens.append(f"sig{_fmt_slug_float(bspec.bond_sigma_pa)}")
+        for param, _, _, slug_tok in _BOULDER_VARIATION_SPEC:
+            if getattr(args, param, None) is not None:  # fixed value (axis ranges are tokens above)
+                tokens.append(f"{slug_tok}{_fmt_slug_float(getattr(args, param))}")
     slug = "_".join(tokens)
     if len(slug) <= max_len:
         return slug
@@ -3017,6 +3275,11 @@ def write_samples_csv(path: Path, samples: List[RunSample], column_order: List[s
                     row.append("T" if s.use_shape_crop is True else "F" if s.use_shape_crop is False else "")
                 elif col == "apophis_only":
                     row.append("T" if s.apophis_only is True else "F" if s.apophis_only is False else "")
+                elif col == "boulder_placed":
+                    row.append(s.boulders.placed if s.boulders is not None else "")
+                elif col in ("f_boulder", "rb_max", "bond_sigma_pa") and s.boulders is not None:
+                    v = getattr(s, col, None)  # per-sample axis value, else the batch's fixed spec value
+                    row.append(f"{float(v if v is not None else getattr(s.boulders, col)):.12g}")
                 else:
                     v = getattr(s, col, None)
                     row.append(f"{float(v):.12g}" if v is not None else "")
@@ -3114,6 +3377,14 @@ def _encounter_module():
         import encounter as mod
     except ImportError:
         from sobol import encounter as mod
+    return mod
+
+
+def _boulders_module():
+    try:
+        import boulders as mod
+    except ImportError:
+        from sobol import boulders as mod
     return mod
 
 
@@ -3273,13 +3544,20 @@ def _run_hyperbola_case(
         if not sample.settled_body_dir or phantomflyby_bin is None:
             raise RuntimeError("hyperbola run without a settled body or phantomflyby (make demtools)")
         body = _settled_body_module().SettledBody.load(Path(sample.settled_body_dir))
+        body_dump = None
+        if sample.boulders is not None:
+            bd = _boulders_module()
+            param_columns.update(bd.clump_sample(run_dir, body, sample))
+            body_dump = run_dir / bd.CLUMPED_DUMP
         param_columns.update(enc.prepare_hyperbola_run(
-            run_dir, prefix, sample, body, Path(phantomflyby_bin), base_setup))
+            run_dir, prefix, sample, body, Path(phantomflyby_bin), base_setup, dump=body_dump))
         maxp_flag = [f"--maxp={max(2000, 4 * body.n_kept)}"]
         resolve_coh_gap_after_setup(run_dir, prefix, sample)
         param_columns.update(apply_run_sample_to_in(run_dir / f"{prefix}.in", sample))
         run_command([str(phantom_bin), f"{prefix}.in", *maxp_flag], cwd=run_dir,
                     log_path=run_dir / "phantom.log")
+        if sample.boulders is not None:
+            _boulders_module().check_run_logs(run_dir, setup_log=False)
         m = compute_run_metrics(run_dir, prefix, sample, earth_sink_id, apophis_sink_id)
         sh = _shape_metrics_or_nan(run_dir, prefix, sample, phantomanalysis_bin)
         return RunRecord(
@@ -3364,7 +3642,13 @@ def run_one_case(
             if not sample.settled_body_dir:
                 raise RuntimeError("settled-body run without a built body (attach_settled_bodies not run)")
             settled = _settled_body_module().SettledBody.load(Path(sample.settled_body_dir))
-            param_columns.update(_encounter_module().apply_settled_body_to_setup(run_dir, prefix, settled))
+            body_dump = None
+            if sample.boulders is not None:
+                bd = _boulders_module()
+                param_columns.update(bd.clump_sample(run_dir, settled, sample))
+                body_dump = run_dir / bd.CLUMPED_DUMP
+            param_columns.update(_encounter_module().apply_settled_body_to_setup(
+                run_dir, prefix, settled, dump=body_dump))
         # phantomsetup is caught separately so we can inspect setup.log for the specific
         # MAXPTMASS overflow message before falling back to a generic "command failed" error.
         # DEM runs pass a small --maxp to phantomsetup and phantom (default allocation is
@@ -3405,6 +3689,8 @@ def run_one_case(
         in_param_cols = apply_run_sample_to_in(run_input, sample)
         param_columns.update(in_param_cols)
         run_command([str(phantom_bin), f"{prefix}.in"] + maxp_flag, cwd=run_dir, log_path=run_dir / "phantom.log")
+        if sample.boulders is not None:
+            _boulders_module().check_run_logs(run_dir, setup_log=True)
 
         m = compute_run_metrics(run_dir, prefix, sample, earth_sink_id, apophis_sink_id)
         sh = _shape_metrics_or_nan(run_dir, prefix, sample, phantomanalysis_bin)
@@ -3464,11 +3750,13 @@ def _execute_run_worker(payload: RunWorkerPayload) -> RunRecord:
 def _cleanup_run_dir(run_dir: Path, prefix: str) -> None:
     """Delete heavy output files after metrics are safely extracted.
 
-    Removes binary dump files (sobol_NNNNN), per-sink .ev files, and phantom.log.
-    Keeps .in, .setup, setup.log, and ephemeris .txt files for audit purposes.
+    Removes binary dump files (sobol_NNNNN), per-sink .ev files, phantom.log, and the per-run boulder
+    dumps (clumped_*, unclumped_*; the flyby dumps carry iclump). Keeps .in, .setup, setup.log,
+    clumps.log, boulders.json and ephemeris .txt files for audit purposes.
     """
     removed = 0
-    for pattern in (f"{prefix}_[0-9]*", f"{prefix}Sink*N*.ev", f"{prefix}*.ev", "phantom.log"):
+    for pattern in (f"{prefix}_[0-9]*", f"{prefix}Sink*N*.ev", f"{prefix}*.ev", "phantom.log",
+                    "clumped_[0-9]*", "clumped.in", "unclumped_[0-9]*", "unclumped.in"):
         for f in run_dir.glob(pattern):
             if f.is_file():
                 f.unlink()
@@ -3516,8 +3804,9 @@ def prepare_settled_bodies_and_dem_tools(
             settle_tdyn=args.settle_tdyn, relax_tdyn=args.relax_tdyn, cache_root=cache_root,
             phantomsetup_bin=phantomsetup_bin, phantom_bin=phantom_bin,
             phantom_dir=Path(args.phantom_dir).resolve(), ephemeris_cache_dir=ephemeris_cache_dir,
-            dry_run=args.dry_run)
+            dry_run=args.dry_run, settle_friction=getattr(args, "settle_with_friction", False))
         print(f"[INFO] {n_bodies} settled body spec(s) ready under {cache_root}", flush=True)
+    _boulders_module().attach_tools(samples, Path(args.phantom_dir).resolve(), phantom_bin, args.dry_run)
 
     flyby_bin: Optional[Path] = None
     if args.encounter == "hyperbola" and not args.dry_run:
@@ -3604,6 +3893,7 @@ def main() -> int:
             samples = build_run_samples(args.num_samples, args)
 
         base_setup, base_input, phantomsetup_bin, phantom_bin = preflight(args, base_dir, output_root)
+        check_binary_supports_contact_keys(args, phantom_bin)
 
         flyby_bin, analysis_bin = prepare_settled_bodies_and_dem_tools(
             args, samples, base_setup, phantomsetup_bin, phantom_bin, ephemeris_cache)

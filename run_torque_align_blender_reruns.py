@@ -22,6 +22,7 @@ from run_mass_sobol_phantom import (  # noqa: E402
     RunRecord,
     RunSample,
     _cleanup_run_dir,
+    apply_contact_defaults,
     preflight,
     resolve_default_shape_file,
     run_one_case,
@@ -150,6 +151,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 dtmax_hours=args.dtmax_hours,
             )
         )
+        apply_contact_defaults(samples[-1])  # frictionless, as the S1 thesis runs
 
     col_order = ["apophis_spin_torque_align_deg", "apophis_spin_period", "np_apophis"]
     if args.dtmax_hours is not None:

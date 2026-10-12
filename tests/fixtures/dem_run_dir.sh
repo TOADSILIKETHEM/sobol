@@ -4,6 +4,7 @@
 set -euo pipefail
 model=$1; out=$2; np=$3; tmax=$4; dtmax=$5; torque=$6; do_run=${7:-}
 root=/home/mboyle/Honours
+bin=${PHANTOM_BIN_DIR:-$root/sobol}
 case "$model" in
   particle) use_dem=T; use_sinks=F ;;
   sink)     use_dem=F; use_sinks=T ;;
@@ -43,9 +44,15 @@ cat > sobol.setup <<EOF
 apophis_spin_torque_align_deg =  $torque
 EOF
 maxp=$(( np * 4 > 4000 ? np * 4 : 4000 ))
-"$root/sobol/phantomsetup" sobol --maxp=$maxp > setup.log 2>&1
+"$bin/phantomsetup" sobol --maxp=$maxp > setup.log 2>&1
 sed -i 's/^\( *nfulldump *= *\)[0-9]*/\1         1/' sobol.in
+# IN_SET="mu_s=0 kb_cgs=1e7": set .in keys (each must already exist in sobol.in)
+for kv in ${IN_SET:-}; do
+  k=${kv%%=*}; v=${kv#*=}
+  grep -qE "^ *$k *=" sobol.in || { echo "IN_SET: $k not in sobol.in" >&2; exit 3; }
+  sed -i -E "s/^( *$k *= *)[^!]*/\1$v    /" sobol.in
+done
 if [ "$do_run" = run ]; then
-  OMP_NUM_THREADS=1 "$root/sobol/phantom" sobol.in --maxp=$maxp > phantom.log 2>&1
+  OMP_NUM_THREADS=1 "$bin/phantom" sobol.in --maxp=$maxp > phantom.log 2>&1
 fi
 echo "staged $model in $out"

@@ -221,3 +221,39 @@ def test_real_settle_np300(tmp_path):
                                  tools, root)
     assert 0.85 * 300 <= body.n_kept <= 1.35 * 300
     assert 0.55 < body.packing_fraction < 0.85
+
+
+def test_settle_and_relax_pin_mu_s(tmp_path):
+    # the fake setup/crop write an .in without mu_s, as a binary default of 0.5 would leave it
+    spec = sb.SettleSpec(np_apophis=300, scale_rho=1.0, shape_file=str(_shape(tmp_path)))
+    body = _build(tmp_path, spec, tmp_path / "cache")
+    assert float(_val((body.dir / "settle.in").read_text(), "mu_s")) == spec.mu_s == 0.0
+    assert float(_val((body.dir / "cropped.in").read_text(), "mu_s")) == 0.0
+
+
+def test_settle_key_records_mu_s(tmp_path):
+    shape = str(_shape(tmp_path))
+    b = tmp_path / "b"
+    b.write_bytes(b"x")
+    k0 = sb.settle_key(sb.SettleSpec(np_apophis=300, scale_rho=1.0, shape_file=shape), [b])
+    k5 = sb.settle_key(sb.SettleSpec(np_apophis=300, scale_rho=1.0, shape_file=shape, mu_s=0.5), [b])
+    assert k0 != k5
+
+
+def test_settle_key_ignores_unset_rolling_twisting(tmp_path):
+    """mu_r/mu_t were added after bodies were cached: unset must hash as before, set must not."""
+    import hashlib
+    import json
+    from dataclasses import asdict
+    shape = _shape(tmp_path)
+    b1 = tmp_path / "phantom"
+    b1.write_bytes(b"v1")
+    spec = sb.SettleSpec(np_apophis=300, scale_rho=1.0, shape_file=str(shape))
+    legacy = {k: v for k, v in asdict(spec).items() if k not in ("mu_r", "mu_t")}
+    legacy["shape_file"] = [sb._file_sha(p) for p in sb._shape_asset_paths(shape)]
+    legacy["binaries"] = [sb._file_sha(b1.resolve())]
+    digest = hashlib.sha256(json.dumps(legacy, sort_keys=True).encode()).hexdigest()[:12]
+    assert sb.settle_key(spec, [b1]) == f"np300_srho1_{digest}"
+    fric = sb.SettleSpec(300, 1.0, str(shape), mu_s=1.0, mu_r=1.05, mu_t=1.3)
+    assert sb.settle_key(fric, [b1]) != sb.settle_key(spec, [b1])
+    assert sb._contact_in_keys(fric) == {"mu_s": "1", "mu_r": "1.05", "mu_t": "1.3"}

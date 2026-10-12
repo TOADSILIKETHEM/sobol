@@ -32,6 +32,7 @@ Parent: `../CLAUDE.md`. Shared facts: `../docs/SHARED_FACTS.md`. Merge/rename ca
   - `spin_period (hr)` and `spin_torque_align (deg)`.
   - `kt_cgs`: blank keeps the template value; `0` writes 0.
   - `dn_cohes_factor` (0.1). Passed only when `kt_cgs > 0`; the runner's `resolve_coh_gap_after_setup()` converts it after setup (`dn × 2 × R_grain`).
+  - Friction / cohesion (Mia, merged 2026-10-06; particle DEM): `mu_s` (blank = `DEFAULT_MU_S` 0, frictionless; binary default 0.5), `mu_r`, `mu_t` (need `mu_s > 0`), `epsilon_t_dem` ((0,1]), `cohesion_pa` (Pa; not with `kt_cgs > 0`). Blank keeps the binary default for all but `mu_s`. Bad combinations are refused in the form; a binary without friction is refused before setup.
   - `tmax` (default `108` hr = template 4.5 days) and `dtmax` (default `0.5` hr = template 30 min). Clearing a box falls back to the template.
   - `sink_earth_id` (4) and `sink_apophis_id` (11).
   - `shape_file`: a non-blank value turns on `use_shape_crop`.
@@ -53,6 +54,12 @@ Parent: `../CLAUDE.md`. Shared facts: `../docs/SHARED_FACTS.md`. Merge/rename ca
     fields (defaults 5.0 / 0.5 / shared cache), not form rows.
   - Verified 2026-09-27: headless form → np300 settled hyperbola (rp 38000, v_inf 5.9) → convert → `per_sphere`
     render, pericentre |r| 38050 km.
+- **Sim — boulders (settled only)** (Oct 2026; CLI equivalent + semantics: `../CLAUDE.md` § `--boulders`):
+  - `boulders` checkbox (default off). Ticked with `body_source = lattice` is refused at click.
+  - Selects `boulder_shape` (`round` | `ellipsoid` | `grown`, random boulders) and `boulder_placed` (`none` | `binary` | `file`).
+  - Inputs, all fixed values (no sweep in this one-run TUI): `f_boulder` (0-1, default 0.3), `rb_min` (1.5), `rb_max` (4), `q_slope` (3.5), `axis_min` (ellipsoid), `jagged` (grown), `lobe_ratio` (binary), `boulder_file` (file), `nmin_clump` (>= 2), `seed`, `bond_sigma_pa`, `tau/sigma` (`bond_tau_ratio`, default 1), `kb_cgs` (blank = `kn_cgs`), `bond_reach` (0.1). A blank box keeps the `BoulderSpec` default.
+  - **`bond_sigma_pa` is required** (Pa; 0 = stretch-limit breaking only; no default). `boulders.validate_spec()` runs at click.
+  - `run_sim_stage()` resolves `phantomclumps` and refuses a `phantom` without clump bonds (`boulders.attach_tools`) after the body is built; the run then clumps the cached body into `run_0001/` (`clumps.log`, `boulders.json`) on either encounter. Needs `make demtools`.
 - **Render:**
   - `resolution` (1920x1080), `samples` (500), `fps` (24).
   - `max_frames` (blank means all).
@@ -77,7 +84,10 @@ Parent: `../CLAUDE.md`. Shared facts: `../docs/SHARED_FACTS.md`. Merge/rename ca
 **Limits (v1).**
 - No mid-run cancel. Quitting mid-run leaves PHANTOM or Blender child processes running.
 - No streamed Blender log.
+- No `OMP_NUM_THREADS` field (TODO, Max 2026-10-07): PHANTOM (settle + flyby) inherits the launching shell's env; unset → all 16 logical CPUs. Launch as `OMP_NUM_THREADS=4 python3 sobol/tui_sim_render.py` until the form has it.
 - The `instance_static` camera tracks the origin (static placeholder); `instance_grains` tracks the inner-80% grain core like `per_sphere`.
+
+**Headless drivers.** Scripts can call the stages without the TUI (examples in `Honours/sobol_mass_runs/`, 2026-10-08/09): full pipeline `t.run_pipeline(SimParams(..., keep_dumps=True), RenderFormValues(samples=500, encode_video=True, paths=("instance_grains",)), t.DATA_DIR / "DEMCSVs", on_stage=...)` (`run_breakup_np10k_fric_boulders.py`); sim only `t.run_sim_stage(sim)` (`run_ablation_np10k_rp8000.py`; `run_pipeline` needs at least one render path); render only `t.run_render_stage(RenderParams(grains_dir, bodies_dir, output_dir, samples, encode_video=True, viz_path="instance", manifest=<run>/run_0001_viz_instance/manifest.json))` after a render crash (`rerender_fric_boulders.py`). Launch long ones in tmux with `OMP_NUM_THREADS=6`.
 
 **Tests.** `sobol/tests/test_tui_sim_render.py` (mocked) mocks PHANTOM, the converter and Blender, and includes Textual pilot tests run via `asyncio.run` (no pytest-asyncio needed). `sobol/tests/test_dem_headless_world.py` checks the TUI World HDRI (including a blender.exe smoke). `sobol/tests/test_dem_headless_gpu.py` checks Cycles OPTIX/CUDA GPU-only (CPU hybrid off). `sobol/tests/test_dem_headless_video.py` checks the optional `--encode-video`/`encode_video()` stage (arg parsing, frame-count-mismatch guard, and a blender.exe smoke that encodes 2 dummy frames to mp4). `sobol/tests/test_dem_headless_paths.py` covers `DEMHeadlessRender.py`'s `--viz-path composite|instance` patching and the "Procedural rock" append — Blender integration tests, skip without `blender.exe`. `sobol/tests/test_viz_preprocess_grains_instance.py` covers the `instance_grains` preprocess writer. `test_dump_frames.py`, `test_viz_preprocess_dump_mode.py` and `test_viz_preprocess_dump.py` cover the dump reader, composite dump mode and the single-pass driver. `sobol/tests/test_render_compare.py` covers pairing, stitching, stale-frame cleanup, ffmpeg encode (real encode skips without ffmpeg) and the CLI.
 

@@ -94,6 +94,9 @@ INPUT_CANDIDATES: Tuple[str, ...] = (
     "coh_gap_max_cgs",
     # Particle count (varies in --np-apophis-list sweeps).
     "np_apophis",
+    # Boulders (--boulders sweeps).
+    "f_boulder",
+    "rb_max",
 )
 
 BOOL_INPUTS: Tuple[str, ...] = ("use_dem", "use_shape_crop", "apophis_only")

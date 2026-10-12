@@ -33,6 +33,11 @@ IN_BOUND_PAIRS: Tuple[Tuple[str, str, str], ...] = (
     ("kt_cgs",        "kt_min",    "kt_max"),
     ("epsilon_n_dem", "eps_n_min", "eps_n_max"),
     ("kn_cgs",        "kn_min",    "kn_max"),
+    ("mu_s",          "mu_s_min",   "mu_s_max"),
+    ("mu_r",          "mu_r_min",   "mu_r_max"),
+    ("mu_t",          "mu_t_min",   "mu_t_max"),
+    ("epsilon_t_dem", "eps_t_min",  "eps_t_max"),
+    ("cohesion_pa",   "coh_pa_min", "coh_pa_max"),
 )
 IN_BOUND_DESTS: FrozenSet[str] = frozenset(
     dest for _, lo, hi in IN_BOUND_PAIRS for dest in (lo, hi)
@@ -53,10 +58,28 @@ IN_PARAM_LABELS: Dict[str, str] = {
     "kt_cgs":        "kt_cgs (tensile spring constant dyne/cm; 0=off; DEM only)",
     "epsilon_n_dem": "epsilon_n_dem (normal restitution coeff [0=inelastic,1=elastic]; DEM only)",
     "kn_cgs":        "kn_cgs (normal spring constant dyne/cm; DEM only)",
+    "mu_s":          "mu_s (sliding friction; 0=frictionless; particle DEM only)",
+    "mu_r":          "mu_r (rolling friction; needs mu_s > 0; particle DEM only)",
+    "mu_t":          "mu_t (twisting friction; needs mu_s > 0; particle DEM only)",
+    "epsilon_t_dem": "epsilon_t_dem (tangential restitution (0,1]; particle DEM only)",
+    "cohesion_pa":   "cohesion_pa (pkdgrav granular-bridge cohesion Pa; exclusive with kt_cgs)",
 }
 
 # Mass min/max/unit are skipped when user declines the mass gate (mirrors optional scale pattern).
 MASS_GATE_DESTS: FrozenSet[str] = frozenset({"mass_min_kg", "mass_max_kg", "apophis_ref_mass_kg"})
+
+# Boulder flags are asked only for settled bodies, and the rest only once --boulders is on.
+BOULDER_GATE_DESTS: FrozenSet[str] = frozenset({
+    "f_boulder", "f_boulder_min", "f_boulder_max", "rb_max", "rb_max_min", "rb_max_max", "rb_min",
+    "boulder_q", "boulder_shape", "boulder_axis_min", "boulder_jagged", "boulder_placed", "lobe_ratio",
+    "boulder_file", "boulder_nmin", "boulder_seed", "bond_sigma_pa", "bond_tau_ratio", "kb_cgs", "bond_reach",
+})
+
+
+def _skip_boulder_dest(dest: str, state: argparse.Namespace) -> bool:
+    if dest == "boulders":
+        return getattr(state, "body_source", "lattice") != "settled"
+    return dest in BOULDER_GATE_DESTS and not getattr(state, "boulders", False)
 
 # Human-readable labels for the scale gate (match setup_solarsystem / argparse help).
 SCALE_PARAM_LABELS: Dict[str, str] = {
@@ -103,6 +126,20 @@ DEST_TO_SECTION: Dict[str, str] = {
     "eps_n_max": "DEM Contact (optional dimensions)",
     "kn_min":    "DEM Contact (optional dimensions)",
     "kn_max":    "DEM Contact (optional dimensions)",
+    "mu_s":     "DEM Contact (optional dimensions)",
+    "mu_r":     "DEM Contact (optional dimensions)",
+    "mu_t":     "DEM Contact (optional dimensions)",
+    "epsilon_t_dem": "DEM Contact (optional dimensions)",
+    "mu_s_min": "DEM Contact (optional dimensions)",
+    "mu_s_max": "DEM Contact (optional dimensions)",
+    "mu_r_min": "DEM Contact (optional dimensions)",
+    "mu_r_max": "DEM Contact (optional dimensions)",
+    "mu_t_min": "DEM Contact (optional dimensions)",
+    "mu_t_max": "DEM Contact (optional dimensions)",
+    "eps_t_min": "DEM Contact (optional dimensions)",
+    "eps_t_max": "DEM Contact (optional dimensions)",
+    "coh_pa_min": "DEM Contact (optional dimensions)",
+    "coh_pa_max": "DEM Contact (optional dimensions)",
     "tmax_hours":     "Time (optional override / dimension)",
     "tmax_hours_min": "Time (optional override / dimension)",
     "tmax_hours_max": "Time (optional override / dimension)",
@@ -123,6 +160,7 @@ DEST_TO_SECTION: Dict[str, str] = {
     "flyby_perturber_earth_masses": "Body / encounter",
     "settle_tdyn": "Body / encounter",
     "relax_tdyn": "Body / encounter",
+    "settle_with_friction": "Body / encounter",
     "body_cache_dir": "Body / encounter",
     "np_apophis": "Setup toggles",
     "vary_use_shape_crop": "Setup toggles",
@@ -135,6 +173,14 @@ DEST_TO_SECTION: Dict[str, str] = {
     "sink_apophis_id": "Sinks / post-processing",
     "batch_label": "Batch naming",
     "batch_slug_max_len": "Batch naming",
+    "boulders": "Boulders",
+    "f_boulder": "Boulders", "f_boulder_min": "Boulders", "f_boulder_max": "Boulders",
+    "rb_max": "Boulders", "rb_max_min": "Boulders", "rb_max_max": "Boulders",
+    "rb_min": "Boulders", "boulder_q": "Boulders", "boulder_shape": "Boulders",
+    "boulder_axis_min": "Boulders", "boulder_jagged": "Boulders", "boulder_placed": "Boulders",
+    "lobe_ratio": "Boulders", "boulder_file": "Boulders", "boulder_nmin": "Boulders",
+    "boulder_seed": "Boulders", "bond_sigma_pa": "Boulders", "bond_tau_ratio": "Boulders",
+    "kb_cgs": "Boulders", "bond_reach": "Boulders",
     "dry_run": "Execution",
     "jobs": "Execution",
 }
@@ -289,6 +335,56 @@ INTERACTIVE_BRIEF: Dict[str, tuple[str, str]] = {
         "If yes, adds a Sobol dimension that toggles use_dem in the setup (T/F across runs).",
         "y, n, yes, no, t, f, 1, 0; or Enter to keep the current value.",
     ),
+    "mu_s": (
+        "Fix sliding friction mu_s for every particle-DEM run (sweep default 0 = frictionless; binary default 0.5).",
+        "Float >= 0, or Enter to keep the default. Not with mu_s min/max.",
+    ),
+    "mu_r": ("Fix rolling friction mu_r for every run (needs mu_s > 0; pkdgrav gravel 1.05).",
+             "Float >= 0, or Enter for the binary default. Not with mu_r min/max."),
+    "mu_t": ("Fix twisting friction mu_t for every run (needs mu_s > 0; pkdgrav gravel 1.3).",
+             "Float >= 0, or Enter for the binary default. Not with mu_t min/max."),
+    "epsilon_t_dem": ("Fix tangential restitution epsilon_t_dem for every run (needs mu_s > 0).",
+                      "Float in (0, 1], or Enter for the binary default. Not with eps_t min/max."),
+    "mu_s_min": (
+        "Lower bound for sliding friction coefficient mu_s (particle DEM only). 0 = frictionless (sweep default); binary default 0.5.",
+        "Float >= 0, or Enter to leave unvaried.",
+    ),
+    "mu_s_max": (
+        "Upper bound for sliding friction coefficient mu_s. Must be greater than min.",
+        "Float > min, or Enter.",
+    ),
+    "mu_r_min": (
+        "Lower bound for rolling friction coefficient mu_r (needs mu_s > 0; pkdgrav gravel 1.05). 0 = off.",
+        "Float >= 0, or Enter to leave unvaried.",
+    ),
+    "mu_r_max": (
+        "Upper bound for rolling friction coefficient mu_r. Must be greater than min.",
+        "Float > min, or Enter.",
+    ),
+    "mu_t_min": (
+        "Lower bound for twisting friction coefficient mu_t (needs mu_s > 0; pkdgrav gravel 1.3). 0 = off.",
+        "Float >= 0, or Enter to leave unvaried.",
+    ),
+    "mu_t_max": (
+        "Upper bound for twisting friction coefficient mu_t. Must be greater than min.",
+        "Float > min, or Enter.",
+    ),
+    "eps_t_min": (
+        "Lower bound for tangential restitution epsilon_t_dem (sets tangential damping). Default 0.5.",
+        "Float in (0, 1], or Enter to leave unvaried.",
+    ),
+    "eps_t_max": (
+        "Upper bound for tangential restitution epsilon_t_dem. Must be greater than min.",
+        "Float > min, or Enter.",
+    ),
+    "coh_pa_min": (
+        "Lower bound for pkdgrav granular-bridge cohesion cohesion_pa in Pa. 0 = off; cannot be combined with kt_cgs > 0.",
+        "Float >= 0, or Enter to leave unvaried.",
+    ),
+    "coh_pa_max": (
+        "Upper bound for pkdgrav granular-bridge cohesion cohesion_pa in Pa. Must be greater than min.",
+        "Float > min, or Enter.",
+    ),
     "dem_model": (
         "DEM model: particle (Mia tree DEM, default) or sink (legacy all-pairs sink DEM).",
         "particle or sink; or Enter to keep the current value.",
@@ -311,6 +407,8 @@ INTERACTIVE_BRIEF: Dict[str, tuple[str, str]] = {
     "flyby_perturber_earth_masses": ("Perturber mass in Earth masses (default 1).", "Float > 0, or Enter."),
     "settle_tdyn": ("Settle length in t_dyn = 1/sqrt(G rho) (settled bodies; default 5).", "Float > 0, or Enter."),
     "relax_tdyn": ("Relax after crop, in t_dyn (Mia: 0.5; 0 skips).", "Float >= 0, or Enter."),
+    "settle_with_friction": ("Settle the body with the run's mu_s/mu_r/mu_t (default: frictionless settle).",
+                             "y/n, or Enter for no."),
     "body_cache_dir": ("Settled-body cache dir (default <output-root>/settled_bodies).", "Path, or Enter."),
     "np_apophis_list": (
         "Space-separated list of np_apophis values: one run per value within a single batch "
@@ -421,6 +519,27 @@ INTERACTIVE_BRIEF: Dict[str, tuple[str, str]] = {
         "Upper bound for dtmax_in sweep (hours). Must be greater than min.",
         "Positive float; must be greater than dtmax-hours-min.",
     ),
+    "boulders": ("Glue the settled body into bonded boulders with phantomclumps (settled bodies only).", "y/n."),
+    "f_boulder": ("Fraction of the body in RANDOM boulders (placed boulders come on top).", "Float 0-1, or Enter (0.3)."),
+    "f_boulder_min": ("f_boulder sweep bound (set min and max together).", "Float 0-1, or Enter."),
+    "f_boulder_max": ("f_boulder sweep bound (set min and max together).", "Float 0-1, or Enter."),
+    "rb_max": ("Largest random boulder radius in grain radii.", "Float >= rb_min, or Enter (4)."),
+    "rb_max_min": ("rb_max sweep bound (set min and max together).", "Float >= rb_min, or Enter."),
+    "rb_max_max": ("rb_max sweep bound (set min and max together).", "Float >= rb_min, or Enter."),
+    "rb_min": ("Smallest random boulder radius in grain radii.", "Float >= 1, or Enter (1.5)."),
+    "boulder_q": ("Size distribution slope q, dN/dR ~ R^-q.", "Float >= 0, or Enter (3.5)."),
+    "boulder_shape": ("Random boulder shape.", "round / ellipsoid / grown, or Enter (round)."),
+    "boulder_axis_min": ("Smallest ellipsoid axis ratio (ellipsoid only).", "Float 0.1-1, or Enter."),
+    "boulder_jagged": ("Jaggedness of grown boulders (grown only).", "Float 0-1, or Enter."),
+    "boulder_placed": ("Placed boulders made first.", "none / binary / file, or Enter (none)."),
+    "lobe_ratio": ("Contact binary small/large lobe radius (binary only).", "Float 0.1-1, or Enter."),
+    "boulder_file": ("Placed boulders file: x y z a b c [rx ry rz] per line, km and deg (file only).", "Path, or Enter."),
+    "boulder_nmin": ("Smallest random boulder kept, in grains.", "Integer >= 2, or Enter."),
+    "boulder_seed": ("phantomclumps random seed (default: --seed).", "Integer, or Enter."),
+    "bond_sigma_pa": ("Bond tensile strength in Pa, fixed per batch (required).", "Float >= 0."),
+    "bond_tau_ratio": ("Bond shear strength as a multiple of bond_sigma_pa.", "Float >= 0, or Enter (1)."),
+    "kb_cgs": ("Bond spring constant g/s^2 per cm.", "Float > 0, or Enter (= kn_cgs)."),
+    "bond_reach": ("Max bond surface gap as a fraction of R_i+R_j.", "Float > 0, or Enter (0.1)."),
 }
 
 
@@ -749,6 +868,9 @@ def run_interactive_wizard(parser: argparse.ArgumentParser, initial_args: argpar
             _collect_list(action, state, out)
             continue
 
+        if _skip_boulder_dest(action.dest, state):
+            continue
+
         sec = _section_for_dest(action.dest)
         if sec != last_section:
             print(f"\n=== {sec} ===", flush=True)
@@ -847,6 +969,7 @@ def run_interactive_wizard(parser: argparse.ArgumentParser, initial_args: argpar
 
 
 __all__ = [
+    "BOULDER_GATE_DESTS",
     "DEST_TO_SECTION",
     "IN_BOUND_DESTS",
     "IN_BOUND_PAIRS",

@@ -40,6 +40,9 @@ class SettleSpec:
     pack_expand: float = 1.8  # setup_solarsystem default
     settle_tdyn: float = 5.0  # settle length in t_dyn (assumption A1)
     relax_tdyn: float = 0.5   # Mia: 0.5 t_dyn relax after the crop; 0 = skip
+    mu_s: Optional[float] = 0.0  # settle/relax friction (binary default 0.5); None = binary default
+    mu_r: Optional[float] = None  # settle/relax rolling friction; None = not written (binary default 0)
+    mu_t: Optional[float] = None  # settle/relax twisting friction; None = not written (binary default 0)
 
 
 def tdyn_seconds(scale_rho: float) -> float:
@@ -70,9 +73,15 @@ def _shape_asset_paths(shape_file: Path) -> list:
     return out
 
 
+_KEY_OPTIONAL_FIELDS = ("mu_r", "mu_t")
+
+
 def settle_key(spec: SettleSpec, binaries: Sequence[Path]) -> str:
     """Cache dir name: readable prefix + hash of spec, shape/mesh bytes and binary bytes."""
     payload = asdict(spec)
+    for k in _KEY_OPTIONAL_FIELDS:  # added after bodies were cached: omit when unset so old keys still hit
+        if payload[k] is None:
+            del payload[k]
     payload["shape_file"] = [_file_sha(p) for p in _shape_asset_paths(Path(spec.shape_file))]
     payload["binaries"] = [_file_sha(Path(b).resolve()) for b in binaries]
     digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:12]
@@ -185,8 +194,17 @@ def set_in_keys(in_path: Path, keys: Dict[str, str]) -> None:
     r = _runner()
     text = Path(in_path).read_text(encoding="utf-8")
     for key, val in keys.items():
-        text = r.replace_setup_assignment(text, key, val)
+        if key in r._OPTIONAL_IN_KEYS and not re.search(rf"^\s*{re.escape(key)}\s*=", text, re.MULTILINE):
+            text = r.insert_in_assignment(text, key, val)
+        else:
+            text = r.replace_setup_assignment(text, key, val)
     Path(in_path).write_text(text, encoding="utf-8")
+
+
+def _contact_in_keys(spec: SettleSpec) -> Dict[str, str]:
+    """Contact keys pinned in the settle and relax .in (see run_mass_sobol_phantom.DEFAULT_MU_S)."""
+    fmt = _runner().format_real_token
+    return {k: fmt(getattr(spec, k)) for k in ("mu_s", "mu_r", "mu_t") if getattr(spec, k) is not None}
 
 
 def _run(cmd, cwd: Path, log: Path, stdin_text: Optional[str] = None) -> None:
@@ -225,7 +243,7 @@ def build_settled_body(
     write_settle_setup(template_setup, work / f"{SETTLE_PREFIX}.setup", spec, shape_name)
     r.run_phantomsetup(Path(phantomsetup_bin), SETTLE_PREFIX, maxp, work, work / "settle_setup.log")
     # every dump full: the crop needs velocities in the last settle dump
-    set_in_keys(work / f"{SETTLE_PREFIX}.in", {"nfulldump": f"{1:>10}"})
+    set_in_keys(work / f"{SETTLE_PREFIX}.in", {"nfulldump": f"{1:>10}", **_contact_in_keys(spec)})
     _run([phantom_bin, f"{SETTLE_PREFIX}.in", *maxp], work, work / "settle_phantom.log")
     utime = r._parse_utime_from_phantom_log(work / "settle_phantom.log")
     if utime is None:
@@ -251,6 +269,7 @@ def build_settled_body(
             "tmax": r.format_real_token(spec.relax_tdyn * tdyn_code),
             "dtmax": r.format_real_token(0.25 * spec.relax_tdyn * tdyn_code),
             "nfulldump": f"{1:>10}",
+            **_contact_in_keys(spec),
         })
         _run([phantom_bin, infile, *maxp], work, work / "relax_phantom.log")
         dump = _pdem().list_full_dumps(work, CROP_PREFIX)[-1].name

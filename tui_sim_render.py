@@ -30,6 +30,10 @@ sys.path.insert(0, str(Path(__file__).parent / "Analysis"))
 
 from run_mass_sobol_phantom import (  # noqa: E402
     RunSample,
+    apply_contact_defaults,
+    check_sample_supports_contact_keys,
+    DEFAULT_MU_S,
+    DEFAULT_SEED,
     RunRecord,
     EARTH_SINK_ID_DEFAULT,
     APOPHIS_SINK_ID_DEFAULT,
@@ -191,6 +195,7 @@ class SimParams:
     settle_tdyn: float = 5.0
     relax_tdyn: float = 0.5
     body_cache_dir: Optional[Path] = None  # None = <output_root parent>/settled_bodies
+    settle_friction: bool = False  # settle/relax with the sample's mu_s/mu_r/mu_t (else frictionless)
     sample: RunSample = field(default_factory=RunSample)
     # False = delete raw dumps/.ev/phantom.log once convert is verified (npz exist)
     keep_dumps: bool = False
@@ -271,6 +276,7 @@ def run_sim_stage(params: SimParams) -> RunRecord:
         params.output_root,
     )
     sample = params.sample
+    check_sample_supports_contact_keys(sample, phantom_bin)
     earth_sink_id = params.earth_sink_id
     flyby_bin = None
     if sample.body_source == "settled":
@@ -281,7 +287,9 @@ def run_sim_stage(params: SimParams) -> RunRecord:
             settle_tdyn=params.settle_tdyn, relax_tdyn=params.relax_tdyn, cache_root=cache_root,
             phantomsetup_bin=phantomsetup_bin, phantom_bin=phantom_bin,
             phantom_dir=Path(params.phantom_dir), ephemeris_cache_dir=params.ephemeris_cache_dir,
-            dry_run=params.dry_run)
+            dry_run=params.dry_run, settle_friction=params.settle_friction)
+        import boulders
+        boulders.attach_tools([sample], Path(params.phantom_dir), phantom_bin, params.dry_run)
         if not params.dry_run and sample.encounter == "hyperbola":
             import settled_body
             flyby_bin = settled_body.resolve_dem_tools(Path(params.phantom_dir)).flyby
@@ -1272,6 +1280,16 @@ class SimRenderTUIApp(App[None]):
                 "kt_cgs", Input("", id="kt-cgs", placeholder="(template default)"), "dyne/cm",
             )
             yield _Row("dn_cohes_factor", Input(str(DEFAULT_DN_COHES_FACTOR), id="dn-cohes-factor"), "float")
+            yield _Row(
+                "mu_s", Input("", id="mu-s", placeholder=f"blank = {DEFAULT_MU_S} (frictionless); binary 0.5"),
+                "friction",
+            )
+            yield _Row("mu_r", Input("", id="mu-r", placeholder="(binary default 0; needs mu_s > 0)"), "rolling")
+            yield _Row("mu_t", Input("", id="mu-t", placeholder="(binary default 0; needs mu_s > 0)"), "twisting")
+            yield _Row("epsilon_t_dem", Input("", id="eps-t", placeholder="(binary default 0.5; (0,1])"), "float")
+            yield _Row(
+                "cohesion_pa", Input("", id="cohesion-pa", placeholder="(binary default 0; not with kt_cgs)"), "Pa",
+            )
             yield _Row("tmax (hr)", Input(DEFAULT_TMAX_HOURS, id="tmax-hours"), "hr")
             yield _Row("dtmax (hr)", Input(DEFAULT_DTMAX_HOURS, id="dtmax-hours"), "hr")
             yield _Row("sink_earth_id", Input(str(EARTH_SINK_ID_DEFAULT), id="sink-earth"), "int")
@@ -1297,6 +1315,23 @@ class SimRenderTUIApp(App[None]):
             yield _Row("flyby_rp_km", Input(DEFAULT_FLYBY_RP_KM, id="flyby-rp"), "km")
             yield _Row("flyby_vinf_kms", Input(DEFAULT_FLYBY_VINF_KMS, id="flyby-vinf"), "km/s")
             yield _Row("flyby_start_sep_km", Input("4e5", id="flyby-sep"), "km")
+            yield Static("Sim — boulders (settled only)", classes="sec")
+            yield _Row("boulders", Checkbox("glue the body into bonded boulders (phantomclumps)",
+                                            value=False, id="boulders"), "default: off")
+            yield _Row("boulder_shape", Select([("round", "round"), ("ellipsoid", "ellipsoid"), ("grown", "grown")],
+                                               value="round", id="boulder-shape", allow_blank=False), "random")
+            yield _Row("boulder_placed", Select([("none", "none"), ("binary", "binary"), ("file", "file")],
+                                                value="none", id="boulder-placed", allow_blank=False), "placed")
+            for b_id, b_label, b_hint in (
+                ("f-boulder", "f_boulder", "0-1, def 0.3"), ("rb-min", "rb_min", "def 1.5"),
+                ("rb-max", "rb_max", "def 4"), ("boulder-q", "q_slope", "def 3.5"),
+                ("boulder-axis-min", "axis_min", "ellipsoid"), ("boulder-jagged", "jagged", "grown"),
+                ("lobe-ratio", "lobe_ratio", "binary"), ("boulder-file", "boulder_file", "file"),
+                ("boulder-nmin", "nmin_clump", ">= 2"), ("boulder-seed", "seed", f"def {DEFAULT_SEED}"),
+                ("bond-sigma-pa", "bond_sigma_pa", "Pa, required"), ("bond-tau-ratio", "tau/sigma", "def 1"),
+                ("kb-cgs", "kb_cgs", "def kn_cgs"), ("bond-reach", "bond_reach", "def 0.1"),
+            ):
+                yield _Row(b_label, Input("", id=b_id), b_hint)
             yield _Row(
                 "keep_dumps",
                 Checkbox("keep raw dumps + .ev after convert", value=False, id="keep-dumps"),
@@ -1371,10 +1406,36 @@ class SimRenderTUIApp(App[None]):
         yield Footer()
 
     def on_mount(self) -> None:
+        self._sync_body_gates()
         try:
             check_blender_exe()
         except FileNotFoundError as exc:
             self._set_status(str(exc), error=True)
+
+    _BOULDER_FIELD_IDS = ("boulder-shape", "boulder-placed", "f-boulder", "rb-min", "rb-max", "boulder-q",
+                          "boulder-axis-min", "boulder-jagged", "lobe-ratio", "boulder-file", "boulder-nmin",
+                          "boulder-seed", "bond-sigma-pa", "bond-tau-ratio", "kb-cgs", "bond-reach")
+
+    def _sync_body_gates(self) -> None:
+        """Flyby fields need hyperbola; boulder fields need a settled body + the checkbox (visual only)."""
+        hyper = self.query_one("#encounter", Select).value == "hyperbola"
+        for wid in ("flyby-rp", "flyby-vinf", "flyby-sep"):
+            self.query_one(f"#{wid}").disabled = not hyper
+        settled = self.query_one("#body-source", Select).value == "settled"
+        self.query_one("#boulders").disabled = not settled
+        on = settled and self.query_one("#boulders", Checkbox).value
+        shape = self.query_one("#boulder-shape", Select).value
+        placed = self.query_one("#boulder-placed", Select).value
+        only = {"boulder-axis-min": shape == "ellipsoid", "boulder-jagged": shape == "grown",
+                "lobe-ratio": placed == "binary", "boulder-file": placed == "file"}
+        for wid in self._BOULDER_FIELD_IDS:
+            self.query_one(f"#{wid}").disabled = not (on and only.get(wid, True))
+
+    @on(Select.Changed, "#encounter, #body-source, #boulder-shape, #boulder-placed")
+    @on(Checkbox.Changed, "#boulders")
+    def _body_gate_changed(self, event) -> None:
+        del event
+        self._sync_body_gates()
 
     def _set_status(self, msg: str, *, error: bool = False) -> None:
         s = self.query_one("#status", Static)
@@ -1384,6 +1445,67 @@ class SimRenderTUIApp(App[None]):
 
     def _iv(self, wid: str) -> str:
         return self.query_one(f"#{wid}", Input).value.strip()
+
+    def _apply_contact_fields(self, sample: RunSample) -> None:
+        """Mia contact keys (blank = runner pin for mu_s, binary default for the rest)."""
+        def num(wid: str, key: str) -> Optional[float]:
+            raw = self._iv(wid)
+            if not raw:
+                return None
+            try:
+                v = float(raw)
+            except ValueError:
+                raise ValueError(f"{key} must be a number (got '{raw}')") from None
+            if v < 0:
+                raise ValueError(f"{key} must be >= 0")
+            return v
+
+        sample.mu_s = num("mu-s", "mu_s")
+        sample.mu_r = num("mu-r", "mu_r")
+        sample.mu_t = num("mu-t", "mu_t")
+        sample.epsilon_t_dem = num("eps-t", "epsilon_t_dem")
+        sample.cohesion_pa = num("cohesion-pa", "cohesion_pa")
+        if sample.epsilon_t_dem is not None and not 0 < sample.epsilon_t_dem <= 1:
+            raise ValueError("epsilon_t_dem must be in (0, 1]")
+        idle = [k for k in ("mu_r", "mu_t") if (getattr(sample, k) or 0) > 0]
+        if idle and not (sample.mu_s or 0) > 0:
+            raise ValueError(f"{idle} act only through friction: set mu_s > 0")
+        if (sample.cohesion_pa or 0) > 0 and (sample.kt_cgs or 0) > 0:
+            raise ValueError("set only one cohesion model: cohesion_pa or kt_cgs")
+
+    def _boulder_spec(self, body_source: str):
+        """BoulderSpec from the Boulders block, or None when the checkbox is off."""
+        if not self.query_one("#boulders", Checkbox).value:
+            return None
+        import boulders as bd
+        if body_source != "settled":
+            raise ValueError("boulders need body_source = settled")
+
+        def num(wid, cast=float):
+            raw = self._iv(wid)
+            if not raw:
+                return None
+            try:
+                return cast(raw)
+            except ValueError:
+                raise ValueError(f"{wid} must be a number (got '{raw}')") from None
+
+        sigma = num("bond-sigma-pa")
+        if sigma is None:
+            raise ValueError("boulders need bond_sigma_pa (Pa; 0 = stretch-limit breaking only)")
+        kw = dict(f_boulder=num("f-boulder"), rb_min=num("rb-min"), rb_max=num("rb-max"),
+                  q_slope=num("boulder-q"), shape=self.query_one("#boulder-shape", Select).value,
+                  axis_min=num("boulder-axis-min"), jagged=num("boulder-jagged"),
+                  placed=self.query_one("#boulder-placed", Select).value, lobe_ratio=num("lobe-ratio"),
+                  placed_file=(str(Path(self._iv("boulder-file")).expanduser().resolve())
+                               if self._iv("boulder-file") else None),
+                  nmin_clump=num("boulder-nmin", int), seed=num("boulder-seed", int), bond_sigma_pa=sigma,
+                  bond_tau_ratio=num("bond-tau-ratio"), kb_cgs=num("kb-cgs"), bond_reach=num("bond-reach"))
+        if kw["seed"] is None:
+            kw["seed"] = DEFAULT_SEED  # same as the CLI (--boulder-seed unset -> --seed)
+        spec = bd.BoulderSpec(**{k: v for k, v in kw.items() if v is not None})
+        bd.validate_spec(spec)
+        return spec
 
     def _build_sim_params(self, dry_run: bool) -> SimParams:
         np_apophis = int(self._iv("np-apophis"))
@@ -1416,6 +1538,9 @@ class SimRenderTUIApp(App[None]):
             flyby_start_sep_km=float(self._iv("flyby-sep") or 4e5) if hyper else None,
             flyby_perturber_earth_masses=1.0 if hyper else None,
         )
+        self._apply_contact_fields(sample)
+        apply_contact_defaults(sample)
+        sample.boulders = self._boulder_spec(body_source)
         if encounter == "hyperbola":
             if body_source != "settled":
                 raise ValueError("hyperbola needs body_source = settled")

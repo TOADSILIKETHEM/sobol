@@ -7,7 +7,7 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Optional
 
 GM_EARTH_KM3_S2 = 3.986004e5  # G * M_earth
 R_EARTH_KM = 6371.0  # mean Earth radius; the pericentre must clear this and stay short of start_sep
@@ -115,13 +115,14 @@ def write_record_setup(template_setup: Path, dst: Path, n_kept: int) -> None:
 
 
 def prepare_hyperbola_run(run_dir: Path, prefix: str, sample, body, phantomflyby_bin: Path,
-                          template_setup: Path) -> Dict[str, str]:
+                          template_setup: Path, dump: Optional[Path] = None) -> Dict[str, str]:
     """Put the cached body on a hyperbola in run_dir: <prefix>_00000 + <prefix>.in ready for phantom."""
     run_dir = Path(run_dir)
     stale_in = run_dir / f"{prefix}.in"
     if stale_in.exists():
         stale_in.unlink()  # moddump reads <out>.in as revised defaults
-    shutil.copy2(body.dir / body.dump, run_dir / "body_00000")
+    src = Path(dump) if dump is not None else body.dir / body.dump  # dump = clumped body (boulders)
+    shutil.copy2(src, run_dir / "body_00000")
     shutil.copy2(body.dir / body.infile, run_dir / "body.in")  # moddump reads <in>.in as defaults
     log = run_dir / "flyby.log"
     with open(log, "w", encoding="utf-8") as fh:
@@ -165,7 +166,7 @@ def _set_packing_file(text: str) -> str:
     return text[:at] + _PACKING_FILE_LINE + text[at:]
 
 
-def apply_settled_body_to_setup(run_dir: Path, prefix: str, body) -> Dict[str, str]:
+def apply_settled_body_to_setup(run_dir: Path, prefix: str, body, dump: Optional[Path] = None) -> Dict[str, str]:
     """Stage the cached body and its shape, and point the run's .setup at them (Mia Option 2 step 4).
 
     phantomsetup takes the body volume, hence its mass, from apophis_shape_file; a blank one only
@@ -175,7 +176,8 @@ def apply_settled_body_to_setup(run_dir: Path, prefix: str, body) -> Dict[str, s
     run_dir = Path(run_dir)
     if not body.shape_file:
         raise RuntimeError(f"settled body {body.dir} has no shape_file in body.json; delete it and rebuild")
-    shutil.copy2(Path(body.dir) / body.dump, run_dir / PACKING_FILE_NAME)
+    src = Path(dump) if dump is not None else Path(body.dir) / body.dump  # dump = clumped body (boulders)
+    shutil.copy2(src, run_dir / PACKING_FILE_NAME)
     shape_name = r.stage_shape_assets(Path(body.shape_file), run_dir)
     setup = run_dir / f"{prefix}.setup"
     text = _set_packing_file(setup.read_text(encoding="utf-8"))

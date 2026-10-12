@@ -19,6 +19,8 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import csv
+import dataclasses
+import json
 import sys
 from pathlib import Path
 from typing import List, Set
@@ -33,6 +35,7 @@ from sobol.run_mass_sobol_phantom import (  # noqa: E402
     RunWorkerPayload,
     _active_scale_variations,
     _apply_fixed_run_sample_overrides,
+    _boulders_module,
     _particle_dem_module,
     _cleanup_run_dir,
     _execute_run_worker,
@@ -43,6 +46,7 @@ from sobol.run_mass_sobol_phantom import (  # noqa: E402
     build_np_spin_grid_samples,
     build_run_samples,
     preflight,
+    check_binary_supports_contact_keys,
     prepare_settled_bodies_and_dem_tools,
     sample_column_order,
     validate_args,
@@ -110,6 +114,35 @@ def check_resume_dem_model(batch_dir: Path, prefix: str, dem_model: str) -> None
                 "--phantom-dir sobol/bin_demsync_7a243de and their original Shapes/apophis.shape)"
             )
         return
+
+
+_BOULDER_AXIS_FIELDS = ("f_boulder", "rb_max")  # per-run axis values, not part of the fixed spec
+
+
+def check_resume_boulders(batch_dir: Path, args: argparse.Namespace, samples_csv: Path) -> None:
+    """Refuse to resume with flags that would change the physics or the CSV columns of the batch."""
+    jsons = sorted(batch_dir.glob("run_*/boulders.json"))
+    if not getattr(args, "boulders", False) and not jsons:
+        return  # not a boulder batch: resume behaves exactly as before the boulders feature
+    if not getattr(args, "boulders", False):
+        raise RuntimeError(f"{batch_dir.name} is a boulder batch ({jsons[0].parent.name}/boulders.json) "
+                           "but --boulders is not set; pass the original boulder flags")
+    with samples_csv.open(newline="", encoding="utf-8") as f:
+        header = next(csv.reader(f), [])
+    expected = ["run_id"] + sample_column_order(args)
+    if header != expected:
+        raise RuntimeError(
+            f"{samples_csv.name} columns differ from the ones these flags give; pass the original "
+            f"campaign flags.\n  batch:  {header}\n  flags:  {expected}")
+    if not jsons:
+        return
+    on_disk = json.loads(jsons[0].read_text(encoding="utf-8"))["spec"]
+    now = dataclasses.asdict(_boulders_module().spec_from_args(args))
+    diff = sorted(k for k in now if k not in _BOULDER_AXIS_FIELDS and on_disk.get(k) != now[k])
+    if diff:
+        raise RuntimeError(
+            f"boulder flags differ from {jsons[0].parent.name}/boulders.json on: "
+            + ", ".join(f"{k} (batch {on_disk.get(k)!r}, flags {now[k]!r})" for k in diff))
 
 
 def _load_samples_for_resume(
@@ -182,6 +215,7 @@ def main() -> int:
     try:
         validate_args(args)
         check_resume_dem_model(batch_dir, args.prefix, args.dem_model)
+        check_resume_boulders(batch_dir, args, samples_csv)
     except (ValueError, RuntimeError, SystemExit) as exc:
         print(f"[ERROR] {exc}", file=sys.stderr)
         return 1
@@ -216,6 +250,7 @@ def main() -> int:
 
     base_dir = Path(args.base_dir).resolve()
     base_setup, base_input, phantomsetup_bin, phantom_bin = preflight(args, base_dir, batch_dir)
+    check_binary_supports_contact_keys(args, phantom_bin)
 
     ephemeris_cache = None
     if args.ephemeris_cache_dir:

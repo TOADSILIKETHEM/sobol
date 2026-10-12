@@ -66,6 +66,40 @@ _IN_DIMS = [
     ("kt",    "kt",    "kt_cgs  — tensile spring constant (dyne/cm; 0=off; DEM only)",       False),
     ("eps-n", "eps_n", "epsilon_n_dem  — normal restitution coeff [0,1] (DEM only)",            False),
     ("kn",    "kn",    "kn_cgs  — normal spring constant (dyne/cm; DEM only)",                  False),
+    # Mia 1fd4ceb88 friction / cohesion (particle DEM; mu_r, mu_t, eps_t need mu_s > 0)
+    ("mu-s",   "mu_s",   "mu_s  — sliding friction coeff (0=frictionless; particle DEM)",       False),
+    ("mu-r",   "mu_r",   "mu_r  — rolling friction coeff (needs mu_s > 0)",                     False),
+    ("mu-t",   "mu_t",   "mu_t  — twisting friction coeff (needs mu_s > 0)",                    False),
+    ("eps-t",  "eps_t",  "epsilon_t_dem  — tangential restitution (0,1] (needs mu_s > 0)",      False),
+    ("coh-pa", "coh_pa", "cohesion_pa  — pkdgrav cohesion (Pa; exclusive with kt)",             False),
+]
+
+
+# Body / encounter fields that only apply to --encounter hyperbola
+_HYPERBOLA_IDS = ("flyby-rp-km", "flyby-rp-km-min", "flyby-rp-km-max", "flyby-vinf-kms",
+                  "flyby-vinf-kms-min", "flyby-vinf-kms-max", "flyby-start-sep-km")
+
+
+# Boulders (phantomclumps): (widget id = flag stem, argparse dest, label, hint)
+_BOULDER_INPUTS = [
+    ("f-boulder",        "f_boulder",        "f_boulder (fixed)",      "0-1, def 0.3"),
+    ("f-boulder-min",    "f_boulder_min",    "  f_boulder_min",        "sweep"),
+    ("f-boulder-max",    "f_boulder_max",    "  f_boulder_max",        "sweep"),
+    ("rb-max",           "rb_max",           "rb_max (fixed)",         "grain radii"),
+    ("rb-max-min",       "rb_max_min",       "  rb_max_min",           "sweep"),
+    ("rb-max-max",       "rb_max_max",       "  rb_max_max",           "sweep"),
+    ("rb-min",           "rb_min",           "rb_min",                 ">= 1, def 1.5"),
+    ("boulder-q",        "boulder_q",        "q (dN/dR ~ R^-q)",       "def 3.5"),
+    ("boulder-axis-min", "boulder_axis_min", "axis_min",               "ellipsoid"),
+    ("boulder-jagged",   "boulder_jagged",   "jagged",                 "grown"),
+    ("lobe-ratio",       "lobe_ratio",       "lobe_ratio",             "binary"),
+    ("boulder-file",     "boulder_file",     "boulder file",           "file"),
+    ("boulder-nmin",     "boulder_nmin",     "nmin (grains)",          ">= 2"),
+    ("boulder-seed",     "boulder_seed",     "seed",                   "def --seed"),
+    ("bond-sigma-pa",    "bond_sigma_pa",    "bond_sigma_pa",          "Pa, required"),
+    ("bond-tau-ratio",   "bond_tau_ratio",   "bond_tau / sigma",       "def 1"),
+    ("kb-cgs",           "kb_cgs",           "kb_cgs",                 "def kn_cgs"),
+    ("bond-reach",       "bond_reach",       "bond_reach",             "def 0.1"),
 ]
 
 
@@ -298,6 +332,20 @@ class SobolTUIApp(App[Optional[List[str]]]):
                                  disabled=not active, placeholder="max"),
                            hint)
 
+            mu_lo = getattr(d, "mu_s_min", None)
+            mu_hi = getattr(d, "mu_s_max", None)
+            mu_fixed = getattr(d, "mu_s", None)
+            yield _Row(
+                "  mu_s_fixed",
+                Input(
+                    "" if mu_fixed is None else str(mu_fixed),
+                    id="mu-s-fixed",
+                    disabled=mu_lo is not None and mu_hi is not None,
+                    placeholder=f"blank = {_runner.DEFAULT_MU_S} (frictionless); binary default 0.5",
+                ),
+                "fixed",
+            )
+
             kt_lo = getattr(d, "kt_min", None)
             kt_hi = getattr(d, "kt_max", None)
             kt_vary = kt_lo is not None and kt_hi is not None
@@ -375,6 +423,57 @@ class SobolTUIApp(App[Optional[List[str]]]):
                            Input(str(t_hi or ""), id=f"{t_css}-max",
                                  disabled=not t_vary, placeholder="max hr"),
                            "hr")
+
+            # ── Body / encounter (settled bodies, hyperbola) ───────────────
+            yield Static("Body / encounter  (settled = settle → crop → relax, cached)", classes="sec")
+            yield _Row("body_source",
+                       Select([("lattice", "lattice"), ("settled", "settled")],
+                              value=getattr(d, "body_source", "lattice") or "lattice",
+                              id="body-source", allow_blank=False),
+                       "settled body")
+            yield _Row("encounter",
+                       Select([("ephemeris", "ephemeris"), ("hyperbola", "hyperbola")],
+                              value=getattr(d, "encounter", "ephemeris") or "ephemeris",
+                              id="encounter", allow_blank=False),
+                       "hyperbola = settled")
+            for b_id, b_dest, b_hint in (
+                ("flyby-rp-km", "flyby_rp_km", "km"),
+                ("flyby-rp-km-min", "flyby_rp_km_min", "km sweep"),
+                ("flyby-rp-km-max", "flyby_rp_km_max", "km sweep"),
+                ("flyby-vinf-kms", "flyby_vinf_kms", "km/s"),
+                ("flyby-vinf-kms-min", "flyby_vinf_kms_min", "km/s sweep"),
+                ("flyby-vinf-kms-max", "flyby_vinf_kms_max", "km/s sweep"),
+            ):
+                b_val = getattr(d, b_dest, None)
+                yield _Row(f"  {b_dest}", Input("" if b_val is None else str(b_val), id=b_id,
+                                                placeholder="hyperbola only"), b_hint)
+            for b_id, b_dest, b_default, b_hint in (
+                ("flyby-start-sep-km", "flyby_start_sep_km", 4.0e5, "km"),
+                ("settle-tdyn", "settle_tdyn", 5.0, "t_dyn"),
+                ("relax-tdyn", "relax_tdyn", 0.5, "t_dyn"),
+            ):
+                b_val = getattr(d, b_dest, b_default)
+                yield _Row(f"  {b_dest}", Input("" if b_val in (None, b_default) else str(b_val), id=b_id,
+                                                placeholder=f"default {b_default:g}"), b_hint)
+            yield _Row("  body_cache_dir", Input(getattr(d, "body_cache_dir", None) or "", id="body-cache-dir",
+                                                placeholder="(default <output-root>/settled_bodies)"), "dir")
+
+            # ── Boulders ───────────────────────────────────────────────────
+            yield Static("Boulders  (settled bodies only; f_boulder / rb_max may be Sobol dims)", classes="sec")
+            yield _Row("boulders", Checkbox("glue the body into bonded boulders (phantomclumps)",
+                                            value=bool(getattr(d, "boulders", False)), id="boulders"))
+            yield _Row("  shape", Select([("default (round)", ""), ("round", "round"),
+                                          ("ellipsoid", "ellipsoid"), ("grown", "grown")],
+                                         value=getattr(d, "boulder_shape", None) or "",
+                                         id="boulder-shape", allow_blank=False), "random")
+            yield _Row("  placed", Select([("default (none)", ""), ("none", "none"),
+                                           ("binary", "binary"), ("file", "file")],
+                                          value=getattr(d, "boulder_placed", None) or "",
+                                          id="boulder-placed", allow_blank=False), "placed")
+            for b_id, b_dest, b_label, b_hint in _BOULDER_INPUTS:
+                b_val = getattr(d, b_dest, None)
+                b_txt = "" if b_val is None else f"{b_val:.12g}" if isinstance(b_val, float) else str(b_val)
+                yield _Row(f"  {b_label}", Input(b_txt, id=b_id), b_hint)
 
             # ── Setup toggles ──────────────────────────────────────────────
             yield Static("Setup toggles", classes="sec")
@@ -489,6 +588,24 @@ class SobolTUIApp(App[Optional[List[str]]]):
         self._sync_spin_axis_gates()
         self._sync_spin_period_gates()
         self._sync_kt_gates()
+        self._sync_mu_s_gates()
+        self._sync_body_gates()
+
+    def _sync_body_gates(self) -> None:
+        """Hyperbola fields need encounter = hyperbola; boulder fields need a settled body + the checkbox.
+
+        Visual only: a value left in a disabled field still reaches argv, so validate_args reports it."""
+        hyper = self._sel("encounter") == "hyperbola"
+        for wid in _HYPERBOLA_IDS:
+            self.query_one(f"#{wid}").disabled = not hyper
+        settled = self._sel("body-source") == "settled"
+        self.query_one("#boulders").disabled = not settled
+        on = settled and self._cb("boulders")
+        shape, placed = self._sel("boulder-shape"), self._sel("boulder-placed")
+        only = {"boulder-axis-min": shape == "ellipsoid", "boulder-jagged": shape == "grown",
+                "lobe-ratio": placed == "binary", "boulder-file": placed == "file"}
+        for wid in ["boulder-shape", "boulder-placed"] + [w for w, *_ in _BOULDER_INPUTS]:
+            self.query_one(f"#{wid}").disabled = not (on and only.get(wid, True))
 
     def _sync_spin_axis_gates(self) -> None:
         torque = self._cb("vary-spin-torque-align")
@@ -528,6 +645,15 @@ class SobolTUIApp(App[Optional[List[str]]]):
         self.query_one("#kt-fixed").disabled = vary
         self.query_one("#kt-scale-ref-np").disabled = not fixed or not np_list
 
+    def _sync_mu_s_gates(self) -> None:
+        vary = self._cb("vary-mu-s")
+        fixed = bool(self._iv("mu-s-fixed"))
+
+        self.query_one("#vary-mu-s").disabled = fixed
+        self.query_one("#mu-s-min").disabled = not vary or fixed
+        self.query_one("#mu-s-max").disabled = not vary or fixed
+        self.query_one("#mu-s-fixed").disabled = vary
+
     # ── gate handlers ─────────────────────────────────────────────────────────
 
     @on(Checkbox.Changed)
@@ -535,7 +661,10 @@ class SobolTUIApp(App[Optional[List[str]]]):
         cb_id = event.checkbox.id
         active = event.value
 
-        if cb_id == "vary-mass":
+        if cb_id == "boulders":
+            self._sync_body_gates()
+
+        elif cb_id == "vary-mass":
             for fid in _MASS_GATE_IDS:
                 self.query_one(f"#{fid}").disabled = not active
 
@@ -572,13 +701,17 @@ class SobolTUIApp(App[Optional[List[str]]]):
                         self._sync_spin_period_gates()
                     elif css == "kt":
                         self._sync_kt_gates()
+                    elif css == "mu-s":
+                        self._sync_mu_s_gates()
                     elif css in ("spin-torque-align", "spin-obliquity", "spin-azimuth"):
                         self._sync_spin_axis_gates()
                     break
 
     @on(Select.Changed)
     def _select_gate(self, event: Select.Changed) -> None:
-        if event.select.id == "use-shape-crop-fixed":
+        if event.select.id in ("encounter", "body-source", "boulder-shape", "boulder-placed"):
+            self._sync_body_gates()
+        elif event.select.id == "use-shape-crop-fixed":
             val = "" if event.value is Select.BLANK else str(event.value)
             self.query_one("#shape-file").disabled = (val != "true")
 
@@ -602,6 +735,11 @@ class SobolTUIApp(App[Optional[List[str]]]):
     def _spin_period_list_changed(self, event: Input.Changed) -> None:
         del event
         self._sync_spin_period_gates()
+
+    @on(Input.Changed, "#mu-s-fixed")
+    def _mu_s_fixed_changed(self, event: Input.Changed) -> None:
+        del event
+        self._sync_mu_s_gates()
 
     @on(Input.Changed, "#kt-fixed")
     def _kt_fixed_changed(self, event: Input.Changed) -> None:
@@ -740,6 +878,8 @@ class SobolTUIApp(App[Optional[List[str]]]):
                     fi(f"{css}-min", f"{flag_base}-min")
                     fi(f"{css}-max", f"{flag_base}-max")
 
+        if not self._cb("vary-mu-s"):
+            fi("mu-s-fixed", "--mu-s")
         fi("kt-fixed", "--kt-fixed")
         ii("kt-scale-ref-np", "--kt-scale-ref-np")
         dn_raw = self._iv("dn-cohes-factor")
@@ -784,6 +924,35 @@ class SobolTUIApp(App[Optional[List[str]]]):
                 fi(f"{t_css}-max", f"{t_flag}-max")
             else:
                 fi(f"{t_css}-fixed", t_flag)
+
+        # Body / encounter: emit only what differs from the runner defaults
+        if self._sel("body-source") != "lattice":
+            argv.extend(["--body-source", self._sel("body-source")])
+        if self._sel("encounter") != "ephemeris":
+            argv.extend(["--encounter", self._sel("encounter")])
+        for wid in ("flyby-rp-km", "flyby-rp-km-min", "flyby-rp-km-max", "flyby-vinf-kms",
+                    "flyby-vinf-kms-min", "flyby-vinf-kms-max", "flyby-start-sep-km", "settle-tdyn", "relax-tdyn"):
+            fi(wid, f"--{wid}")
+        si("body-cache-dir", "--body-cache-dir")
+
+        # Boulders
+        filled = [w for w, *_ in _BOULDER_INPUTS if self._iv(w)] + [
+            w for w in ("boulder-shape", "boulder-placed") if self._sel(w)]
+        if not self._cb("boulders"):
+            if filled:
+                raise ValueError("tick boulders, or clear the boulder fields: " + ", ".join(filled))
+        else:
+            argv.append("--boulders")
+            for w in ("boulder-shape", "boulder-placed"):
+                if self._sel(w):
+                    argv.extend([f"--{w}", self._sel(w)])
+            for w, *_ in _BOULDER_INPUTS:
+                if w == "boulder-file":
+                    si(w, f"--{w}")
+                elif w in ("boulder-nmin", "boulder-seed"):
+                    ii(w, f"--{w}")
+                else:
+                    fi(w, f"--{w}")
 
         # Setup toggles
         if self._cb("vary-use-dem"):

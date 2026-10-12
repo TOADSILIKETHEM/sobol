@@ -8,6 +8,7 @@ phantomsetup
 phantommoddump
 phantomflyby
 phantomanalysis
+phantomclumps
 bin/
 tq
 *.o
