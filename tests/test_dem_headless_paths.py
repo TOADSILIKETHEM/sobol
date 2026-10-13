@@ -402,3 +402,184 @@ def test_per_sphere_without_earth_model_gets_bare_sphere():
                        capture_output=True, text=True, check=False)
     out = (r.stdout or "") + (r.stderr or "")
     assert r.returncode == 0 and "BARE_EARTH_OK" in out, out[-3000:]
+
+
+# -- --slowmo: more timeline frames over the same sim time (instance path) --
+
+def test_patch_instance_slowmo_sets_factor():
+    out = dhr.patch_script_source("instance", _real_src("instance"), manifest="C:/v/m.json", slowmo=4)
+    assert "\nSLOWMO_FACTOR = 4\n" in out
+
+
+def test_slowmo_flag_parses_and_defaults_to_1(tmp_path):
+    m = tmp_path / "manifest.json"
+    m.write_text('{"viz_mode": "instance"}')
+    assert _parse(["--viz-path", "instance", "--manifest", str(m)]).slowmo == 1
+    assert _parse(["--viz-path", "instance", "--manifest", str(m), "--slowmo", "4"]).slowmo == 4
+
+
+@pytest.mark.parametrize("extra,match", [
+    (["--viz-path", "per_sphere", "--grains-dir", "/g", "--bodies-dir", "/b", "--slowmo", "2"], "instance"),
+    (["--viz-path", "instance", "--manifest", "/m", "--slowmo", "0"], ">= 1"),
+])
+def test_slowmo_rejected_off_instance_or_below_1(extra, match):
+    with pytest.raises(ValueError, match=match):
+        dhr.validate_args(_parse(extra))
+
+
+def test_slowmo_range_starts_on_the_first_dump():
+    # timeline frame S*k shows dump k (frame_map 100 -> 100*S); frames before S would
+    # hold dump 1, so the render starts at S and ends on the last dump.
+    from types import SimpleNamespace
+    scene = SimpleNamespace(frame_start=1, frame_end=62 * 4)
+    dhr.apply_slowmo_range(scene, 4)
+    assert (scene.frame_start, scene.frame_end) == (4, 248)
+    scene = SimpleNamespace(frame_start=1, frame_end=62)
+    dhr.apply_slowmo_range(scene, 1)
+    assert (scene.frame_start, scene.frame_end) == (1, 62)
+
+
+# -- --resume: carry on an interrupted render, keeping the frames already on disk --
+
+def test_resume_flag_parses_and_defaults_off(tmp_path):
+    m = tmp_path / "manifest.json"
+    m.write_text('{"viz_mode": "instance"}')
+    assert _parse(["--viz-path", "instance", "--manifest", str(m)]).resume is False
+    assert _parse(["--viz-path", "instance", "--manifest", str(m), "--resume"]).resume is True
+
+
+def test_resume_skips_frames_already_written():
+    from types import SimpleNamespace
+    scene = SimpleNamespace(render=SimpleNamespace(use_overwrite=True, use_placeholder=True))
+    dhr.apply_resume(scene, False)
+    assert scene.render.use_overwrite is True
+    dhr.apply_resume(scene, True)
+    assert (scene.render.use_overwrite, scene.render.use_placeholder) == (False, False)
+
+
+# -- render speed defaults: persistent data + 4K texture cap (measured 41 -> 16 s/frame, same pixels) --
+
+def test_render_speedups_keep_scene_and_cap_textures():
+    from types import SimpleNamespace
+    scene = SimpleNamespace(objects=[], render=SimpleNamespace(use_persistent_data=False),
+                            cycles=SimpleNamespace(texture_limit_render="OFF"))
+    dhr.apply_render_speedups(scene)
+    assert scene.render.use_persistent_data is True
+    # per-image cap (cap_image_textures) instead of Cycles' global limit, so the clouds can stay full size
+    assert scene.cycles.texture_limit_render == "OFF"
+
+
+def test_image_textures_capped_at_4k_except_clouds():
+    from types import SimpleNamespace as NS
+
+    class Img(NS):
+        def scale(self, w, h):
+            self.size = (w, h)
+
+    imgs = [Img(name="earth_nightlights_21K.tif", source="FILE", size=(21600, 10800)),
+            Img(name="earth_clouds_8K.tif", source="FILE", size=(8192, 4096)),
+            Img(name="small.png", source="FILE", size=(2048, 1024)),
+            Img(name="Render Result", source="VIEWER", size=(0, 0))]
+    dhr.cap_image_textures(imgs)
+    assert [tuple(i.size) for i in imgs] == [(4096, 2048), (8192, 4096), (2048, 1024), (0, 0)]
+
+
+def test_samples_default_is_124(tmp_path):
+    m = tmp_path / "manifest.json"
+    m.write_text('{"viz_mode": "instance"}')
+    assert _parse(["--viz-path", "instance", "--manifest", str(m)]).samples == 124
+
+
+# -- adaptive subdivision: the Earth asset dices at 1 px/edge, so memory grew with Earth's screen
+#    size (40k flyby approach: 10 -> 20 GB, 15 -> 58 s/frame). Floor 4 px; off where nothing displaces.
+
+def _subsurf_obj(name, pixel_size, displaced):
+    from types import SimpleNamespace as NS
+    mod = NS(type="SUBSURF", use_adaptive_subdivision=True, adaptive_space="PIXEL", adaptive_pixel_size=pixel_size)
+    out = NS(type="OUTPUT_MATERIAL", inputs=[NS(name="Surface", is_linked=True),
+                                             NS(name="Displacement", is_linked=displaced)])
+    mat = NS(node_tree=NS(nodes=[out]))
+    return NS(name=name, modifiers=[mod], material_slots=[NS(material=mat)]), mod
+
+
+def test_adaptive_subdivision_gets_a_4px_floor_and_is_off_without_displacement():
+    from types import SimpleNamespace as NS
+    surface, s_mod = _subsurf_obj("Surface", 1.0, displaced=True)
+    coarse, c_mod = _subsurf_obj("Coarse", 8.0, displaced=True)
+    atmos, a_mod = _subsurf_obj("Atmosphere", 1.0, displaced=False)
+    scene = NS(objects=[surface, coarse, atmos], render=NS(use_persistent_data=False),
+               cycles=NS(texture_limit_render="OFF"))
+    dhr.apply_render_speedups(scene)
+    assert (s_mod.use_adaptive_subdivision, s_mod.adaptive_pixel_size) == (True, 4.0)
+    assert c_mod.adaptive_pixel_size == 8.0  # already coarser: left alone
+    assert a_mod.use_adaptive_subdivision is False
+
+
+def test_gpu_render_denoises_on_the_gpu():
+    # OIDN on the CPU was ~7 of 9.5 s per 1080p frame; on the GPU 2.6 s, same pixels (0.01/255)
+    from types import SimpleNamespace
+    scene = SimpleNamespace(cycles=SimpleNamespace(denoising_use_gpu=False))
+    dhr.apply_gpu_denoise(scene)
+    assert scene.cycles.denoising_use_gpu is True
+
+
+# -- camera aim between keys: location keys are Bezier, rotation keys LINEAR, so with --slowmo
+#    the body swung 2.5-4.5 deg sideways between keys (40k flyby approach). Track the core instead.
+
+_CAMERA_AIM = r'''
+import math, sys
+sys.path.insert(0, r"{bc}")
+sys.path.insert(0, r"{code}")
+import bpy
+from mathutils import Vector
+import DEMCinematicSetup as cin
+scene = bpy.context.scene
+for o in list(bpy.data.objects):
+    bpy.data.objects.remove(o, do_unlink=True)
+n = 8
+scene.frame_start, scene.frame_end = 1, n
+earth = bpy.data.objects.new("Earth", None); scene.collection.objects.link(earth)
+cores = []
+for i in range(n):
+    t = i - 4.0  # hyperbola-like pass: Earth sweeps round the body, fast near i = 4
+    earth.location = (300.0 * t / (1 + abs(t)), 80.0, 0.0)
+    earth.keyframe_insert("location", frame=1 + i)
+    cores.append(Vector((0.3 * t * t, 2.0 * t, 0.1 * t)))
+cam = cin.setup_camera(n, lambda i: cores[i], earth, True, rotation_interp="LINEAR")
+# reference orientation at keys: what setup_camera has always keyed
+ref = {{}}
+for i in range(n):
+    scene.frame_set(1 + i)
+    look = (cores[i] - cam.matrix_world.translation).normalized()
+    ref[1 + i] = look.to_track_quat("-Z", "Y")
+S = 5
+scene.frame_end = n * S
+scene.render.frame_map_old, scene.render.frame_map_new = 100, 100 * S
+aim = bpy.data.objects.get("DEM_CameraAim")
+assert aim is not None, "no DEM_CameraAim target"
+worst_between, worst_key, worst_roll = 0.0, 0.0, 0.0
+for f in range(S, n * S + 1):
+    scene.frame_set(f)
+    m = cam.matrix_world
+    look = -m.col[2].xyz.normalized()
+    to_aim = (aim.matrix_world.translation - m.translation).normalized()
+    worst_between = max(worst_between, math.degrees(look.angle(to_aim)))
+    if f % S == 0:
+        k = f // S
+        to_core = (cores[k - 1] - m.translation).normalized()
+        worst_key = max(worst_key, math.degrees(look.angle(to_core)))
+        worst_roll = max(worst_roll, math.degrees(m.to_quaternion().rotation_difference(ref[k]).angle))
+print(f"AIM between {{worst_between:.5f}} key {{worst_key:.5f}} roll {{worst_roll:.5f}}")
+assert worst_between < 0.01 and worst_key < 0.01 and worst_roll < 0.01
+print("CAMERA_AIM_OK")
+'''
+
+
+@pytest.mark.skipif(not WIN_TEMP.is_dir(), reason="Windows Temp not mounted")
+def test_camera_points_at_the_core_between_keys():
+    script = WIN_TEMP / "camera_aim.py"
+    script.write_text(_CAMERA_AIM.format(bc=BLENDERCONVERT_WIN, code=CODE_WIN), encoding="utf-8")
+    r = subprocess.run([str(BLENDER_EXE), "--background", "--factory-startup", "--python",
+                        WIN_TEMP_WIN + "/camera_aim.py"], capture_output=True, text=True, check=False)
+    out = (r.stdout or "") + (r.stderr or "")
+    assert r.returncode == 0 and "CAMERA_AIM_OK" in out, out[-3000:]

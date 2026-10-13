@@ -66,7 +66,7 @@ def test_sim_params_defaults():
 def test_render_form_values_defaults():
     r = tsr.RenderFormValues()
     assert r.resolution == "1920x1080"
-    assert r.samples == 500
+    assert r.samples == 124
     assert r.fps == 24
     assert r.max_frames is None
     assert r.camera_mode == "auto"
@@ -2677,3 +2677,114 @@ def test_render_result_names_missing_asset_fallbacks(tmp_path, monkeypatch):
     assert "missing assets" in r.message
     for name in ("rock material", "Earth model", "HDRI"):
         assert name in r.message
+
+
+def test_render_command_passes_slowmo_only_above_1():
+    rp = tsr.RenderParams(grains_dir=Path("/g"), bodies_dir=Path("/b"), output_dir=Path("/o"),
+                          viz_path="instance", manifest=Path("/m/manifest.json"))
+    assert "--slowmo" not in tsr.build_render_command(rp)
+    rp.slowmo = 4
+    cmd = tsr.build_render_command(rp)
+    assert cmd[cmd.index("--slowmo") + 1] == "4"
+
+
+def test_render_command_passes_resume_only_when_set():
+    rp = tsr.RenderParams(grains_dir=Path("/g"), bodies_dir=Path("/b"), output_dir=Path("/o"))
+    assert "--resume" not in tsr.build_render_command(rp)
+    rp.resume = True
+    assert "--resume" in tsr.build_render_command(rp)
+
+
+# --- slowmo / resume through the form, pipeline and per-path render -------
+
+def test_slowmo_frame_count_is_n_times_the_gaps_plus_one():
+    # x4 over 62 dumps renders timeline frames 4..248 (dump 1 .. dump 62)
+    assert tsr.slowmo_frame_count(62, 4) == 245
+    assert tsr.slowmo_frame_count(62, 1) == 62
+    assert tsr.slowmo_frame_count(1, 4) == 1
+    assert tsr.slowmo_frame_count(62, 4, max_frames=10) == 10
+
+
+def test_validate_render_form_rejects_bad_slowmo():
+    with pytest.raises(ValueError, match="slowmo"):
+        tsr.validate_render_form(tsr.RenderFormValues(slowmo=0))
+    with pytest.raises(ValueError, match="instance"):
+        tsr.validate_render_form(tsr.RenderFormValues(slowmo=4, paths=("composite",)))
+    with pytest.raises(ValueError, match="compare"):
+        tsr.validate_render_form(tsr.RenderFormValues(
+            slowmo=4, paths=("composite", "instance_grains"), compare=True))
+    tsr.validate_render_form(tsr.RenderFormValues(slowmo=4, paths=("composite", "instance_grains")))
+
+
+def _fake_render_into(seen):
+    def fake_render(params):
+        seen.append(params)
+        params.output_dir.mkdir(parents=True, exist_ok=True)
+        (params.output_dir / "frame_0004.png").write_bytes(b"")
+    return fake_render
+
+
+def _slowmo_ctx(tmp_path, form):
+    manifest = tmp_path / "m.json"
+    manifest.write_text("{}")
+    return tsr.PathContext(grains_dir=tmp_path, bodies_dir=tmp_path, batch_dir=tmp_path, run_name="run_0001",
+                           render_form=form, n_expected_frames=62,
+                           preprocessed={"instance_grains": manifest, "composite": manifest})
+
+
+def test_run_render_path_slowmo_goes_to_instance_into_its_own_folder(tmp_path, monkeypatch):
+    # a x4 render must not land among (or --resume onto) the 1:1 frames
+    seen, stages = [], []
+    monkeypatch.setattr(tsr, "run_render_stage", _fake_render_into(seen))
+    ctx = _slowmo_ctx(tmp_path, tsr.RenderFormValues(slowmo=4, resume=True))
+    r = tsr.run_render_path(tsr.RENDER_PATHS["instance_grains"], ctx,
+                            on_stage=lambda stage, **info: stages.append((stage, info)))
+    assert r.ok
+    assert seen[0].slowmo == 4 and seen[0].resume is True
+    assert seen[0].output_dir == tmp_path / "run_0001_render_instance_grains_slowmo4"
+    assert ("render", 245) in [(s, i.get("n_expected")) for s, i in stages]
+
+
+def test_run_render_path_slowmo_leaves_composite_at_1(tmp_path, monkeypatch):
+    seen = []
+    monkeypatch.setattr(tsr, "run_render_stage", _fake_render_into(seen))
+    ctx = _slowmo_ctx(tmp_path, tsr.RenderFormValues(slowmo=4, paths=("composite", "instance_grains")))
+    assert tsr.run_render_path(tsr.RENDER_PATHS["composite"], ctx).ok
+    assert seen[0].slowmo == 1
+    assert seen[0].output_dir == tmp_path / "run_0001_render_composite"
+
+
+def test_build_render_form_reads_slowmo_and_resume():
+    async def _scenario():
+        app = tsr.SimRenderTUIApp()
+        async with app.run_test():
+            app.query_one("#slowmo", tsr.Input).value = "4"
+            app.query_one("#resume", tsr.Checkbox).value = True
+            return app._build_render_form()
+
+    form = asyncio.run(_scenario())
+    assert form.slowmo == 4 and form.resume is True
+
+
+def test_build_render_form_rejects_slowmo_without_instance_path():
+    async def _scenario():
+        app = tsr.SimRenderTUIApp()
+        async with app.run_test():
+            app.query_one("#slowmo", tsr.Input).value = "4"
+            for name in tsr.RENDER_PATH_NAMES:
+                app.query_one(f"#{tsr.PATH_CHECKBOX_IDS[name]}", tsr.Checkbox).value = name == "composite"
+            with pytest.raises(ValueError, match="instance"):
+                app._build_render_form()
+
+    asyncio.run(_scenario())
+
+
+def test_samples_default_is_124_everywhere_in_the_tui():
+    assert tsr.RenderParams(grains_dir=Path("/g"), bodies_dir=Path("/b"), output_dir=Path("/o")).samples == 124
+
+    async def _scenario():
+        app = tsr.SimRenderTUIApp()
+        async with app.run_test():
+            return app.query_one("#samples", tsr.Input).value
+
+    assert asyncio.run(_scenario()) == "124"

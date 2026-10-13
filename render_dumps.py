@@ -9,7 +9,7 @@ sobol_NNNNN next to a minimal sobol.setup, so the readers see a normal run.
     python3 sobol/render_dumps.py RUN_DIR [--name NAME] [--prefix sobol]
         [--dem-model particle|sink --np-apophis N [--apophis-only]]
         [--encounter hyperbola|ephemeris]
-        [--paths instance_grains composite] [--samples 500] [--fps 24]
+        [--paths instance_grains composite] [--samples 124] [--fps 24]
         [--resolution 1920x1080] [--max-frames N] [--video] [--out-root DIR]
 
 Outputs: <out-root>/<name>/<run>_viz_instance/, <run>_render_<path>/ (<run> =
@@ -144,11 +144,14 @@ def _parse(argv):
     p.add_argument("--encounter", choices=("hyperbola", "ephemeris"),
                    help="hyperbola: the one sink is a phantomflyby Earth; ephemeris: sinks start at Sun")
     p.add_argument("--paths", nargs="+", default=["instance_grains"])
-    p.add_argument("--samples", type=int, default=500)
+    p.add_argument("--samples", type=int, default=t.DEFAULT_SAMPLES)
     p.add_argument("--fps", type=int, default=24)
     p.add_argument("--resolution", default="1920x1080")
     p.add_argument("--max-frames", type=int)
     p.add_argument("--video", action="store_true", help="also encode an mp4")
+    p.add_argument("--slowmo", type=int, default=1,
+                   help="instance paths: N frames per dump, in-betweens interpolated (own _slowmoN folder)")
+    p.add_argument("--resume", action="store_true", help="keep frames already rendered, render the rest")
     p.add_argument("--out-root", type=Path, default=t.DATA_DIR / "DEMCSVs")
     p.add_argument("--stage-dir", type=Path,
                    help="where renamed dumps are staged, in _staged_<run dir name>/ (default: beside "
@@ -166,6 +169,13 @@ def main(argv=None) -> int:
     if bad:
         sys.exit(f"{bad}: only {list(DUMP_ROUTE_PATHS)} render straight from dumps; "
                  "per_sphere / instance_static need the npz convert -- use sobol/tui_sim_render.py")
+    form = t.RenderFormValues(resolution=a.resolution, samples=a.samples, fps=a.fps,
+                              max_frames=a.max_frames, encode_video=a.video, paths=tuple(a.paths),
+                              slowmo=a.slowmo, resume=a.resume)
+    try:
+        t.validate_render_form(form)
+    except ValueError as exc:
+        sys.exit(str(exc))
     t.check_blender_exe(t.BLENDER_EXE)
     src = a.run_dir.expanduser().resolve()
     # absolute: the preprocess runs with cwd=Code/ and Blender from its own dir
@@ -183,8 +193,6 @@ def main(argv=None) -> int:
     run = stage_run(src, stage_root, a.prefix, a.dem_model, a.apophis_only, a.np_apophis,
                     allow_symlink=not windows_reader, run_name=run_name, encounter=a.encounter)
     n = len(list(run.glob("sobol_[0-9]*")))
-    form = t.RenderFormValues(resolution=a.resolution, samples=a.samples, fps=a.fps,
-                              max_frames=a.max_frames, encode_video=a.video, paths=tuple(a.paths))
     ctx = t.PathContext(grains_dir=batch / "unused_grains", bodies_dir=batch / f"{run_name}_bodies_output",
                         batch_dir=batch, run_name=run_name, render_form=form, n_expected_frames=n)
     targets = {}

@@ -99,7 +99,8 @@ python3 sobol/Analysis/plot_breakup_ablation.py                            # bas
 
 Render existing dumps without the sim (dump route; any prefix with `--dem-model`/`--np-apophis`; other-machine setup `Code/README.md`):
 ```bash
-python3 sobol/render_dumps.py sobol_mass_runs/<batch>/run_0001 --name <out> [--samples 500 --fps 24 --max-frames N --video]
+python3 sobol/render_dumps.py sobol_mass_runs/<batch>/run_0001 --name <out> [--samples 124 --fps 24 --max-frames N --video]
+#   [--slowmo 4 --resume]: instance x4 frames per dump into run_0001_render_instance_grains_slowmo4/; --resume skips frames on disk
 python3 sobol/render_dumps.py <fly dir> --prefix fly --dem-model particle --np-apophis N --apophis-only \
   --encounter hyperbola   # someone else's phantomflyby run (lone Earth sink, no Sun)
 python3 sobol/setup_paths.py --check   # paths, assets, Blender + pandas, preprocess deps

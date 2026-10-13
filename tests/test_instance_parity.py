@@ -38,6 +38,7 @@ import DEMHeadlessRender as dhr
 
 VIZ_PATH = {viz_path!r}
 TIMES = {times!r}
+SLOWMO = {slowmo!r}
 VISIBLE_IDS = []
 SCENE_OBJECTS = ("DEM_TrackCam", "DEM_SunLight", "DEM_CamFill", "Earth", "Moon", "Moon_Body",
                  "Sun_Visual", "Sun_Body")
@@ -98,9 +99,11 @@ try:
     else:
         dhr.ensure_procedural_rock_material()
         src = dhr.patch_script_source("instance", script.read_text(encoding="utf-8"),
-                                      manifest={manifest!r})
+                                      manifest={manifest!r}, slowmo=SLOWMO)
     exec(compile(src, str(script), "exec"), {{"__name__": "__main__", "__file__": str(script)}})
     scene = bpy.context.scene
+    if VIZ_PATH != "per_sphere":
+        dhr.apply_slowmo_range(scene, SLOWMO)  # as DEMHeadlessRender does: moves frame_start
     verts, objects = [], []
     for t in TIMES:
         f = int(t)
@@ -138,11 +141,11 @@ def _scaled_fixture():
     return grains, bodies
 
 
-def _sample(viz_path, work=WORK, work_win=WORK_WIN, **paths):
-    name = f"parity_{viz_path}"
+def _sample(viz_path, work=WORK, work_win=WORK_WIN, times=TIMES, slowmo=1, **paths):
+    name = f"parity_{viz_path}" + (f"_slowmo{slowmo}" if slowmo != 1 else "")
     script = work / f"{name}.py"
     script.write_text(_SAMPLER.format(
-        bc=BLENDERCONVERT_WIN, viz_path=viz_path, times=TIMES,
+        bc=BLENDERCONVERT_WIN, viz_path=viz_path, times=times, slowmo=slowmo,
         out_npz=f"{work_win}/{name}.npz", out_json=f"{work_win}/{name}.json",
         grains=paths.get("grains"), bodies=paths.get("bodies"), manifest=paths.get("manifest"),
     ), encoding="utf-8")
@@ -375,3 +378,17 @@ def test_frame_with_no_grains_keeps_camera_finite(sampled_empty_frame):
         cams = np.array([o["DEM_TrackCam"] for o in meta["objects"]])
         assert np.isfinite(cams).all()
     _assert_scene_objects_match(ps, ins)
+
+
+def test_slowmo_timeline_maps_onto_the_same_motion(sampled):
+    # SLOWMO 2 with the render range moved to start on dump 1: timeline time 2t must show
+    # exactly what SLOWMO 1 shows at t, at the dumps and between them (Bezier in-betweens).
+    _, (ins_verts, ins_meta) = sampled
+    verts, meta = _sample("instance", times=[2 * t for t in TIMES], slowmo=2,
+                          manifest=f"{WORK_WIN}/run_0001_viz_instance/manifest.json")
+    assert meta["frame_range"] == [2, 2 * ins_meta["frame_range"][1]]
+    gap = _unordered_max_gap(np.array(verts), ins_verts)  # vertex numbering differs per Blender run
+    assert (gap < 1e-4).all(), dict(zip([str(t) for t in TIMES], gap.tolist()))
+    for a, b in zip(meta["objects"], ins_meta["objects"]):
+        for name in b:
+            assert np.allclose(a[name], b[name], atol=1e-4), name

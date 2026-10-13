@@ -200,12 +200,17 @@ class SimParams:
     keep_dumps: bool = False
 
 
+# Cycles samples: adaptive sampling + denoise already on, so 124 vs 1000 differs by
+# ~0.2/255 mean on a 40k flyby frame (sample sweep 2026-10-13, DEMCSVs/.../samples_compare_f31)
+DEFAULT_SAMPLES = 124
+
+
 @dataclass
 class RenderFormValues:
     """Render-only inputs from the TUI's render form."""
 
     resolution: str = "1920x1080"
-    samples: int = 500
+    samples: int = DEFAULT_SAMPLES
     fps: int = 24
     max_frames: Optional[int] = None
     camera_mode: str = "auto"
@@ -216,6 +221,8 @@ class RenderFormValues:
     placeholder_obj: str = DEFAULT_PLACEHOLDER_OBJ
     n_points: int = 1_000_000
     compare: bool = False  # stitch every rendered path side by side (needs >= 2 paths)
+    slowmo: int = 1  # instance paths only: timeline frames per dump (in-betweens interpolated)
+    resume: bool = False  # keep frames already in the output dir, render the rest
 
 
 @dataclass
@@ -226,7 +233,7 @@ class RenderParams:
     bodies_dir: Path
     output_dir: Path
     resolution: str = "1920x1080"
-    samples: int = 500
+    samples: int = DEFAULT_SAMPLES
     fps: int = 24
     max_frames: Optional[int] = None
     camera_mode: str = "auto"
@@ -234,6 +241,8 @@ class RenderParams:
     video_fps: Optional[int] = None
     viz_path: str = "per_sphere"  # DEMHeadlessRender.py --viz-path
     manifest: Optional[Path] = None  # required unless viz_path == "per_sphere"
+    slowmo: int = 1  # instance only: timeline frames per dump (DEMHeadlessRender.py --slowmo)
+    resume: bool = False  # keep frames already in output_dir, render the rest (--resume)
     # Called with each line Blender prints (see _run_logged). A field rather
     # than a run_render_stage() argument so stage fakes taking only `params`
     # keep working.
@@ -330,8 +339,33 @@ def _grains_and_bodies_dirs(run_dir: Path, base_output_dir: Path, output_root: P
     return grains_dir, bodies_dir
 
 
-def _render_output_dir(batch_dir: Path, run_name: str, path_name: str) -> Path:
-    return batch_dir / f"{run_name}_render_{path_name}"
+def _render_output_dir(batch_dir: Path, run_name: str, path_name: str, slowmo: int = 1) -> Path:
+    # a slowmo render gets its own folder so it never mixes with (or resumes onto) the 1:1 frames
+    suffix = f"_slowmo{slowmo}" if slowmo > 1 else ""
+    return batch_dir / f"{run_name}_render_{path_name}{suffix}"
+
+
+def slowmo_frame_count(n_frames: int, slowmo: int, max_frames: Optional[int] = None) -> int:
+    """Frames a --slowmo render writes: timeline slowmo*1 .. slowmo*n_frames (dump 1 .. dump n).
+    n_frames may already be capped at max_frames; the result is the same."""
+    n = slowmo * (n_frames - 1) + 1
+    return n if max_frames is None else min(n, max_frames)
+
+
+def _path_slowmo(spec: "RenderPath", form: RenderFormValues) -> int:
+    """Only the instance render interpolates between dumps; other paths stay 1:1."""
+    return form.slowmo if spec.headless_viz_path == "instance" else 1
+
+
+def validate_render_form(form: RenderFormValues) -> None:
+    """Cross-field render rules shared by the TUI, run_pipeline and render_dumps. Raises ValueError."""
+    if form.slowmo < 1:
+        raise ValueError(f"slowmo must be >= 1 (got {form.slowmo})")
+    if form.slowmo > 1:
+        if not any(RENDER_PATHS[p].headless_viz_path == "instance" for p in form.paths if p in RENDER_PATHS):
+            raise ValueError("slowmo needs an instance path (instance_grains or instance_static)")
+        if form.compare:
+            raise ValueError("compare can't stitch a slowmo render (its frame count differs from the other paths)")
 
 
 def _compare_output_dir(batch_dir: Path, run_name: str) -> Path:
@@ -436,6 +470,10 @@ def build_render_command(params: RenderParams) -> List[str]:
     ]
     if params.max_frames is not None:
         cmd += ["--max-frames", str(params.max_frames)]
+    if params.slowmo != 1:
+        cmd += ["--slowmo", str(params.slowmo)]
+    if params.resume:
+        cmd.append("--resume")
     if params.encode_video:
         cmd += ["--encode-video"]
         if params.video_fps is not None:
@@ -679,9 +717,11 @@ def run_render_path(
         preprocess_s = time.monotonic() - t0
 
     t_render = time.monotonic()
-    output_dir = _render_output_dir(ctx.batch_dir, ctx.run_name, spec.name)
-    notify("render", n_expected=ctx.n_expected_frames, output_dir=output_dir)
     form = ctx.render_form
+    slowmo = _path_slowmo(spec, form)
+    output_dir = _render_output_dir(ctx.batch_dir, ctx.run_name, spec.name, slowmo)
+    notify("render", n_expected=slowmo_frame_count(ctx.n_expected_frames, slowmo, form.max_frames),
+           output_dir=output_dir)
     params = RenderParams(
         grains_dir=ctx.grains_dir,
         bodies_dir=ctx.bodies_dir,
@@ -695,6 +735,8 @@ def run_render_path(
         video_fps=form.video_fps,
         viz_path=spec.headless_viz_path,
         manifest=manifest,
+        slowmo=slowmo,
+        resume=form.resume,
         on_line=on_line,
     )
     try:
@@ -995,6 +1037,7 @@ def run_pipeline(
         raise ValueError(f"unknown render path(s): {', '.join(unknown)}")
     if render_form.compare and len(render_form.paths) < 2:
         raise ValueError("compare needs at least two render paths")
+    validate_render_form(render_form)
 
     started_at = datetime.now().astimezone()
     t0 = time.monotonic()
@@ -1339,7 +1382,7 @@ class SimRenderTUIApp(App[None]):
 
             yield Static("Render", classes="sec")
             yield _Row("resolution", Input("1920x1080", id="resolution"), "WxH")
-            yield _Row("samples", Input("500", id="samples"), "int")
+            yield _Row("samples", Input(str(DEFAULT_SAMPLES), id="samples"), "int")
             yield _Row("fps", Input("24", id="fps"), "int")
             yield _Row("max_frames", Input("", id="max-frames", placeholder="(all frames)"), "int, optional")
             yield _Row(
@@ -1356,6 +1399,12 @@ class SimRenderTUIApp(App[None]):
             )
             yield _Row(
                 "video_fps", Input("", id="video-fps", placeholder="(same as fps)"), "int, optional",
+            )
+            yield _Row("slowmo", Input("1", id="slowmo"), "frames per dump, instance paths")
+            yield _Row(
+                "resume",
+                Checkbox("keep frames already rendered", value=False, id="resume"),
+                "carry on a stopped render",
             )
 
             yield Static("Render — paths (any combination; one sim feeds all)", classes="sec")
@@ -1617,6 +1666,9 @@ class SimRenderTUIApp(App[None]):
         compare = bool(self.query_one("#compare", Checkbox).value)
         if compare and len(paths) < 2:
             raise ValueError("compare needs at least two ticked render paths")
+        slowmo = int(self._iv("slowmo") or "1")
+        resume = bool(self.query_one("#resume", Checkbox).value)
+        validate_render_form(RenderFormValues(paths=paths, compare=compare, slowmo=slowmo))
         envelope_method = str(self.query_one("#envelope-method", Select).value)
         placeholder_obj = self._iv("placeholder-obj")
         n_points = 1_000_000
@@ -1650,6 +1702,8 @@ class SimRenderTUIApp(App[None]):
             placeholder_obj=placeholder_obj,
             n_points=n_points,
             compare=compare,
+            slowmo=slowmo,
+            resume=resume,
         )
 
     @on(Button.Pressed, "#btn-run")

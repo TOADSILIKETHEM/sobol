@@ -55,16 +55,18 @@ Parent: `../CLAUDE.md`. Shared facts: `../docs/SHARED_FACTS.md`. Merge/rename ca
   - Verified 2026-09-27: headless form → np300 settled hyperbola (rp 38000, v_inf 5.9) → convert → `per_sphere`
     render, pericentre |r| 38050 km.
 - **Sim — boulders (settled only)** (Oct 2026; CLI equivalent + semantics: `../CLAUDE.md` § `--boulders`):
-  - `boulders` checkbox (default off). Ticked with `body_source = lattice` is refused at click.
+  - `boulders` checkbox (default off). It can only be ticked on a settled body; if `body_source` changes afterwards it stays ticked and enabled (so it can be unticked) and Run refuses it.
   - Selects `boulder_shape` (`round` | `ellipsoid` | `grown`, random boulders) and `boulder_placed` (`none` | `binary` | `file`).
   - Inputs, all fixed values (no sweep in this one-run TUI): `f_boulder` (0-1, default 0.3), `rb_min` (1.5), `rb_max` (4), `q_slope` (3.5), `axis_min` (ellipsoid), `jagged` (grown), `lobe_ratio` (binary), `boulder_file` (file), `nmin_clump` (>= 2), `seed`, `bond_sigma_pa`, `tau/sigma` (`bond_tau_ratio`, default 1), `kb_cgs` (blank = `kn_cgs`), `bond_reach` (0.1). A blank box keeps the `BoulderSpec` default.
   - **`bond_sigma_pa` is required** (Pa; 0 = stretch-limit breaking only; no default). `boulders.validate_spec()` runs at click.
   - `run_sim_stage()` resolves `phantomclumps` and refuses a `phantom` without clump bonds (`boulders.attach_tools`) after the body is built; the run then clumps the cached body into `run_0001/` (`clumps.log`, `boulders.json`) on either encounter. Needs `make demtools`.
 - **Render:**
-  - `resolution` (1920x1080), `samples` (500), `fps` (24).
+  - `resolution` (1920x1080), `samples` (124), `fps` (24).
   - `max_frames` (blank means all).
   - `camera_mode` (`auto` | `grain_only`, which patches `CAMERA_MODE`).
   - `encode_video` checkbox (off by default) + `video_fps` (blank = same as `fps`) — optional final MP4-encode stage, applied per ticked render path.
+  - `slowmo` (default 1) — instance paths only: N frames per dump over the same sim time (in-betweens interpolated on the grains' Bezier curves, not simulated). Renders (n−1)·N+1 frames into its own `run_0001_render_<path>_slowmoN/`; composite / per_sphere in the same run stay 1:1. Refused with no instance path ticked, and with `compare` (frame counts differ). Keep `video_fps` at 24 (Max's standard): slowmo N gives an N× longer video, not a smoother clip of the same length. `validate_render_form()` holds these rules for the TUI, `run_pipeline` and `render_dumps.py`.
+  - `resume` checkbox — keep `frame_*.png` already in the output folder and render only the missing ones (carry on a stopped render; `DEMHeadlessRender.py --resume`).
   - Render fields are validated when you click, before the sim starts.
 - **Render paths:**
   - Four checkboxes, any combination: `per_sphere` (legacy, parity reference), `composite`, `instance_grains` (ticked by default since 2026-09-29, so a default launch takes the dump route with no convert), `instance_static`.

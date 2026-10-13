@@ -242,3 +242,29 @@ def test_setup_flags_without_dem_model_are_refused(flag, capsys):
     with pytest.raises(SystemExit):
         rd._parse(["run_0003", *flag])
     assert "--dem-model" in capsys.readouterr().err
+
+
+def test_slowmo_and_resume_reach_the_render_form(tmp_path, monkeypatch):
+    run = _dumps(tmp_path / "run")
+    (run / "sobol.setup").write_text("use_dem = T\nuse_dem_as_sinks = F\n")
+    seen = {}
+
+    class Result:
+        ok = True
+
+    monkeypatch.setattr(rd.t, "check_blender_exe", lambda *a: None)
+    monkeypatch.setattr(rd.t, "run_dump_preprocess_stage", lambda cmd, targets, on_line=None: dict(targets))
+    monkeypatch.setattr(rd.t, "run_render_path", lambda spec, ctx, on_line=None: seen.setdefault("ctx", ctx) and Result)
+    monkeypatch.setattr(rd.t, "format_path_result", lambda r: "ok")
+    assert rd.main([str(run), "--out-root", str(tmp_path / "out"), "--slowmo", "4", "--resume"]) == 0
+    assert seen["ctx"].render_form.slowmo == 4 and seen["ctx"].render_form.resume is True
+
+
+def test_slowmo_without_an_instance_path_is_refused(tmp_path, monkeypatch):
+    monkeypatch.setattr(rd.t, "check_blender_exe", lambda *a: None)
+    with pytest.raises(SystemExit, match="instance"):
+        rd.main([str(_dumps(tmp_path / "run")), "--paths", "composite", "--slowmo", "4"])
+
+
+def test_samples_default_is_124():
+    assert rd._parse(["run"]).samples == 124
