@@ -205,18 +205,6 @@ class UnifiedApp(App[None]):
                           run_selection={"paths": [str(p) for p in runs]}, keep_dumps=not picker.delete_dumps,
                           omp_num_threads=1), root
 
-    def grain_warning(self, spec: js.JobSpec) -> str:
-        """Per-sphere warning for the grain counts this job will render (as tui_sim_render)."""
-        if not spec.render or not self.render_ok:
-            return ""
-        if spec.sim_argv is not None:
-            fv = ps.from_argv(spec.sim_argv)
-            counts = [fv.plain.get("np_apophis"), *str(fv.plain.get("np_apophis_list") or "").split()]
-            counts = [int(float(n)) for n in counts if n not in (None, "")]
-        else:
-            counts = [self.backend._np_apophis_from_setup(Path(p)) for p in spec.run_selection.get("paths", [])]
-        return render_backend.grain_warning(self.backend, tuple(spec.render["paths"]), counts)
-
     def launch_job(self, spec: js.JobSpec, output_root: Path) -> Path:
         busy = js.running_on_host(output_root)
         job_dir = js.new_job_dir(output_root, spec.label)
@@ -224,8 +212,6 @@ class UnifiedApp(App[None]):
         pid = js.launch(job_dir, spec)
         warn = (f"  WARNING: {len(busy)} other job(s) running on this host (laptop throttles above 2)"
                 if busy else "")
-        grains = self.grain_warning(spec)
-        warn += f"\n{grains}" if grains else ""
         if spec.sim_argv is not None and spec.render and not spec.keep_dumps and "--dry-run" not in spec.sim_argv:
             # Render after forces --no-cleanup into sim_argv, so the job record alone hides this
             warn += "\n  WARNING: dumps will be deleted after the render (tick no_cleanup to keep them)"

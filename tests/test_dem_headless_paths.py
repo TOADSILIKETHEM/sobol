@@ -37,15 +37,15 @@ def _manifest(tmp_path, viz_mode):
     return p
 
 
-def test_viz_path_defaults_to_per_sphere():
-    args = _parse(["--grains-dir", "/g", "--bodies-dir", "/b"])
-    assert args.viz_path == "per_sphere"
-    assert args.manifest is None
+def test_viz_path_defaults_to_instance(tmp_path):
+    m = _manifest(tmp_path, "instance")
+    args = _parse(["--manifest", str(m)])
+    assert args.viz_path == "instance"
 
 
-def test_per_sphere_requires_grains_and_bodies():
-    with pytest.raises(ValueError, match="--grains-dir"):
-        _parse(["--bodies-dir", "/b"])
+def test_per_sphere_is_not_a_headless_path():
+    with pytest.raises(SystemExit):
+        _parse(["--viz-path", "per_sphere", "--manifest", "/m"])
 
 
 def test_composite_requires_manifest():
@@ -68,7 +68,7 @@ def test_composite_with_matching_manifest_parses(tmp_path):
     m = _manifest(tmp_path, "composite")
     args = _parse(["--viz-path", "composite", "--manifest", str(m)])
     assert args.viz_path == "composite"
-    assert args.grains_dir is None
+    assert args.manifest == str(m)
 
 
 def test_parse_resolution():
@@ -109,6 +109,7 @@ def test_patch_instance_real_script():
     assert "\nSLOWMO_FACTOR = 1\n" in out
     assert "RENDER_RESOLUTION = (640, 360)" in out
     assert "CAMERA_MODE = None" in out  # auto leaves it untouched
+    assert "\nGRAIN_COLOUR_VARIATION = True\n" in out
 
 
 def test_patch_per_sphere_max_frames_limits_scene_build():
@@ -317,18 +318,49 @@ def test_blender_build_point_cloud_writes_given_radii():
     assert "RADII_OK" in combined
 
 
+_HERO_MAX_FRAMES = '''
+import sys, traceback
+from pathlib import Path
+sys.path.insert(0, {bc!r})
+import bpy
+import DEMHeadlessRender as dhr
+try:
+    dhr.remove_startup_defaults()
+    script = Path({bc!r}) / "DEMGrainsBlenderEarthCam.py"
+    src = dhr.patch_script_source("per_sphere", script.read_text(encoding="utf-8"),
+                                  grains_dir={grains!r}, bodies_dir={bodies!r}, max_frames=2)
+    exec(compile(src, str(script), "exec"), {{"__name__": "__main__", "__file__": str(script)}})
+    dhr.setup_deep_dark_space_world()
+    dhr.render_prepared_scene(
+        bpy.context.scene, viz_path="per_sphere", out_dir={out!r},
+        res_x=160, res_y=90, samples=1, fps=24, device=dhr.honours_paths.cycles_device(),
+        max_frames=2,
+    )
+except Exception:
+    traceback.print_exc()
+    sys.exit(1)
+'''
+
+
 @pytest.mark.skipif(not BLENDER_EXE.is_file(), reason="blender.exe not installed")
 @pytest.mark.skipif(not WIN_TEMP.is_dir(), reason="Windows Temp not mounted")
 def test_blender_per_sphere_max_frames_builds_only_those_frames():
     n_fixture = len(list((FIXTURE_RUN / "run_0001_grains_output").glob("*.npz")))
     assert n_fixture > 2, "fixture needs more than 2 frames to show the limit"
-
-    result, _records, out_dir = run_recorded_render(
-        "per_sphere_max_frames", "DEM_Grain_0000",
-        ["--viz-path", "per_sphere",
-         "--grains-dir", FIXTURE_RUN_WIN + "/run_0001_grains_output",
-         "--bodies-dir", FIXTURE_RUN_WIN + "/run_0001_bodies_output",
-         "--max-frames", "2"],
+    out_dir = WIN_TEMP / "dhr_per_sphere_max_frames_out"
+    if out_dir.exists():
+        for f in out_dir.glob("*"):
+            f.unlink()
+    script = WIN_TEMP / "per_sphere_max_frames.py"
+    script.write_text(_HERO_MAX_FRAMES.format(
+        bc=BLENDERCONVERT_WIN,
+        grains=FIXTURE_RUN_WIN + "/run_0001_grains_output/",
+        bodies=FIXTURE_RUN_WIN + "/run_0001_bodies_output/",
+        out=WIN_TEMP_WIN + "/dhr_per_sphere_max_frames_out",
+    ), encoding="utf-8")
+    result = subprocess.run(
+        [str(BLENDER_EXE), "--background", "--python", WIN_TEMP_WIN + "/per_sphere_max_frames.py"],
+        capture_output=True, text=True, check=False,
     )
     combined = (result.stdout or "") + (result.stderr or "")
     assert result.returncode == 0, combined[-3000:]
@@ -419,7 +451,7 @@ def test_slowmo_flag_parses_and_defaults_to_1(tmp_path):
 
 
 @pytest.mark.parametrize("extra,match", [
-    (["--viz-path", "per_sphere", "--grains-dir", "/g", "--bodies-dir", "/b", "--slowmo", "2"], "instance"),
+    (["--viz-path", "composite", "--slowmo", "2"], "instance"),
     (["--viz-path", "instance", "--manifest", "/m", "--slowmo", "0"], ">= 1"),
 ])
 def test_slowmo_rejected_off_instance_or_below_1(extra, match):

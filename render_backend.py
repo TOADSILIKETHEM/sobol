@@ -187,12 +187,6 @@ def timing_report(t: ModuleType, form, result, facts: dict, *, started_at: datet
     }
 
 
-def grain_warning(t: ModuleType, paths, np_values) -> str:
-    """tui_sim_render's per-sphere grain-count warning for the largest known grain count ("" if none)."""
-    known = [int(n) for n in np_values if n is not None]
-    return t.pipeline_warning(max(known), paths).strip() if known else ""
-
-
 _DUMP_ROUTE = ("instance_grains", "composite")
 
 

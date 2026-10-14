@@ -609,23 +609,6 @@ def test_single_run_refuses_a_list_of_several_counts(tmp_path, monkeypatch):
     assert not (tmp_path / "_jobs").exists()
 
 
-@needs_t
-def test_launch_warns_about_per_sphere_with_many_grains(tmp_path, monkeypatch):
-    monkeypatch.setattr(js, "launch", lambda d, spec, script=js.JOB_PY: 1)
-    fv = tui.initial_form(["--output-root", str(tmp_path), "--use-dem-fixed", "true", "--np-apophis-list", "3000"])
-
-    async def act(app, pilot):
-        app.query_one("#render-after", Checkbox).value = True
-        app.query_one("#r-path-per-sphere", Checkbox).value = True
-        await pilot.pause()
-        app.query_one("#launch").press()
-        await pilot.pause()
-        return app.last_status
-
-    status = _app_run(UnifiedApp(fv, T), act)
-    assert status.startswith("launched") and "per-sphere" in status
-
-
 def test_old_single_keys_launch_dry_run_and_quit(tmp_path, monkeypatch):
     launched = []
     monkeypatch.setattr(js, "launch", lambda d, spec, script=js.JOB_PY: launched.append(spec) or 1)

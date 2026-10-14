@@ -64,18 +64,20 @@ def test_blender_enables_gpu_and_disables_cpu():
     assert "GPU_OK" in combined
 
 
-def test_device_flag_defaults_to_gpu():
-    from tests.test_dem_headless_paths import _parse
-    assert _parse(["--grains-dir", "/g", "--bodies-dir", "/b"]).device == "gpu"
-    assert _parse(["--grains-dir", "/g", "--bodies-dir", "/b", "--device", "cpu"]).device == "cpu"
+def test_device_flag_defaults_to_gpu(tmp_path):
+    from tests.test_dem_headless_paths import _manifest, _parse
+    m = str(_manifest(tmp_path, "instance"))
+    assert _parse(["--manifest", m]).device == "gpu"
+    assert _parse(["--manifest", m, "--device", "cpu"]).device == "cpu"
 
 
-def test_device_flag_default_follows_configured_cycles_device(monkeypatch):
+def test_device_flag_default_follows_configured_cycles_device(monkeypatch, tmp_path):
     # local_paths.json cycles_device / HONOURS_CYCLES_DEVICE, for direct headless runs too
-    from tests.test_dem_headless_paths import _parse
+    from tests.test_dem_headless_paths import _manifest, _parse
+    m = str(_manifest(tmp_path, "instance"))
     monkeypatch.setattr(dhr.honours_paths, "cycles_device", lambda: "cpu")
-    assert _parse(["--grains-dir", "/g", "--bodies-dir", "/b"]).device == "cpu"
-    assert _parse(["--grains-dir", "/g", "--bodies-dir", "/b", "--device", "gpu"]).device == "gpu"
+    assert _parse(["--manifest", m]).device == "cpu"
+    assert _parse(["--manifest", m, "--device", "gpu"]).device == "gpu"
 
 
 def test_render_banner_names_the_device_in_use():

@@ -1,9 +1,11 @@
-"""instance_grains must reproduce per_sphere exactly (geometry, motion, scene).
+"""instance_grains must reproduce the hero script (geometry, motion, scene).
 
 Both Blender scripts run headless on the same run; at integer and sub-frame
 times every grain's world-space mesh vertices, and every non-grain scene
-object's transform, must agree. Grains are scaled x3 from the fixture so the
-texture-scale and radius paths are exercised at a realistic grain size.
+object's transform, must agree. GRAIN_COLOUR_VARIATION stays on. The hero
+script has no tint, so rendered pixels are not compared. Grains are scaled
+x3 from the fixture so the texture-scale and radius paths are exercised at a
+realistic grain size.
 """
 import importlib.util
 import json
@@ -219,37 +221,6 @@ def _assert_scene_objects_match(ps, ins):
 def test_scene_objects_match(sampled):
     (_, ps), (_, ins) = sampled
     _assert_scene_objects_match(ps, ins)
-
-
-def _render(viz_path, out_name, **paths):
-    args = [str(BLENDER_EXE), "--background", "--python", BLENDERCONVERT_WIN + r"\DEMHeadlessRender.py", "--",
-            "--viz-path", viz_path, "--output-dir", f"{WORK_WIN}/{out_name}",
-            "--resolution", "480x270", "--samples", "512", "--max-frames", "1"]
-    if viz_path == "per_sphere":
-        args += ["--grains-dir", paths["grains"], "--bodies-dir", paths["bodies"]]
-    else:
-        args += ["--manifest", paths["manifest"]]
-    result = subprocess.run(args, capture_output=True, text=True, check=False)
-    assert result.returncode == 0, ((result.stdout or "") + (result.stderr or ""))[-3000:]
-    from PIL import Image
-    return np.asarray(Image.open(WORK / out_name / "frame_0001.png").convert("RGB")).astype(float) / 255
-
-
-def test_rendered_frames_match(sampled):
-    # Same geometry, so the only difference left is Monte Carlo noise: the
-    # instance BVH and the per-object meshes decorrelate grazing shadow rays
-    # between touching grains. Measured 2026-09-27 (480x270, 512 spp): mean
-    # |diff| 9.7e-5, no pixel > 0.05, body bias -4e-5 on brightness 0.116.
-    # Without the radius-scaled texture coordinates the mean is ~2x larger at 32 spp.
-    ps = _render("per_sphere", "render_parity_ps", grains=f"{WORK_WIN}/run_0001_grains_output",
-                 bodies=f"{WORK_WIN}/run_0001_bodies_output")
-    ins = _render("instance", "render_parity_in", manifest=f"{WORK_WIN}/run_0001_viz_instance/manifest.json")
-    d = ins - ps
-    body = ps.max(axis=2) > 0.05
-    assert body.mean() > 0.01  # the body is in frame
-    assert np.abs(d).mean() < 3e-4
-    assert np.abs(d).max(axis=2).max() < 0.1
-    assert abs(d[body].mean()) < 5e-4
 
 
 WORK_VAR = WIN_TEMP / "parity_var"

@@ -102,7 +102,7 @@ def test_render_dumps_argv_passes_camera_envelope_and_video_fps():
 @needs_t
 def test_render_dumps_argv_refuses_npz_paths():
     with pytest.raises(ValueError, match="instance_grains / composite"):
-        rb.render_dumps_argv(Path("/r"), T.RenderFormValues(paths=("per_sphere",)))
+        rb.render_dumps_argv(Path("/r"), T.RenderFormValues(paths=("instance_static",)))
 
 
 @needs_t
@@ -174,13 +174,6 @@ def test_render_run_writes_pipeline_timing(tmp_path, monkeypatch):
     assert rep["wall_clock_s"]["sim"] is None and rep["wall_clock_s"]["dump_preprocess"] >= 0
     assert rep["render"]["paths"] == ["instance_grains"] and rep["outcome"] == {"stage": "done", "ok": True}
     assert "sobol" in rep["git"]
-
-
-@needs_t
-def test_grain_warning_only_for_per_sphere_above_threshold():
-    assert "per-sphere" in rb.grain_warning(T, ("per_sphere",), [300, 3000])
-    assert rb.grain_warning(T, ("per_sphere",), [300, None]) == ""
-    assert rb.grain_warning(T, ("instance_grains",), [3000]) == ""
 
 
 @needs_t

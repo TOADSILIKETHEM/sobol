@@ -43,7 +43,6 @@ Unless the flag is given on the command line, `DEFAULT_OVERRIDES` sets `base_dir
 - **Other run dir.** Any run dir, e.g. someone else's `phantomflyby` run, rendered through `render_dumps.py` (`instance_grains` and `composite` only, no compare). `camera_mode`, `envelope_method` and `video_fps` are passed on (`--camera-mode`, `--envelope-method`, `--video-fps`).
 - **Settings** match `tui_sim_render.py` (resolution, samples, fps, paths, slowmo, resume, ...).
 - **Delete dumps after a successful render** is off by default: the dumps may be the only copy of a run.
-- **Grain-count warning.** Launching a render with `per_sphere` ticked on a run of more than 2000 grains adds `tui_sim_render.py`'s warning to the status line. It does not stop the launch.
 - **Timing.** Each rendered run gets `<run_dir>/pipeline_timing.json` in `tui_sim_render.py`'s layout (stage and per-path wall-clock, frame counts, `np_apophis`, render settings, git SHAs). The sim time is null for a sweep run; a re-render keeps the sim time from an earlier file.
 - Where rendering is impossible (OzSTAR: no Blender, no `Code/local_paths.json`) the tab shows the reason instead, and Render after is disabled.
 
