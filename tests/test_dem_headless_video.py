@@ -16,26 +16,27 @@ sys.path.insert(0, str(BLENDERCONVERT))
 import DEMHeadlessRender as dhr  # noqa: E402
 
 
-def _parse_with_argv(extra_argv):
+def _parse_with_argv(tmp_path, extra_argv):
+    from tests.test_dem_headless_paths import _manifest
     argv_backup = sys.argv[:]
     try:
         sys.argv = [
             "blender", "--background", "--python", "DEMHeadlessRender.py", "--",
-            "--grains-dir", "/g", "--bodies-dir", "/b", "--output-dir", "/o",
+            "--manifest", str(_manifest(tmp_path, "instance")), "--output-dir", "/o",
         ] + extra_argv
         return dhr._parse_args()
     finally:
         sys.argv = argv_backup
 
 
-def test_parse_args_encode_video_defaults_off():
-    args = _parse_with_argv([])
+def test_parse_args_encode_video_defaults_off(tmp_path):
+    args = _parse_with_argv(tmp_path, [])
     assert args.encode_video is False
     assert args.video_fps is None
 
 
-def test_parse_args_encode_video_with_explicit_fps():
-    args = _parse_with_argv(["--encode-video", "--video-fps", "60"])
+def test_parse_args_encode_video_with_explicit_fps(tmp_path):
+    args = _parse_with_argv(tmp_path, ["--encode-video", "--video-fps", "60"])
     assert args.encode_video is True
     assert args.video_fps == 60
 
@@ -98,3 +99,20 @@ def test_blender_encodes_frame_sequence_to_mp4():
     combined = (result.stdout or "") + (result.stderr or "")
     assert result.returncode == 0, combined
     assert "VIDEO_OK" in combined
+
+
+def test_render_prepared_scene_encodes_when_asked(tmp_path, monkeypatch):
+    # the encode flag must not hide the module's encode_video() (it was a bool called as a function)
+    from types import SimpleNamespace as NS
+    for name in ("require_camera", "setup_cycles_gpu", "apply_gpu_denoise", "apply_render_speedups",
+                 "cap_image_textures", "apply_resume"):
+        monkeypatch.setattr(dhr, name, lambda *a, **k: None)
+    monkeypatch.setattr(dhr, "render_banner", lambda *a, **k: "")
+    monkeypatch.setattr(dhr, "bpy", NS(ops=NS(render=NS(render=lambda **k: None)), data=NS(images=[])),
+                        raising=False)
+    calls = []
+    monkeypatch.setattr(dhr, "encode_video", lambda out_dir, n, fps: calls.append((n, fps)))
+    scene = NS(frame_start=1, frame_end=3, cycles=NS(), render=NS(image_settings=NS()))
+    dhr.render_prepared_scene(scene, viz_path="instance", out_dir=tmp_path / "o", res_x=8, res_y=8,
+                              samples=1, fps=24, device="gpu", encode=True)
+    assert calls == [(3, 24)]

@@ -168,7 +168,7 @@ def main(argv=None) -> int:
     bad = [p for p in a.paths if p not in DUMP_ROUTE_PATHS]
     if bad:
         sys.exit(f"{bad}: only {list(DUMP_ROUTE_PATHS)} render straight from dumps; "
-                 "per_sphere / instance_static need the npz convert -- use sobol/tui_sim_render.py")
+                 "instance_static needs the npz convert -- use sobol/tui_sim_render.py")
     form = t.RenderFormValues(resolution=a.resolution, samples=a.samples, fps=a.fps,
                               max_frames=a.max_frames, encode_video=a.video, paths=tuple(a.paths),
                               slowmo=a.slowmo, resume=a.resume)

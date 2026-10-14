@@ -83,7 +83,7 @@ def test_link_falls_back_across_filesystems(tmp_path, monkeypatch):
 
 def test_npz_paths_rejected(tmp_path):
     with pytest.raises(SystemExit, match="tui_sim_render"):
-        rd.main([str(tmp_path), "--paths", "per_sphere"])
+        rd.main([str(tmp_path), "--paths", "instance_static"])
 
 
 def test_main_wires_preprocess_and_render(tmp_path, monkeypatch):

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Textual TUI: configure one PHANTOM DEM run, run it, convert dumps,
-render it headless through any mix of per-sphere, composite, and
-point-cloud (instanced real grains / static placeholder) paths, and
-optionally stitch the rendered paths side by side (render_compare.py).
+render it headless through any mix of composite and point-cloud
+(instanced real grains / static placeholder) paths, and optionally
+stitch the rendered paths side by side (render_compare.py).
 One run per launch — see sobol/tui_run.py for the Sobol sweep TUI.
 
 Launch:
@@ -239,8 +239,8 @@ class RenderParams:
     camera_mode: str = "auto"
     encode_video: bool = False
     video_fps: Optional[int] = None
-    viz_path: str = "per_sphere"  # DEMHeadlessRender.py --viz-path
-    manifest: Optional[Path] = None  # required unless viz_path == "per_sphere"
+    viz_path: str = "instance"  # DEMHeadlessRender.py --viz-path
+    manifest: Optional[Path] = None
     slowmo: int = 1  # instance only: timeline frames per dump (DEMHeadlessRender.py --slowmo)
     resume: bool = False  # keep frames already in output_dir, render the rest (--resume)
     # Called with each line Blender prints (see _run_logged). A field rather
@@ -454,13 +454,7 @@ def build_render_command(params: RenderParams) -> List[str]:
         BLENDER_EXE, "--background", "--python", DEM_HEADLESS_RENDER, "--",
         "--viz-path", params.viz_path,
     ]
-    if params.viz_path == "per_sphere":
-        cmd += [
-            "--grains-dir", blender_arg(params.grains_dir),
-            "--bodies-dir", blender_arg(params.bodies_dir),
-        ]
-    else:
-        cmd += ["--manifest", blender_arg(params.manifest)]
+    cmd += ["--manifest", blender_arg(params.manifest)]
     cmd += [
         "--output-dir", blender_arg(params.output_dir),
         "--resolution", params.resolution,
@@ -646,7 +640,6 @@ class RenderPath:
 
 # Insertion order is the fixed run order.
 RENDER_PATHS: Dict[str, RenderPath] = {
-    "per_sphere": RenderPath("per_sphere", None, None, "per_sphere"),
     "composite": RenderPath("composite", "_viz", build_composite_preprocess_command, "composite"),
     "instance_grains": RenderPath(
         "instance_grains", "_viz_instance", build_instance_grains_preprocess_command, "instance",
@@ -657,12 +650,10 @@ RENDER_PATHS: Dict[str, RenderPath] = {
 }
 RENDER_PATH_NAMES: Tuple[str, ...] = tuple(RENDER_PATHS)
 
-# Paths that read the grains npz: per_sphere inside Blender (no sarracen
-# there), instance_static via viz_preprocess_lite.py under blender.exe. With
-# none of these ticked, convert is skipped and one viz_preprocess_dump.py call
-# reads each PHANTOM dump once for composite and instance_grains together
-# (Objective 2 scale).
-NPZ_PATHS = frozenset({"per_sphere", "instance_static"})
+# instance_static reads the grains npz via viz_preprocess_lite.py under blender.exe.
+# With it unticked, convert is skipped and one viz_preprocess_dump.py call reads
+# each PHANTOM dump once for composite and instance_grains together.
+NPZ_PATHS = frozenset({"instance_static"})
 
 # viz_preprocess_dump.py output-dir flag per dump-route path
 DUMP_PREPROCESS_FLAGS: Dict[str, str] = {
@@ -675,7 +666,6 @@ def needs_npz(paths) -> bool:
     return any(p in NPZ_PATHS for p in paths)
 
 PATH_CHECKBOX_IDS: Dict[str, str] = {
-    "per_sphere": "path-per-sphere",
     "composite": "path-composite",
     "instance_grains": "path-instance-grains",
     "instance_static": "path-instance-static",
@@ -848,7 +838,6 @@ def format_live_progress(
     n_npz: int = 0,
     n_png: int = 0,
     n_expected: Optional[int] = None,
-    warning: str = "",
     path_label: Optional[str] = None,
     last_line: Optional[str] = None,
 ) -> str:
@@ -888,7 +877,7 @@ def format_live_progress(
         if len(line) > _STATUS_LOG_LINE_MAX:
             line = line[: _STATUS_LOG_LINE_MAX - 1] + "…"
         body += f" | {line}"
-    return f"{warning}{body}"
+    return body
 
 
 _TIMING_SCHEMA_VERSION = 1
@@ -1201,28 +1190,6 @@ def _run_pipeline_stages(
     )
 
 
-_PER_SPHERE_GRAIN_WARN_THRESHOLD = 2000
-
-
-def warn_if_high_grain_count(np_apophis: int) -> Optional[str]:
-    """Non-blocking warning: the per-sphere path degrades above ~2000 grains
-    (see CLAUDE.md's pipeline-comparison table)."""
-    if np_apophis <= _PER_SPHERE_GRAIN_WARN_THRESHOLD:
-        return None
-    return (
-        f"Warning: np_apophis={np_apophis} — per-sphere path is intended for "
-        f"≤{_PER_SPHERE_GRAIN_WARN_THRESHOLD} grains; consider the composite or "
-        "instance_grains path instead. "
-    )
-
-
-def pipeline_warning(np_apophis: int, paths) -> str:
-    """Grain-count warning, only when the per-sphere path is ticked."""
-    if "per_sphere" not in paths:
-        return ""
-    return warn_if_high_grain_count(np_apophis) or ""
-
-
 class _Row(Horizontal):
     """Label + interactive widget on a single row. Same layout as tui_run.py's _Row."""
 
@@ -1275,7 +1242,6 @@ class SimRenderTUIApp(App[None]):
         self._pipeline_render_dir: Optional[Path] = None
         self._pipeline_png_glob: str = "frame_*.png"  # "compare_*.png" during compare
         self._pipeline_prefix: str = ""
-        self._pipeline_warning: str = ""
         self._pipeline_stage: str = "sim"
         self._pipeline_n_expected: Optional[int] = None
         self._pipeline_dry_run: bool = False
@@ -1408,11 +1374,6 @@ class SimRenderTUIApp(App[None]):
             )
 
             yield Static("Render — paths (any combination; one sim feeds all)", classes="sec")
-            yield _Row(
-                "per_sphere",
-                Checkbox("one sphere per grain", value=False, id=PATH_CHECKBOX_IDS["per_sphere"]),
-                "≤~2000 grains, legacy",
-            )
             yield _Row(
                 "composite",
                 Checkbox("envelope mesh + ejecta (D3)", value=False, id=PATH_CHECKBOX_IDS["composite"]),
@@ -1732,7 +1693,6 @@ class SimRenderTUIApp(App[None]):
         except ValueError as exc:
             self._set_status(f"Error: {exc}", error=True)
             return
-        warning = pipeline_warning(sim_params.sample.np_apophis, render_form.paths)
         self._pipeline_running = True
         self._set_buttons_disabled(True)
         self._pipeline_start = time.monotonic()
@@ -1746,14 +1706,13 @@ class SimRenderTUIApp(App[None]):
         self._pipeline_render_dir = None
         self._pipeline_png_glob = "frame_*.png"
         self._pipeline_prefix = sim_params.prefix
-        self._pipeline_warning = warning
         self._pipeline_stage = "sim"
         self._pipeline_n_expected = None
         self._pipeline_dry_run = dry_run
         self._pipeline_path_label = None
         self._pipeline_last_line = None
         if dry_run:
-            self._set_status(f"{warning}Dry run...")
+            self._set_status("Dry run...")
         else:
             self._tick_progress()
         if self._progress_timer is not None:
@@ -1796,7 +1755,7 @@ class SimRenderTUIApp(App[None]):
             return
         if self._pipeline_dry_run:
             elapsed = time.monotonic() - self._pipeline_start
-            self._set_status(f"{self._pipeline_warning}Dry run... {elapsed:.0f}s elapsed")
+            self._set_status(f"Dry run... {elapsed:.0f}s elapsed")
             return
         elapsed = time.monotonic() - self._pipeline_start
         n_dumps = count_matching(
@@ -1812,7 +1771,6 @@ class SimRenderTUIApp(App[None]):
                 n_npz=n_npz,
                 n_png=n_png,
                 n_expected=self._pipeline_n_expected,
-                warning=self._pipeline_warning,
                 path_label=self._pipeline_path_label,
                 last_line=self._pipeline_last_line,
             )
