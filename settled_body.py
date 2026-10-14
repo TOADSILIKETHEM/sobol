@@ -9,6 +9,7 @@ The last dump of the last stage and its .in are the body; body.json records them
 """
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import math
@@ -16,6 +17,8 @@ import os
 import re
 import shutil
 import subprocess
+import sys
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -215,6 +218,26 @@ def _run(cmd, cwd: Path, log: Path, stdin_text: Optional[str] = None) -> None:
         raise RuntimeError(f"{Path(str(cmd[0])).name} failed ({proc.returncode}); see {log}")
 
 
+@contextmanager
+def _cache_lock(cache_root: Path, key: str):
+    """Exclusive per-key lock so two launches (CLI, TUI jobs) never settle the same body at once.
+    Some cluster filesystems lack flock: then build unlocked, as before, with a warning."""
+    cache_root = Path(cache_root)
+    cache_root.mkdir(parents=True, exist_ok=True)
+    with open(cache_root / f"{key}.lock", "w") as fh:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX)
+        except OSError as exc:
+            print(f"[WARN] settled-body cache {cache_root}: no flock ({exc}); building without a lock",
+                  file=sys.stderr)
+            yield
+            return
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
 def build_settled_body(
     spec: SettleSpec,
     cache_root: Path,
@@ -224,61 +247,64 @@ def build_settled_body(
     tools: DemTools,
     ephemeris_cache_dir: Optional[Path],
 ) -> SettledBody:
-    """Settle, crop and relax one body, or return the cached one. Not safe to call concurrently
-    for the same spec: callers build serially before dispatching workers."""
+    """Settle, crop and relax one body, or return the cached one. Safe to call concurrently
+    for the same spec: a per-key lock makes the second caller wait and reuse the body."""
     r = _runner()
     key = settle_key(spec, (phantomsetup_bin, phantom_bin, tools.moddump))
     final = Path(cache_root) / key
     if (final / "body.json").is_file():
         return SettledBody.load(final)
-    work = Path(cache_root) / f"{key}.partial"
-    if work.exists():
-        shutil.rmtree(work)
-    work.mkdir(parents=True)
-    maxp = [f"--maxp={settle_maxp(spec.np_apophis)}"]
+    with _cache_lock(Path(cache_root), key):
+        if (final / "body.json").is_file():  # built by another process while we waited
+            return SettledBody.load(final)
+        work = Path(cache_root) / f"{key}.partial"
+        if work.exists():
+            shutil.rmtree(work)
+        work.mkdir(parents=True)
+        maxp = [f"--maxp={settle_maxp(spec.np_apophis)}"]
 
-    shape_name = r.stage_shape_assets(Path(spec.shape_file), work)
-    if ephemeris_cache_dir is not None:
-        r.copy_ephemeris_txt_cache(Path(ephemeris_cache_dir), work)  # apophis_only still queries Horizons
-    write_settle_setup(template_setup, work / f"{SETTLE_PREFIX}.setup", spec, shape_name)
-    r.run_phantomsetup(Path(phantomsetup_bin), SETTLE_PREFIX, maxp, work, work / "settle_setup.log")
-    # every dump full: the crop needs velocities in the last settle dump
-    set_in_keys(work / f"{SETTLE_PREFIX}.in", {"nfulldump": f"{1:>10}", **_contact_in_keys(spec)})
-    _run([phantom_bin, f"{SETTLE_PREFIX}.in", *maxp], work, work / "settle_phantom.log")
-    utime = r._parse_utime_from_phantom_log(work / "settle_phantom.log")
-    if utime is None:
-        raise RuntimeError(f"no 'Time: ... s' unit line in {work / 'settle_phantom.log'}")
-    settle_dumps = _pdem().list_full_dumps(work, SETTLE_PREFIX)
-    if not settle_dumps:
-        raise RuntimeError(f"settle wrote no {SETTLE_PREFIX}_NNNNN dumps in {work}")
+        shape_name = r.stage_shape_assets(Path(spec.shape_file), work)
+        if ephemeris_cache_dir is not None:
+            r.copy_ephemeris_txt_cache(Path(ephemeris_cache_dir), work)  # apophis_only still queries Horizons
+        write_settle_setup(template_setup, work / f"{SETTLE_PREFIX}.setup", spec, shape_name)
+        r.run_phantomsetup(Path(phantomsetup_bin), SETTLE_PREFIX, maxp, work, work / "settle_setup.log")
+        # every dump full: the crop needs velocities in the last settle dump
+        set_in_keys(work / f"{SETTLE_PREFIX}.in", {"nfulldump": f"{1:>10}", **_contact_in_keys(spec)})
+        _run([phantom_bin, f"{SETTLE_PREFIX}.in", *maxp], work, work / "settle_phantom.log")
+        utime = r._parse_utime_from_phantom_log(work / "settle_phantom.log")
+        if utime is None:
+            raise RuntimeError(f"no 'Time: ... s' unit line in {work / 'settle_phantom.log'}")
+        settle_dumps = _pdem().list_full_dumps(work, SETTLE_PREFIX)
+        if not settle_dumps:
+            raise RuntimeError(f"settle wrote no {SETTLE_PREFIX}_NNNNN dumps in {work}")
 
-    rho = RHO_0_CGS * spec.scale_rho
-    _run([tools.moddump, settle_dumps[-1].name, CROP_PREFIX, "0", *maxp], work, work / "crop.log",
-         stdin_text=f"{shape_name}\n{rho:.6g}\n")  # prompts: shape file, bulk density g/cm^3
-    n_kept, n_settled, phi = parse_crop_log((work / "crop.log").read_text(errors="replace"))
-    if phi < MIN_SETTLED_PACKING:
-        raise RuntimeError(
-            f"settle did not converge: n_kept={n_kept}, n_settled={n_settled}, packing_fraction={phi} "
-            f"< {MIN_SETTLED_PACKING} (loose cloud never collapsed); raise --settle-tdyn"
-        )
-    dump, infile = f"{CROP_PREFIX}_00000", f"{CROP_PREFIX}.in"
+        rho = RHO_0_CGS * spec.scale_rho
+        _run([tools.moddump, settle_dumps[-1].name, CROP_PREFIX, "0", *maxp], work, work / "crop.log",
+             stdin_text=f"{shape_name}\n{rho:.6g}\n")  # prompts: shape file, bulk density g/cm^3
+        n_kept, n_settled, phi = parse_crop_log((work / "crop.log").read_text(errors="replace"))
+        if phi < MIN_SETTLED_PACKING:
+            raise RuntimeError(
+                f"settle did not converge: n_kept={n_kept}, n_settled={n_settled}, packing_fraction={phi} "
+                f"< {MIN_SETTLED_PACKING} (loose cloud never collapsed); raise --settle-tdyn"
+            )
+        dump, infile = f"{CROP_PREFIX}_00000", f"{CROP_PREFIX}.in"
 
-    if spec.relax_tdyn > 0.0:
-        tdyn_code = tdyn_seconds(spec.scale_rho) / utime
-        set_in_keys(work / infile, {
-            "tmax": r.format_real_token(spec.relax_tdyn * tdyn_code),
-            "dtmax": r.format_real_token(0.25 * spec.relax_tdyn * tdyn_code),
-            "nfulldump": f"{1:>10}",
-            **_contact_in_keys(spec),
-        })
-        _run([phantom_bin, infile, *maxp], work, work / "relax_phantom.log")
-        dump = _pdem().list_full_dumps(work, CROP_PREFIX)[-1].name
+        if spec.relax_tdyn > 0.0:
+            tdyn_code = tdyn_seconds(spec.scale_rho) / utime
+            set_in_keys(work / infile, {
+                "tmax": r.format_real_token(spec.relax_tdyn * tdyn_code),
+                "dtmax": r.format_real_token(0.25 * spec.relax_tdyn * tdyn_code),
+                "nfulldump": f"{1:>10}",
+                **_contact_in_keys(spec),
+            })
+            _run([phantom_bin, infile, *maxp], work, work / "relax_phantom.log")
+            dump = _pdem().list_full_dumps(work, CROP_PREFIX)[-1].name
 
-    manifest = {
-        "key": key, "spec": asdict(spec), "dump": dump, "infile": infile,
-        "n_kept": n_kept, "n_settled": n_settled, "packing_fraction": phi, "utime_s": utime,
-        "created": datetime.now().isoformat(timespec="seconds"),
-    }
-    (work / "body.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-    os.replace(work, final)  # atomic: a dir without body.json is never loaded
-    return SettledBody.load(final)
+        manifest = {
+            "key": key, "spec": asdict(spec), "dump": dump, "infile": infile,
+            "n_kept": n_kept, "n_settled": n_settled, "packing_fraction": phi, "utime_s": utime,
+            "created": datetime.now().isoformat(timespec="seconds"),
+        }
+        (work / "body.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        os.replace(work, final)  # atomic: a dir without body.json is never loaded
+        return SettledBody.load(final)

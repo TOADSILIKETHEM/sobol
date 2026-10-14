@@ -109,6 +109,10 @@ _SLUG_SAFE_RE = re.compile(r"[^A-Za-z0-9_.\-]+")
 # Default install root: this directory. Override with PHANTOM_DIR.
 _DEFAULT_PHANTOM_DIR = Path(__file__).resolve().parent
 
+# Set by sobol/job.py to a file path; main() writes the batch directory there once it is known.
+# An env var, not a flag, so the -i wizard (one prompt per flag) is unchanged.
+REPORT_BATCH_DIR_ENV = "SOBOL_REPORT_BATCH_DIR"
+
 _NP_APOPHIS_RE = re.compile(r"^(\s*np_apophis\s*=\s*)\d+", re.MULTILINE | re.IGNORECASE)
 
 
@@ -1187,12 +1191,13 @@ def validate_args(args: argparse.Namespace) -> None:
                 file=sys.stderr,
             )
 
-    # np_apophis_list itself constitutes variation; allow dim=0 in that mode.
+    # np_apophis_list itself constitutes variation; allow dim=0 in that mode, and for one fixed run.
     dim = count_dimensions(args)
-    if dim == 0 and not np_list:
+    single_fixed_run = args.num_samples == 1 and args.saltelli_n is None
+    if dim == 0 and not np_list and not single_fixed_run:
         raise ValueError(
             "No varying dimensions: set both --mass-min-kg and --mass-max-kg and/or pass scale */ "
-            "vary-use-dem / vary-apophis-only / --np-apophis-list."
+            "vary-use-dem / vary-apophis-only / --np-apophis-list (or --num-samples 1 for one fixed run)."
         )
 
     _validate_body_encounter(args)
@@ -3818,6 +3823,12 @@ def prepare_settled_bodies_and_dem_tools(
     return flyby_bin, analysis_bin
 
 
+def _report_batch_dir(output_root: Path) -> None:
+    target = os.environ.get(REPORT_BATCH_DIR_ENV)
+    if target:
+        Path(target).write_text(f"{output_root}\n", encoding="utf-8")
+
+
 def main() -> int:
     argv_cli, interactive = _strip_interactive_flags(sys.argv[1:])
     if interactive:
@@ -3857,6 +3868,7 @@ def main() -> int:
                 )
         batch_basename = build_batch_directory_basename(args, timestamp)
         output_root = Path(args.output_root).resolve() / batch_basename
+        _report_batch_dir(output_root)
 
         if getattr(args, "np_apophis_list", None) is not None:
             # One run per particle count (or np×spin grid); Sobol sampling is not used.
