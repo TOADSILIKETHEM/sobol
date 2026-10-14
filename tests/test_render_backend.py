@@ -89,7 +89,7 @@ def test_render_dumps_argv():
 
 @needs_t
 def test_render_dumps_argv_passes_camera_envelope_and_video_fps():
-    form = T.RenderFormValues(paths=("composite",), camera_mode="grain_only", envelope_method="sdf",
+    form = T.RenderFormValues(paths=("composite",), camera_modes=("grain_only",), envelope_method="sdf",
                               encode_video=True, video_fps=12)
     argv = rb.render_dumps_argv(Path("/r"), form)
     for pair in (["--camera-mode", "grain_only"], ["--envelope-method", "sdf"], ["--video-fps", "12"]):
@@ -191,3 +191,25 @@ def test_rerender_keeps_sim_time_from_an_earlier_timing_file(tmp_path, monkeypat
     rb.render_run(T, run, T.RenderFormValues(), base_output_dir=tmp_path / "out")
     rep = json.loads((run / "pipeline_timing.json").read_text())
     assert rep["wall_clock_s"]["sim"] == 812.5 and rep["sim"] == {"np_apophis": 9}
+
+
+@needs_t
+def test_render_dumps_argv_passes_every_camera_and_fov():
+    form = T.RenderFormValues(paths=("instance_grains",), camera_modes=("auto", "earth_chase"), camera_fov=25.0)
+    argv = rb.render_dumps_argv(Path("/r"), form)
+    i = argv.index("--camera-mode")
+    assert argv[i:i + 3] == ["--camera-mode", "auto", "earth_chase"]
+    j = argv.index("--camera-fov")
+    assert argv[j:j + 2] == ["--camera-fov", "25.0"]
+    defaults = rb.render_dumps_argv(Path("/r"), T.RenderFormValues(paths=("instance_grains",)))
+    assert "--camera-fov" not in defaults and "--camera-mode" not in defaults
+
+
+@needs_t
+def test_form_dict_round_trips_and_reads_old_single_camera_jobs():
+    form = T.RenderFormValues(camera_modes=("auto", "earth_chase"), camera_fov=25.0)
+    assert rb.form_from_dict(T, rb.form_to_dict(form)) == form
+    old = {**rb.form_to_dict(T.RenderFormValues()), "camera_mode": "grain_only", "apophis_scale": 1.0}
+    del old["camera_modes"], old["camera_fov"]
+    back = rb.form_from_dict(T, old)
+    assert back.camera_modes == ("grain_only",) and back.camera_fov == 70.0

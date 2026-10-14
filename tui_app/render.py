@@ -82,6 +82,13 @@ def _int(name: str, text: str, optional: bool = False) -> Optional[int]:
         raise ValueError(f"{name} must be a whole number (got {text!r})") from None
 
 
+def _float(name: str, text: str) -> float:
+    try:
+        return float(text.strip())
+    except ValueError:
+        raise ValueError(f"{name} must be a number (got {text.strip()!r})") from None
+
+
 class RenderSettings(Vertical):
     DEFAULT_CSS = "RenderSettings { height: auto; }"
 
@@ -95,8 +102,11 @@ class RenderSettings(Vertical):
         yield Row("samples", Input(str(t.DEFAULT_SAMPLES), id="r-samples", compact=True))
         yield Row("fps", Input("24", id="r-fps", compact=True))
         yield Row("max_frames", Input("", placeholder="blank = all", id="r-max-frames", compact=True))
-        yield Row("camera_mode", Select([("auto", "auto"), ("grain_only", "grain_only")], value="auto",
-                                        allow_blank=False, id="r-camera-mode", compact=True))
+        yield Row("cameras", *[Checkbox(m, value=(m == "auto"), id=f"r-cam-{m.replace('_', '-')}", compact=True)
+                               for m in t.CAMERA_MODES],
+                  tip="one render per path per camera; earth_chase = behind Apophis, aimed at Earth")
+        yield Row("camera_fov", Input(f"{t.DEFAULT_CAMERA_FOV:g}", id="r-camera-fov", compact=True),
+                  tip="degrees; earth_chase 20-30 = telephoto (same Apophis, bigger Earth)")
         yield Row("paths", *[Checkbox(n, value=(n == "instance_grains"), id=f"r-path-{n.replace('_', '-')}",
                                       compact=True)
                              for n in t.RENDER_PATH_NAMES])
@@ -130,7 +140,8 @@ class RenderSettings(Vertical):
             samples=_int("samples", self._v("r-samples")),
             fps=_int("fps", self._v("r-fps")),
             max_frames=_int("max_frames", self._v("r-max-frames"), optional=True),
-            camera_mode=str(self.query_one("#r-camera-mode", Select).value),
+            camera_modes=tuple(m for m in t.CAMERA_MODES if self._c(f"r-cam-{m.replace('_', '-')}")),
+            camera_fov=_float("camera_fov", self._v("r-camera-fov")),
             encode_video=self._c("r-video"),
             video_fps=_int("video_fps", self._v("r-video-fps"), optional=True),
             paths=paths,

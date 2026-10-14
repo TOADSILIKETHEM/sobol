@@ -53,7 +53,8 @@ def _fake_backend(monkeypatch, fail_ids=()):
         rendered.append(Path(run_dir).name)
         ok = Path(run_dir).name not in fail_ids
         return SimpleNamespace(ok=ok, stage="done" if ok else "partial", message="m",
-                               paths=[SimpleNamespace(name="instance_grains", n_frames=3, elapsed_s=12.4)])
+                               paths=[SimpleNamespace(name="instance_grains", label="instance_grains",
+                                                     n_frames=3, elapsed_s=12.4)])
 
     monkeypatch.setattr(job.render_backend, "render_run", render_run)
     return rendered

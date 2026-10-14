@@ -183,7 +183,7 @@ def _render(job: _Job, run_dirs: List[Path], skipped: List[str]) -> bool:
             job.end(stage, "failed", f"{type(exc).__name__}: {exc}")
             all_ok = False
             continue
-        timing = "; ".join(f"{p.name} {p.n_frames} frames {p.elapsed_s:.0f} s" for p in res.paths)
+        timing = "; ".join(f"{p.label} {p.n_frames} frames {p.elapsed_s:.0f} s" for p in res.paths)
         job.end(stage, "done" if res.ok else "failed", res.message + (f" | {timing}" if timing else ""))
         all_ok = all_ok and res.ok
     return all_ok

@@ -615,3 +615,157 @@ def test_camera_points_at_the_core_between_keys():
                         WIN_TEMP_WIN + "/camera_aim.py"], capture_output=True, text=True, check=False)
     out = (r.stdout or "") + (r.stderr or "")
     assert r.returncode == 0 and "CAMERA_AIM_OK" in out, out[-3000:]
+
+
+@pytest.mark.parametrize("viz_path", ["composite", "instance"])
+@pytest.mark.parametrize("mode", ["earth_fixed", "earth_chase"])
+def test_patch_earth_camera_modes_and_fov(viz_path, mode):
+    out = dhr.patch_script_source(viz_path, _real_src(viz_path), manifest="C:/v/m.json",
+                                  camera_mode=mode, camera_fov=25)
+    assert f"\nCAMERA_MODE = '{mode}'\n" in out
+    assert "\nCAMERA_FOV_DEG = 25.0" in out
+
+
+def test_patch_default_fov_leaves_constant():
+    out = dhr.patch_script_source("instance", _real_src("instance"), manifest="C:/v/m.json")
+    assert "\nCAMERA_FOV_DEG = None" in out
+    assert "\nCAMERA_MODE = None\n" in out
+
+
+def test_patch_rejects_unknown_camera_mode():
+    with pytest.raises(ValueError, match="camera_mode"):
+        dhr.patch_script_source("instance", _real_src("instance"), manifest="C:/v/m.json", camera_mode="nope")
+
+
+def test_earth_chase_and_fov_parse(tmp_path):
+    m = _manifest(tmp_path, "instance")
+    args = _parse(["--manifest", str(m), "--camera-mode", "earth_chase", "--camera-fov", "25"])
+    assert (args.camera_mode, args.camera_fov) == ("earth_chase", 25.0)
+    assert _parse(["--manifest", str(m)]).camera_fov == 70.0
+    with pytest.raises(ValueError, match="camera-fov"):
+        _parse(["--manifest", str(m), "--camera-fov", "0"])
+
+
+_EARTH_FIXED = r'''
+import sys
+sys.path.insert(0, r"{bc}")
+sys.path.insert(0, r"{code}")
+import bpy
+from mathutils import Vector
+import DEMCinematicSetup as cin
+scene = bpy.context.scene
+for o in list(bpy.data.objects):
+    bpy.data.objects.remove(o, do_unlink=True)
+scene.render.resolution_x, scene.render.resolution_y = 1920, 1080
+n = 12
+scene.frame_start, scene.frame_end = 1, n
+earth = bpy.data.objects.new("Earth", None); scene.collection.objects.link(earth)
+for i in range(n):
+    t = (i - 6.0) / 2.0
+    earth.location = (-(1600.0 * (1 + 0.5 * t * t)), -3200.0 * t, -500.0 * t)
+    earth.keyframe_insert("location", frame=1 + i)
+cam = cin.setup_camera(n, lambda i: Vector((0.0, 0.0, 0.0)), earth, True, camera_mode="earth_fixed")
+dists = []
+for i in range(n):
+    scene.frame_set(1 + i)
+    dists.append(earth.matrix_world.translation.length)
+window = cin.EARTH_FIXED_WINDOW_CA_FACTOR * min(dists)  # default framing: 3 x closest approach
+assert cam.parent is earth and not cam.constraints and cam.animation_data is None
+half_x = cam.data.angle / 2
+import math
+tan_x, tan_y = math.tan(half_x), math.tan(half_x) * 1080 / 1920
+S = 3
+scene.frame_end = n * S
+scene.render.frame_map_old, scene.render.frame_map_new = 100, 100 * S
+first = None
+in_window = 0
+for f in range(1, n * S + 1):
+    scene.frame_set(f)
+    inv = cam.matrix_world.inverted()
+    e = inv @ earth.matrix_world.translation
+    if first is None:
+        first = e.copy()
+    assert (e - first).length < 1e-6 * first.length, (f, e, first)  # Earth still in camera space
+    if earth.matrix_world.translation.length > window:
+        continue  # outside the framed stretch of path
+    in_window += 1
+    a = inv @ Vector((0.0, 0.0, 0.0))  # Apophis at the scene origin
+    assert a.z < 0 and abs(a.x / -a.z) <= tan_x and abs(a.y / -a.z) <= tan_y, (f, a)
+assert 0 < in_window < n * S, in_window
+cin.setup_camera(n, lambda i: Vector((0.0, 0.0, 0.0)), earth, True, camera_mode="grain_only")
+assert cam.parent is None
+try:
+    cin.setup_camera(n, lambda i: Vector((0.0, 0.0, 0.0)), None, False, camera_mode="earth_fixed")
+except ValueError as exc:
+    assert "Earth" in str(exc)
+else:
+    raise AssertionError("earth_fixed without Earth did not raise")
+print("EARTH_FIXED_OK")
+'''
+
+
+@pytest.mark.skipif(not BLENDER_EXE.is_file(), reason="blender.exe not installed")
+@pytest.mark.skipif(not WIN_TEMP.is_dir(), reason="Windows Temp not mounted")
+def test_earth_fixed_camera_holds_earth_and_frames_apophis():
+    script = WIN_TEMP / "earth_fixed_camera.py"
+    script.write_text(_EARTH_FIXED.format(bc=BLENDERCONVERT_WIN, code=CODE_WIN), encoding="utf-8")
+    r = subprocess.run([str(BLENDER_EXE), "--background", "--factory-startup", "--python-exit-code", "1",
+                        "--python", WIN_TEMP_WIN + "/earth_fixed_camera.py"],
+                       capture_output=True, text=True, check=False)
+    out = (r.stdout or "") + (r.stderr or "")
+    assert r.returncode == 0 and "EARTH_FIXED_OK" in out, out[-3000:]
+
+
+_EARTH_CHASE = r"""
+import math, sys
+sys.path.insert(0, r"{bc}")
+sys.path.insert(0, r"{code}")
+import bpy
+from mathutils import Vector
+import DEMCinematicSetup as cin
+scene = bpy.context.scene
+for o in list(bpy.data.objects):
+    bpy.data.objects.remove(o, do_unlink=True)
+scene.render.resolution_x, scene.render.resolution_y = 1920, 1080
+n = 12
+scene.frame_start, scene.frame_end = 1, n
+earth = bpy.data.objects.new("Earth", None); scene.collection.objects.link(earth)
+cores = []
+for i in range(n):
+    t = (i - 6.0) / 2.0
+    earth.location = (-(1600.0 * (1 + 0.5 * t * t)), -3200.0 * t, -500.0 * t)
+    earth.keyframe_insert("location", frame=1 + i)
+    cores.append(Vector((0.5 * t, -0.3 * t, 0.1)))
+for fov in (70.0, 20.0):
+    cam = cin.setup_camera(n, lambda i: cores[i], earth, True, camera_mode="earth_chase", fov_deg=fov)
+    assert cam.parent is None and [c.name for c in cam.constraints] == ["DEM_AimAtEarth"], list(cam.constraints)
+    tan_x = math.tan(math.radians(fov) / 2)
+    tan_y = tan_x * 1080 / 1920
+    S = 3
+    scene.frame_end = n * S
+    scene.render.frame_map_old, scene.render.frame_map_new = 100, 100 * S
+    for f in range(1, n * S + 1):
+        scene.frame_set(f)
+        inv = cam.matrix_world.inverted()
+        e = inv @ earth.matrix_world.translation
+        assert e.z < 0 and math.hypot(e.x, e.y) < 1e-4 * -e.z, (fov, f, e)  # Earth dead centre
+        if f % S == 0:
+            a = inv @ cores[f // S - 1]
+            y = a.y / -a.z / tan_y
+            assert a.z < 0 and abs(a.x / -a.z) < 0.05 * tan_x and abs(y + 1 / 3) < 0.01, (fov, f, a, y)
+    scene.frame_end = n
+    scene.render.frame_map_old = scene.render.frame_map_new = 100
+print("EARTH_CHASE_OK")
+"""
+
+
+@pytest.mark.skipif(not BLENDER_EXE.is_file(), reason="blender.exe not installed")
+@pytest.mark.skipif(not WIN_TEMP.is_dir(), reason="Windows Temp not mounted")
+def test_earth_chase_centres_earth_with_apophis_in_lower_third():
+    script = WIN_TEMP / "earth_chase_camera.py"
+    script.write_text(_EARTH_CHASE.format(bc=BLENDERCONVERT_WIN, code=CODE_WIN), encoding="utf-8")
+    r = subprocess.run([str(BLENDER_EXE), "--background", "--factory-startup", "--python-exit-code", "1",
+                        "--python", WIN_TEMP_WIN + "/earth_chase_camera.py"],
+                       capture_output=True, text=True, check=False)
+    out = (r.stdout or "") + (r.stderr or "")
+    assert r.returncode == 0 and "EARTH_CHASE_OK" in out, out[-3000:]

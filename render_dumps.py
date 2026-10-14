@@ -11,7 +11,7 @@ sobol_NNNNN next to a minimal sobol.setup, so the readers see a normal run.
         [--encounter hyperbola|ephemeris]
         [--paths instance_grains composite] [--samples 124] [--fps 24]
         [--resolution 1920x1080] [--max-frames N] [--video [--video-fps N]]
-        [--camera-mode auto|grain_only] [--envelope-method hull|sdf] [--out-root DIR]
+        [--camera-mode auto|grain_only|earth_fixed|earth_chase ...] [--camera-fov DEG] [--envelope-method hull|sdf] [--out-root DIR]
 
 Outputs: <out-root>/<name>/<run>_viz_instance/, <run>_render_<path>/ (<run> =
 the run dir's name if it is run_NNNN, else run_0001). Staged dumps go in
@@ -152,7 +152,11 @@ def _parse(argv):
     p.add_argument("--max-frames", type=int)
     p.add_argument("--video", action="store_true", help="also encode an mp4")
     p.add_argument("--video-fps", type=int, help="mp4 frame rate (default: --fps)")
-    p.add_argument("--camera-mode", choices=("auto", "grain_only"), default="auto")
+    p.add_argument("--camera-mode", nargs="+", choices=t.CAMERA_MODES, default=["auto"],
+                   help="one render per camera, each in its own folder (earth_fixed / earth_chase need "
+                        "an Earth row)")
+    p.add_argument("--camera-fov", type=float, default=t.DEFAULT_CAMERA_FOV,
+                   help="degrees across the long side (earth_chase: 20-30 = telephoto)")
     p.add_argument("--envelope-method", choices=("hull", "sdf"), default="hull", help="composite envelope")
     p.add_argument("--slowmo", type=int, default=1,
                    help="instance paths: N frames per dump, in-betweens interpolated (own _slowmoN folder)")
@@ -176,8 +180,9 @@ def main(argv=None) -> int:
                  "instance_static needs the npz convert -- use sobol/tui_sim_render.py")
     form = t.RenderFormValues(resolution=a.resolution, samples=a.samples, fps=a.fps,
                               max_frames=a.max_frames, encode_video=a.video, paths=tuple(a.paths),
-                              slowmo=a.slowmo, resume=a.resume, camera_mode=a.camera_mode,
-                              video_fps=a.video_fps, envelope_method=a.envelope_method)
+                              slowmo=a.slowmo, resume=a.resume, camera_modes=tuple(a.camera_mode),
+                              video_fps=a.video_fps, envelope_method=a.envelope_method,
+                              camera_fov=a.camera_fov)
     try:
         t.validate_render_form(form)
     except ValueError as exc:
@@ -235,9 +240,9 @@ def main(argv=None) -> int:
     for i, path in enumerate(a.paths, start=1):
         if progress_file:
             extra.update(index=i, total=len(a.paths))
-        r = t.run_render_path(t.RENDER_PATHS[path], ctx, on_line=say, **extra)
-        print(t.format_path_result(r), flush=True)
-        ok = ok and r.ok
+        for r in t.run_render_path_cameras(t.RENDER_PATHS[path], ctx, on_line=say, **extra):
+            print(t.format_path_result(r), flush=True)
+            ok = ok and r.ok
     print("RENDER_DONE" if ok else "RENDER_FAILED", flush=True)
     return 0 if ok else 1
 

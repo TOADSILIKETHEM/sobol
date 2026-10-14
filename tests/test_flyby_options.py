@@ -10,6 +10,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import render_dumps as rd  # noqa: E402
 
 
+
+def _one_camera(render_path):
+    """A run_render_path fake as run_render_path_cameras: one camera, the same kwargs render_dumps passes."""
+    return lambda spec, ctx, **kw: [render_path(spec, ctx, **kw)]
+
 def _dumps(d: Path, prefix="sobol", n=3):
     d.mkdir(parents=True, exist_ok=True)
     for i in range(n):
@@ -68,7 +73,7 @@ def _fake(monkeypatch, seen, rows):
         return Ok
 
     monkeypatch.setattr(rd.t, "run_dump_preprocess_stage", pre)
-    monkeypatch.setattr(rd.t, "run_render_path", ren)
+    monkeypatch.setattr(rd.t, "run_render_path_cameras", _one_camera(ren))
     monkeypatch.setattr(rd.t, "format_path_result", lambda r: "ok")
 
 

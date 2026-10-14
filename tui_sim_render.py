@@ -213,7 +213,8 @@ class RenderFormValues:
     samples: int = DEFAULT_SAMPLES
     fps: int = 24
     max_frames: Optional[int] = None
-    camera_mode: str = "auto"
+    # one render of each ticked path per camera (same sim, same preprocess)
+    camera_modes: Tuple[str, ...] = ("auto",)
     encode_video: bool = False
     video_fps: Optional[int] = None
     paths: Tuple[str, ...] = ("instance_grains",)
@@ -223,6 +224,7 @@ class RenderFormValues:
     compare: bool = False  # stitch every rendered path side by side (needs >= 2 paths)
     slowmo: int = 1  # instance paths only: timeline frames per dump (in-betweens interpolated)
     resume: bool = False  # keep frames already in the output dir, render the rest
+    camera_fov: float = 70.0  # degrees across the long side (earth_chase: narrower = telephoto)
 
 
 @dataclass
@@ -243,6 +245,7 @@ class RenderParams:
     manifest: Optional[Path] = None
     slowmo: int = 1  # instance only: timeline frames per dump (DEMHeadlessRender.py --slowmo)
     resume: bool = False  # keep frames already in output_dir, render the rest (--resume)
+    camera_fov: float = 70.0  # DEMHeadlessRender.py --camera-fov
     # Called with each line Blender prints (see _run_logged). A field rather
     # than a run_render_stage() argument so stage fakes taking only `params`
     # keep working.
@@ -259,6 +262,11 @@ class PathResult:
     elapsed_s: float = 0.0  # preprocess + render
     preprocess_s: Optional[float] = None  # None = path has no preprocess stage
     render_s: Optional[float] = None  # None = render never started; includes video encode
+    camera: str = "auto"
+
+    @property
+    def label(self) -> str:
+        return self.name if self.camera == "auto" else f"{self.name} [{self.camera}]"
 
 
 @dataclass
@@ -339,10 +347,14 @@ def _grains_and_bodies_dirs(run_dir: Path, base_output_dir: Path, output_root: P
     return grains_dir, bodies_dir
 
 
-def _render_output_dir(batch_dir: Path, run_name: str, path_name: str, slowmo: int = 1) -> Path:
-    # a slowmo render gets its own folder so it never mixes with (or resumes onto) the 1:1 frames
+def _render_output_dir(batch_dir: Path, run_name: str, path_name: str, slowmo: int = 1,
+                       camera: str = "auto", fov: float = 70.0) -> Path:
+    # a slowmo render gets its own folder so it never mixes with (or resumes onto) the 1:1 frames;
+    # so does each camera but auto, and each lens but 70 deg (auto at 70 keeps the old folder name)
+    cam = f"_{camera}" if camera != "auto" else ""
+    lens = f"_fov{fov:g}" if fov != DEFAULT_CAMERA_FOV else ""
     suffix = f"_slowmo{slowmo}" if slowmo > 1 else ""
-    return batch_dir / f"{run_name}_render_{path_name}{suffix}"
+    return batch_dir / f"{run_name}_render_{path_name}{cam}{lens}{suffix}"
 
 
 def slowmo_frame_count(n_frames: int, slowmo: int, max_frames: Optional[int] = None) -> int:
@@ -357,10 +369,29 @@ def _path_slowmo(spec: "RenderPath", form: RenderFormValues) -> int:
     return form.slowmo if spec.headless_viz_path == "instance" else 1
 
 
+CAMERA_MODES = ("auto", "grain_only", "earth_fixed", "earth_chase")  # = DEMHeadlessRender.CAMERA_MODES
+DEFAULT_CAMERA_FOV = 70.0  # = DEMHeadlessRender.DEFAULT_CAMERA_FOV_DEG
+CAMERA_HINTS = {
+    "auto": "track Apophis (Earth side)",
+    "grain_only": "track Apophis, no Earth",
+    "earth_fixed": "Earth still; Apophis tiny",
+    "earth_chase": "behind Apophis, at Earth",
+}
+
+
 def validate_render_form(form: RenderFormValues) -> None:
     """Cross-field render rules shared by the TUI, run_pipeline and render_dumps. Raises ValueError."""
     if form.slowmo < 1:
         raise ValueError(f"slowmo must be >= 1 (got {form.slowmo})")
+    if not form.camera_modes:
+        raise ValueError("tick at least one camera")
+    bad = [m for m in form.camera_modes if m not in CAMERA_MODES]
+    if bad:
+        raise ValueError(f"camera_modes must be from {CAMERA_MODES} (got {bad})")
+    if len(set(form.camera_modes)) != len(form.camera_modes):
+        raise ValueError(f"camera_modes lists a camera twice: {form.camera_modes}")
+    if not 1.0 <= form.camera_fov <= 150.0:
+        raise ValueError(f"camera_fov must be between 1 and 150 degrees (got {form.camera_fov})")
     if form.slowmo > 1:
         if not any(RENDER_PATHS[p].headless_viz_path == "instance" for p in form.paths if p in RENDER_PATHS):
             raise ValueError("slowmo needs an instance path (instance_grains or instance_static)")
@@ -466,6 +497,8 @@ def build_render_command(params: RenderParams) -> List[str]:
         cmd += ["--max-frames", str(params.max_frames)]
     if params.slowmo != 1:
         cmd += ["--slowmo", str(params.slowmo)]
+    if params.camera_fov != DEFAULT_CAMERA_FOV:
+        cmd += ["--camera-fov", repr(float(params.camera_fov))]
     if params.resume:
         cmd.append("--resume")
     if params.encode_video:
@@ -672,16 +705,33 @@ PATH_CHECKBOX_IDS: Dict[str, str] = {
 }
 
 
-def run_render_path(
+def run_render_path_cameras(
     spec: RenderPath, ctx: PathContext, on_stage=None, index: int = 1, total: int = 1,
     on_line: Optional[Callable[[str], None]] = None,
+) -> List[PathResult]:
+    """[preprocess once] -> one render per ticked camera for one path. Never raises for stage failures."""
+    return [
+        run_render_path(spec, ctx, on_stage=on_stage, index=index, total=total, on_line=on_line,
+                        camera_mode=camera)
+        for camera in ctx.render_form.camera_modes
+    ]
+
+
+def run_render_path(
+    spec: RenderPath, ctx: PathContext, on_stage=None, index: int = 1, total: int = 1,
+    on_line: Optional[Callable[[str], None]] = None, camera_mode: Optional[str] = None,
 ) -> PathResult:
-    """[preprocess] -> render for one path. Never raises for stage failures."""
+    """[preprocess] -> render for one path and camera (default: the form's first).
+
+    The manifest is kept in ctx.preprocessed, so a second camera on the same path
+    reuses the preprocess. Never raises for stage failures."""
     t0 = time.monotonic()
+    camera = camera_mode or ctx.render_form.camera_modes[0]
+    label = spec.name if camera == "auto" else f"{spec.name} [{camera}]"
 
     def notify(stage: str, **info) -> None:
         if on_stage is not None:
-            on_stage(stage, path=spec.name, index=index, total=total, **info)
+            on_stage(stage, path=label, index=index, total=total, **info)
 
     manifest: Optional[Path] = None
     preprocess_s: Optional[float] = None
@@ -690,7 +740,8 @@ def run_render_path(
         # in the run-level wall_clock_s.dump_preprocess, not per path
         got = ctx.preprocessed[spec.name]
         if isinstance(got, PreprocessError):
-            return PathResult(spec.name, False, "preprocess", str(got), 0, time.monotonic() - t0)
+            return PathResult(spec.name, False, "preprocess", str(got), 0, time.monotonic() - t0,
+                              camera=camera)
         manifest = got
     elif spec.build_preprocess_command is not None:
         viz_dir = _viz_dir(ctx, spec)
@@ -701,15 +752,18 @@ def run_render_path(
             )
         except PreprocessError as exc:
             elapsed = time.monotonic() - t0
+            _remember_preprocess(ctx, spec.name, exc)
             return PathResult(
                 spec.name, False, "preprocess", str(exc), 0, elapsed, preprocess_s=elapsed,
+                camera=camera,
             )
         preprocess_s = time.monotonic() - t0
+        _remember_preprocess(ctx, spec.name, manifest)
 
     t_render = time.monotonic()
     form = ctx.render_form
     slowmo = _path_slowmo(spec, form)
-    output_dir = _render_output_dir(ctx.batch_dir, ctx.run_name, spec.name, slowmo)
+    output_dir = _render_output_dir(ctx.batch_dir, ctx.run_name, spec.name, slowmo, camera, form.camera_fov)
     notify("render", n_expected=slowmo_frame_count(ctx.n_expected_frames, slowmo, form.max_frames),
            output_dir=output_dir)
     params = RenderParams(
@@ -720,7 +774,8 @@ def run_render_path(
         samples=form.samples,
         fps=form.fps,
         max_frames=form.max_frames,
-        camera_mode=form.camera_mode,
+        camera_mode=camera,
+        camera_fov=form.camera_fov,
         encode_video=form.encode_video,
         video_fps=form.video_fps,
         viz_path=spec.headless_viz_path,
@@ -735,7 +790,7 @@ def run_render_path(
         return PathResult(
             spec.name, False, "render", str(exc),
             count_matching(output_dir, "frame_*.png"), time.monotonic() - t0,
-            preprocess_s=preprocess_s, render_s=time.monotonic() - t_render,
+            preprocess_s=preprocess_s, render_s=time.monotonic() - t_render, camera=camera,
         )
 
     render_s = time.monotonic() - t_render
@@ -744,7 +799,7 @@ def run_render_path(
     if n_frames == 0:
         return PathResult(
             spec.name, False, "render", f"render wrote no frames to {output_dir}", 0, elapsed,
-            preprocess_s=preprocess_s, render_s=render_s,
+            preprocess_s=preprocess_s, render_s=render_s, camera=camera,
         )
     message = f"{n_frames} frame(s) in {elapsed:.0f}s to {output_dir}"
     missing = asset_fallbacks(output_dir / "render.log")
@@ -758,8 +813,15 @@ def run_render_path(
         )
     return PathResult(
         spec.name, True, "done", message, n_frames, elapsed,
-        preprocess_s=preprocess_s, render_s=render_s,
+        preprocess_s=preprocess_s, render_s=render_s, camera=camera,
     )
+
+
+def _remember_preprocess(ctx: PathContext, name: str, got: object) -> None:
+    """Keep a path's manifest (or its PreprocessError) so its other cameras skip the preprocess."""
+    if ctx.preprocessed is None:
+        ctx.preprocessed = {}
+    ctx.preprocessed[name] = got
 
 
 # DEMHeadlessRender / DEMCinematicSetup log lines when an optional asset is
@@ -782,7 +844,7 @@ def asset_fallbacks(log_path: Path) -> List[str]:
 
 def format_path_result(r: PathResult) -> str:
     if r.ok:
-        return f"{r.name}: ok, {r.message}"
+        return f"{r.label}: ok, {r.message}"
     # r.message can carry a multi-line traceback tail (see run_preprocess_stage /
     # PreprocessError) -- keep that in full for the caller (e.g. PathResult.message,
     # shown per-path), but compact it to one line here so a multi-path summary
@@ -791,8 +853,8 @@ def format_path_result(r: PathResult) -> str:
     lines = [line for line in r.message.splitlines() if line.strip()]
     first = lines[0] if lines else r.message
     if len(lines) > 1:
-        return f"{r.name}: failed at {r.stage}: {first} … {lines[-1]}"
-    return f"{r.name}: failed at {r.stage}: {first}"
+        return f"{r.label}: failed at {r.stage}: {first} … {lines[-1]}"
+    return f"{r.label}: failed at {r.stage}: {first}"
 
 
 def run_compare_for_paths(
@@ -808,7 +870,8 @@ def run_compare_for_paths(
     form = ctx.render_form
     try:
         result = run_compare_stage(
-            [(r.name, _render_output_dir(ctx.batch_dir, ctx.run_name, r.name)) for r in ok],
+            [(r.label, _render_output_dir(ctx.batch_dir, ctx.run_name, r.name, camera=r.camera, fov=form.camera_fov))
+             for r in ok],
             output_dir,
             fps=form.video_fps or form.fps,
             encode_video=form.encode_video,
@@ -937,6 +1000,7 @@ def _path_timing(r: PathResult) -> dict:
     )
     return {
         "name": r.name,
+        "camera": r.camera,
         "ok": r.ok,
         "failed_stage": None if r.ok else r.stage,
         "preprocess_s": r.preprocess_s,
@@ -1159,8 +1223,10 @@ def _run_pipeline_stages(
         )
         facts["dump_preprocess_s"] = time.monotonic() - t_pre
     results = [
-        run_render_path(spec, ctx, on_stage=on_stage, index=i, total=len(specs), on_line=on_line)
+        r
         for i, spec in enumerate(specs, start=1)
+        for r in run_render_path_cameras(spec, ctx, on_stage=on_stage, index=i, total=len(specs),
+                                         on_line=on_line)
     ]
     all_ok = all(r.ok for r in results)
     message = source_message + "; " + "; ".join(format_path_result(r) for r in results)
@@ -1351,13 +1417,8 @@ class SimRenderTUIApp(App[None]):
             yield _Row("samples", Input(str(DEFAULT_SAMPLES), id="samples"), "int")
             yield _Row("fps", Input("24", id="fps"), "int")
             yield _Row("max_frames", Input("", id="max-frames", placeholder="(all frames)"), "int, optional")
-            yield _Row(
-                "camera_mode",
-                Select(
-                    [("auto", "auto"), ("grain_only", "grain_only")],
-                    value="auto", id="camera-mode", allow_blank=False,
-                ),
-            )
+            yield _Row("camera_fov", Input(f"{DEFAULT_CAMERA_FOV:g}", id="camera-fov"),
+                       "deg; earth_chase 20-30 = tele")
             yield _Row(
                 "encode_video",
                 Checkbox("encode to MP4 after render", value=False, id="encode-video"),
@@ -1372,6 +1433,10 @@ class SimRenderTUIApp(App[None]):
                 Checkbox("keep frames already rendered", value=False, id="resume"),
                 "carry on a stopped render",
             )
+
+            yield Static("Render — cameras (one render per path per camera)", classes="sec")
+            for mode in CAMERA_MODES:
+                yield _Row(mode, Checkbox(CAMERA_HINTS[mode], value=(mode == "auto"), id=f"camera-{mode}"))
 
             yield Static("Render — paths (any combination; one sim feeds all)", classes="sec")
             yield _Row(
@@ -1612,7 +1677,8 @@ class SimRenderTUIApp(App[None]):
         max_frames = int(max_frames_raw) if max_frames_raw else None
         if max_frames is not None and max_frames <= 0:
             raise ValueError(f"max_frames must be > 0 when set (got {max_frames})")
-        camera_mode = self.query_one("#camera-mode", Select).value
+        camera_modes = tuple(m for m in CAMERA_MODES if self.query_one(f"#camera-{m}", Checkbox).value)
+        camera_fov = float(self._iv("camera-fov") or f"{DEFAULT_CAMERA_FOV:g}")
         encode_video = self.query_one("#encode-video", Checkbox).value
         video_fps_raw = self._iv("video-fps")
         video_fps = int(video_fps_raw) if video_fps_raw else None
@@ -1629,7 +1695,8 @@ class SimRenderTUIApp(App[None]):
             raise ValueError("compare needs at least two ticked render paths")
         slowmo = int(self._iv("slowmo") or "1")
         resume = bool(self.query_one("#resume", Checkbox).value)
-        validate_render_form(RenderFormValues(paths=paths, compare=compare, slowmo=slowmo))
+        validate_render_form(RenderFormValues(paths=paths, compare=compare, slowmo=slowmo,
+                                              camera_modes=camera_modes, camera_fov=camera_fov))
         envelope_method = str(self.query_one("#envelope-method", Select).value)
         placeholder_obj = self._iv("placeholder-obj")
         n_points = 1_000_000
@@ -1655,7 +1722,8 @@ class SimRenderTUIApp(App[None]):
             samples=samples,
             fps=fps,
             max_frames=max_frames,
-            camera_mode=str(camera_mode),
+            camera_modes=camera_modes,
+            camera_fov=camera_fov,
             encode_video=bool(encode_video),
             video_fps=video_fps,
             paths=paths,

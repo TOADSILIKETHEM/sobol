@@ -51,11 +51,17 @@ def is_sobol_run(run_dir: Path) -> bool:
 def form_to_dict(form) -> dict:
     d = asdict(form)
     d["paths"] = list(form.paths)
+    d["camera_modes"] = list(form.camera_modes)
     return d
 
 
 def form_from_dict(t: ModuleType, d: dict):
-    return t.RenderFormValues(**{**d, "paths": tuple(d["paths"])})
+    d = dict(d)
+    if "camera_mode" in d:  # job.json written before camera_modes (one camera per job)
+        d.setdefault("camera_modes", [d.pop("camera_mode")])
+    d.pop("apophis_scale", None)
+    return t.RenderFormValues(**{**d, "paths": tuple(d["paths"]),
+                                 "camera_modes": tuple(d.get("camera_modes", ("auto",)))})
 
 
 def _run_id(run_dir: Path) -> int:
@@ -125,8 +131,9 @@ def render_run(t: ModuleType, run_dir: Path, form, keep_dumps: bool = False,
         ctx.preprocessed = t.run_dump_preprocess_stage(
             t.build_dump_preprocess_command(ctx, run_dir, targets), targets, on_line=on_line)
         facts["dump_preprocess_s"] = time.monotonic() - t_pre
-    results = [t.run_render_path(s, ctx, on_stage=on_stage, index=i, total=len(specs), on_line=on_line)
-               for i, s in enumerate(specs, start=1)]
+    results = [r for i, s in enumerate(specs, start=1)
+               for r in t.run_render_path_cameras(s, ctx, on_stage=on_stage, index=i, total=len(specs),
+                                                  on_line=on_line)]
     all_ok = all(r.ok for r in results)
     message = source + "; " + "; ".join(t.format_path_result(r) for r in results)
     if dump_route and not keep_dumps:
@@ -217,8 +224,10 @@ def render_dumps_argv(run_dir: Path, form, *, name: Optional[str] = None, prefix
         argv.append("--video")
         if form.video_fps is not None:
             argv += ["--video-fps", str(form.video_fps)]
-    if form.camera_mode != "auto":
-        argv += ["--camera-mode", form.camera_mode]
+    if tuple(form.camera_modes) != ("auto",):
+        argv += ["--camera-mode", *form.camera_modes]
+    if form.camera_fov != 70.0:  # = tui_sim_render.DEFAULT_CAMERA_FOV (not imported here)
+        argv += ["--camera-fov", repr(float(form.camera_fov))]
     if "composite" in form.paths and form.envelope_method != "hull":
         argv += ["--envelope-method", form.envelope_method]
     if form.resume:

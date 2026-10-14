@@ -69,7 +69,8 @@ def test_render_form_values_defaults():
     assert r.samples == 124
     assert r.fps == 24
     assert r.max_frames is None
-    assert r.camera_mode == "auto"
+    assert r.camera_modes == ("auto",)
+    assert r.camera_fov == 70.0
 
 
 def test_run_sim_stage_forwards_params(monkeypatch):
@@ -488,7 +489,7 @@ def test_run_pipeline_full_success(monkeypatch, tmp_path):
     monkeypatch.setattr(tsr, "run_render_stage", fake_render)
 
     sim_params = tsr.SimParams(output_root=Path("sobol_mass_runs/batch"))
-    render_form = tsr.RenderFormValues(resolution="640x360", samples=8, camera_mode="grain_only", paths=("instance_static",))
+    render_form = tsr.RenderFormValues(resolution="640x360", samples=8, camera_modes=("grain_only",), paths=("instance_static",))
     result = tsr.run_pipeline(sim_params, render_form, base_output_dir)
 
     assert result.stage == "done"
@@ -499,7 +500,7 @@ def test_run_pipeline_full_success(monkeypatch, tmp_path):
     assert rp.manifest == base_output_dir / "batch" / "run_0001_viz_instance_static" / "manifest.json"
     assert rp.grains_dir == base_output_dir / "batch" / "run_0001_grains_output"
     assert rp.bodies_dir == base_output_dir / "batch" / "run_0001_bodies_output"
-    assert rp.output_dir == base_output_dir / "batch" / "run_0001_render_instance_static"
+    assert rp.output_dir == base_output_dir / "batch" / "run_0001_render_instance_static_grain_only"
     assert rp.resolution == "640x360"
     assert rp.samples == 8
     assert rp.camera_mode == "grain_only"
@@ -1032,20 +1033,27 @@ def test_form_path_inputs_default_to_absolute_paths():
     assert output_root_val == str(tsr._default_output_root())
 
 
-# --- Finding 3: camera-mode Select must not allow a blank selection -----
+# --- cameras: one checkbox per mode, auto ticked; none ticked is refused --
 
-def test_camera_mode_select_disallows_blank():
-    # Textual 8.2.6's Select has no public allow_blank reader -- only the
-    # constructor kwarg and the private _allow_blank it's stored in.
+def test_camera_checkboxes_default_auto_and_refuse_none():
     async def _scenario():
         app = tsr.SimRenderTUIApp()
-        async with app.run_test():
-            select = app.query_one("#camera-mode", tsr.Select)
-            return select._allow_blank, select.value
+        async with app.run_test(size=(160, 200)):
+            ticked = [m for m in tsr.CAMERA_MODES if app.query_one(f"#camera-{m}", tsr.Checkbox).value]
+            app.query_one("#camera-earth_chase", tsr.Checkbox).value = True
+            app.query_one("#camera-fov", tsr.Input).value = "25"
+            form = app._build_render_form()
+            for m in tsr.CAMERA_MODES:
+                app.query_one(f"#camera-{m}", tsr.Checkbox).value = False
+            try:
+                app._build_render_form()
+            except ValueError as exc:
+                return ticked, form, str(exc)
 
-    allow_blank, value = asyncio.run(_scenario())
-    assert allow_blank is False
-    assert value != tsr.Select.BLANK
+    ticked, form, err = asyncio.run(_scenario())
+    assert ticked == ["auto"]
+    assert (form.camera_modes, form.camera_fov) == (("auto", "earth_chase"), 25.0)
+    assert "camera" in err
 
 
 # --- Finding 4: render form values are validated eagerly ----------------
@@ -2696,6 +2704,61 @@ def test_render_command_passes_resume_only_when_set():
     assert "--resume" not in tsr.build_render_command(rp)
     rp.resume = True
     assert "--resume" in tsr.build_render_command(rp)
+
+
+def test_render_command_passes_camera_fov_only_off_default():
+    rp = tsr.RenderParams(grains_dir=Path("/g"), bodies_dir=Path("/b"), output_dir=Path("/o"),
+                          viz_path="instance", manifest=Path("/m/manifest.json"), camera_mode="earth_chase")
+    cmd = tsr.build_render_command(rp)
+    assert "--camera-fov" not in cmd
+    assert cmd[cmd.index("--camera-mode") + 1] == "earth_chase"
+    rp.camera_fov = 25
+    cmd = tsr.build_render_command(rp)
+    assert cmd[cmd.index("--camera-fov") + 1] == "25.0"
+
+
+def test_validate_render_form_checks_cameras_and_fov():
+    tsr.validate_render_form(tsr.RenderFormValues(camera_modes=("auto", "earth_chase"), camera_fov=25.0))
+    for bad, match in (((), "camera"), (("nope",), "camera_modes"), (("auto", "auto"), "twice")):
+        with pytest.raises(ValueError, match=match):
+            tsr.validate_render_form(tsr.RenderFormValues(camera_modes=bad))
+    with pytest.raises(ValueError, match="camera_fov"):
+        tsr.validate_render_form(tsr.RenderFormValues(camera_fov=0.0))
+
+
+def test_each_camera_renders_into_its_own_folder_from_one_preprocess(monkeypatch, tmp_path):
+    preprocess_calls, seen = [], []
+
+    def fake_preprocess(cmd, output_dir, on_line=None):
+        preprocess_calls.append(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        return output_dir / "manifest.json"
+
+    def fake_render(params):
+        seen.append((params.camera_mode, params.camera_fov, params.output_dir))
+        _write_fake_pngs(params.output_dir, 2)
+        return _ok_completed()
+
+    monkeypatch.setattr(tsr, "run_preprocess_stage", fake_preprocess)
+    monkeypatch.setattr(tsr, "run_render_stage", fake_render)
+    form = tsr.RenderFormValues(paths=("instance_static",), camera_modes=("auto", "earth_chase"),
+                                camera_fov=25.0)
+    ctx = tsr.PathContext(grains_dir=tmp_path / "g", bodies_dir=tmp_path / "b", batch_dir=tmp_path,
+                          run_name="run_0001", render_form=form, n_expected_frames=2)
+    results = tsr.run_render_path_cameras(tsr.RENDER_PATHS["instance_static"], ctx)
+    assert len(preprocess_calls) == 1
+    assert seen == [("auto", 25.0, tmp_path / "run_0001_render_instance_static_fov25"),
+                    ("earth_chase", 25.0, tmp_path / "run_0001_render_instance_static_earth_chase_fov25")]
+    assert [(r.ok, r.camera, r.label) for r in results] == [
+        (True, "auto", "instance_static"), (True, "earth_chase", "instance_static [earth_chase]")]
+    assert results[0].preprocess_s is not None and results[1].preprocess_s is None
+
+
+def test_camera_modes_match_the_headless_renderer():
+    from tests._paths import CODE
+    sys.path.insert(0, str(CODE / "BlenderConvert"))
+    import DEMHeadlessRender as dhr
+    assert tsr.CAMERA_MODES == dhr.CAMERA_MODES
 
 
 # --- slowmo / resume through the form, pipeline and per-path render -------

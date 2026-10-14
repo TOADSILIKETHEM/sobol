@@ -198,6 +198,40 @@ def test_render_settings_defaults_and_errors():
     assert "fps" in err
 
 
+
+@needs_t
+def test_render_settings_several_cameras_and_fov():
+    async def scenario():
+        app = _RenderHost()
+        async with app.run_test(size=(200, 60)) as pilot:
+            s = app.query_one(tr_render.RenderSettings)
+            default = s.read()
+            app.query_one("#r-cam-earth-chase", Checkbox).value = True
+            app.query_one("#r-camera-fov", Input).value = "25"
+            await pilot.pause()
+            form = s.read()
+            app.query_one("#r-cam-auto", Checkbox).value = False
+            app.query_one("#r-cam-earth-chase", Checkbox).value = False
+            await pilot.pause()
+            errs = []
+            try:
+                s.read()
+            except ValueError as exc:
+                errs.append(str(exc))
+            app.query_one("#r-cam-auto", Checkbox).value = True
+            app.query_one("#r-camera-fov", Input).value = "wide"
+            await pilot.pause()
+            try:
+                s.read()
+            except ValueError as exc:
+                errs.append(str(exc))
+            return default, form, errs
+    default, form, errs = asyncio.run(scenario())
+    assert (default.camera_modes, default.camera_fov) == (("auto",), 70.0)
+    assert (form.camera_modes, form.camera_fov) == (("auto", "earth_chase"), 25.0)
+    assert "camera" in errs[0] and "camera_fov" in errs[1]
+
+
 import jobstore as js
 import tui
 from textual.widgets import Static  # noqa: F401  (used by later tests in this file)
