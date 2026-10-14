@@ -62,7 +62,8 @@ Parent: `../CLAUDE.md`. Shared facts: `../docs/SHARED_FACTS.md`. Merge/rename ca
 - **Render:**
   - `resolution` (1920x1080), `samples` (124), `fps` (24).
   - `max_frames` (blank means all).
-  - `camera_mode` (`auto` | `grain_only`, which patches `CAMERA_MODE`).
+  - **Cameras** section: one checkbox per camera (`auto` ticked by default; patches `CAMERA_MODE`). Each ticked camera renders every ticked path again from the same preprocess, into `run_0001_render_<path>[_<camera>][_fov<deg>][_slowmoN]/` (`auto` at 70° keeps `run_0001_render_<path>/`). `earth_chase`: behind Apophis, aimed at Earth's centre, Apophis on the lower-third line. `earth_fixed`: camera still relative to Earth, Apophis a few pixels (context shot). Both need an Earth row, so not `apophis_only`. `compare` stitches every rendered path × camera.
+  - `camera_fov` (default 70, degrees across the long side; `--camera-fov`). With `earth_chase`, 20–30 is telephoto: same Apophis size, bigger Earth.
   - `encode_video` checkbox (off by default) + `video_fps` (blank = same as `fps`) — optional final MP4-encode stage, applied per ticked render path.
   - `slowmo` (default 1) — instance paths only: N frames per dump over the same sim time (in-betweens interpolated on the grains' Bezier curves, not simulated). Renders (n−1)·N+1 frames into its own `run_0001_render_<path>_slowmoN/`; composite in the same run stays 1:1. Refused with no instance path ticked, and with `compare` (frame counts differ). Keep `video_fps` at 24 (Max's standard): slowmo N gives an N× longer video, not a smoother clip of the same length. `validate_render_form()` holds these rules for the TUI, `run_pipeline` and `render_dumps.py`.
   - `resume` checkbox — keep `frame_*.png` already in the output folder and render only the missing ones (carry on a stopped render; `DEMHeadlessRender.py --resume`).

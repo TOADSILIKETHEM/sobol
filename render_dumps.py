@@ -215,9 +215,9 @@ def main(argv=None) -> int:
         return 1
     ok = True
     for path in a.paths:
-        r = t.run_render_path(t.RENDER_PATHS[path], ctx, on_line=say)
-        print(t.format_path_result(r), flush=True)
-        ok = ok and r.ok
+        for r in t.run_render_path_cameras(t.RENDER_PATHS[path], ctx, on_line=say):
+            print(t.format_path_result(r), flush=True)
+            ok = ok and r.ok
     print("RENDER_DONE" if ok else "RENDER_FAILED", flush=True)
     return 0 if ok else 1
 

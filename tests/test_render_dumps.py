@@ -9,6 +9,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import render_dumps as rd  # noqa: E402
 
 
+
+def _one_camera(render_path):
+    """A run_render_path fake as run_render_path_cameras: one camera, the same kwargs render_dumps passes."""
+    return lambda spec, ctx, **kw: [render_path(spec, ctx, **kw)]
+
 def _dumps(d: Path, prefix="sobol", n=3):
     d.mkdir(parents=True, exist_ok=True)
     for i in range(n):
@@ -104,7 +109,7 @@ def test_main_wires_preprocess_and_render(tmp_path, monkeypatch):
 
     monkeypatch.setattr(rd.t, "check_blender_exe", lambda *a: None)
     monkeypatch.setattr(rd.t, "run_dump_preprocess_stage", fake_pre)
-    monkeypatch.setattr(rd.t, "run_render_path", fake_render)
+    monkeypatch.setattr(rd.t, "run_render_path_cameras", _one_camera(fake_render))
     monkeypatch.setattr(rd.t, "format_path_result", lambda r: "ok")
     rc = rd.main([str(run), "--name", "demo", "--out-root", str(tmp_path / "out"),
                   "--samples", "8", "--max-frames", "2", "--fps", "8"])
@@ -125,7 +130,7 @@ def test_main_returns_1_when_a_render_fails(tmp_path, monkeypatch):
 
     monkeypatch.setattr(rd.t, "check_blender_exe", lambda *a: None)
     monkeypatch.setattr(rd.t, "run_dump_preprocess_stage", lambda cmd, targets, on_line=None: dict(targets))
-    monkeypatch.setattr(rd.t, "run_render_path", lambda spec, ctx, on_line=None: Bad)
+    monkeypatch.setattr(rd.t, "run_render_path_cameras", _one_camera(lambda spec, ctx, on_line=None: Bad))
     monkeypatch.setattr(rd.t, "format_path_result", lambda r: "bad")
     assert rd.main([str(run), "--out-root", str(tmp_path / "out")]) == 1
 
@@ -154,7 +159,7 @@ def test_stage_dir_option_and_windows_python_disables_symlinks(tmp_path, monkeyp
     class Ok:
         ok = True
 
-    monkeypatch.setattr(rd.t, "run_render_path", lambda spec, ctx, on_line=None: Ok)
+    monkeypatch.setattr(rd.t, "run_render_path_cameras", _one_camera(lambda spec, ctx, on_line=None: Ok))
     monkeypatch.setattr(rd.t, "format_path_result", lambda r: "ok")
     rd.main([str(run), "--out-root", str(tmp_path / "out"), "--stage-dir", str(tmp_path / "stg")])
     assert seen["stage"] == tmp_path / "stg"
@@ -178,7 +183,7 @@ def _fake_stages(monkeypatch, seen):
         return Ok
 
     monkeypatch.setattr(rd.t, "run_dump_preprocess_stage", pre)
-    monkeypatch.setattr(rd.t, "run_render_path", ren)
+    monkeypatch.setattr(rd.t, "run_render_path_cameras", _one_camera(ren))
     monkeypatch.setattr(rd.t, "format_path_result", lambda r: "ok")
 
 
@@ -254,7 +259,7 @@ def test_slowmo_and_resume_reach_the_render_form(tmp_path, monkeypatch):
 
     monkeypatch.setattr(rd.t, "check_blender_exe", lambda *a: None)
     monkeypatch.setattr(rd.t, "run_dump_preprocess_stage", lambda cmd, targets, on_line=None: dict(targets))
-    monkeypatch.setattr(rd.t, "run_render_path", lambda spec, ctx, on_line=None: seen.setdefault("ctx", ctx) and Result)
+    monkeypatch.setattr(rd.t, "run_render_path_cameras", _one_camera(lambda spec, ctx, on_line=None: seen.setdefault("ctx", ctx) and Result))
     monkeypatch.setattr(rd.t, "format_path_result", lambda r: "ok")
     assert rd.main([str(run), "--out-root", str(tmp_path / "out"), "--slowmo", "4", "--resume"]) == 0
     assert seen["ctx"].render_form.slowmo == 4 and seen["ctx"].render_form.resume is True
