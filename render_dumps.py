@@ -10,7 +10,8 @@ sobol_NNNNN next to a minimal sobol.setup, so the readers see a normal run.
         [--dem-model particle|sink --np-apophis N [--apophis-only]]
         [--encounter hyperbola|ephemeris]
         [--paths instance_grains composite] [--samples 124] [--fps 24]
-        [--resolution 1920x1080] [--max-frames N] [--video] [--out-root DIR]
+        [--resolution 1920x1080] [--max-frames N] [--video [--video-fps N]]
+        [--camera-mode auto|grain_only|earth_fixed|earth_chase ...] [--camera-fov DEG] [--envelope-method hull|sdf] [--out-root DIR]
 
 Outputs: <out-root>/<name>/<run>_viz_instance/, <run>_render_<path>/ (<run> =
 the run dir's name if it is run_NNNN, else run_0001). Staged dumps go in
@@ -34,6 +35,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import jobstore  # noqa: E402
 import tui_sim_render as t  # noqa: E402
 
 DUMP_ROUTE_PATHS = tuple(t.DUMP_PREPROCESS_FLAGS)
@@ -149,6 +151,13 @@ def _parse(argv):
     p.add_argument("--resolution", default="1920x1080")
     p.add_argument("--max-frames", type=int)
     p.add_argument("--video", action="store_true", help="also encode an mp4")
+    p.add_argument("--video-fps", type=int, help="mp4 frame rate (default: --fps)")
+    p.add_argument("--camera-mode", nargs="+", choices=t.CAMERA_MODES, default=["auto"],
+                   help="one render per camera, each in its own folder (earth_fixed / earth_chase need "
+                        "an Earth row)")
+    p.add_argument("--camera-fov", type=float, default=t.DEFAULT_CAMERA_FOV,
+                   help="degrees across the long side (earth_chase: 20-30 = telephoto)")
+    p.add_argument("--envelope-method", choices=("hull", "sdf"), default="hull", help="composite envelope")
     p.add_argument("--slowmo", type=int, default=1,
                    help="instance paths: N frames per dump, in-betweens interpolated (own _slowmoN folder)")
     p.add_argument("--resume", action="store_true", help="keep frames already rendered, render the rest")
@@ -171,7 +180,9 @@ def main(argv=None) -> int:
                  "instance_static needs the npz convert -- use sobol/tui_sim_render.py")
     form = t.RenderFormValues(resolution=a.resolution, samples=a.samples, fps=a.fps,
                               max_frames=a.max_frames, encode_video=a.video, paths=tuple(a.paths),
-                              slowmo=a.slowmo, resume=a.resume)
+                              slowmo=a.slowmo, resume=a.resume, camera_modes=tuple(a.camera_mode),
+                              video_fps=a.video_fps, envelope_method=a.envelope_method,
+                              camera_fov=a.camera_fov)
     try:
         t.validate_render_form(form)
     except ValueError as exc:
@@ -201,6 +212,17 @@ def main(argv=None) -> int:
         d.mkdir(parents=True, exist_ok=True)
         targets[path] = d
     say = lambda line: None if "Fra:" in line else print(line, flush=True)  # noqa: E731
+    # a job (sobol/job.py) asks for progress in a file, so the TUI's Jobs tab can count frames
+    progress_file = os.environ.get(jobstore.PROGRESS_FILE_ENV)
+
+    def progress(stage, **info):
+        try:
+            jobstore.write_progress_file(Path(progress_file), jobstore.progress_info(stage, a.resume, **info))
+        except OSError:
+            pass  # progress is a view; never stop a render over it
+
+    if progress_file:
+        progress("preprocess")
     try:
         ctx.preprocessed = t.run_dump_preprocess_stage(t.build_dump_preprocess_command(ctx, run, targets),
                                                        targets, on_line=say)
@@ -214,8 +236,11 @@ def main(argv=None) -> int:
         print("RENDER_FAILED", flush=True)
         return 1
     ok = True
-    for path in a.paths:
-        for r in t.run_render_path_cameras(t.RENDER_PATHS[path], ctx, on_line=say):
+    extra = {"on_stage": progress} if progress_file else {}
+    for i, path in enumerate(a.paths, start=1):
+        if progress_file:
+            extra.update(index=i, total=len(a.paths))
+        for r in t.run_render_path_cameras(t.RENDER_PATHS[path], ctx, on_line=say, **extra):
             print(t.format_path_result(r), flush=True)
             ok = ok and r.ok
     print("RENDER_DONE" if ok else "RENDER_FAILED", flush=True)

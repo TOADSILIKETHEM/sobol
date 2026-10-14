@@ -273,3 +273,46 @@ def test_slowmo_without_an_instance_path_is_refused(tmp_path, monkeypatch):
 
 def test_samples_default_is_124():
     assert rd._parse(["run"]).samples == 124
+
+
+def test_camera_envelope_and_video_fps_flags():
+    a = rd._parse(["run", "--camera-mode", "grain_only", "--envelope-method", "sdf", "--video-fps", "12"])
+    assert (a.camera_mode, a.envelope_method, a.video_fps) == (["grain_only"], "sdf", 12)
+    d = rd._parse(["run"])
+    assert (d.camera_mode, d.envelope_method, d.video_fps) == (["auto"], "hull", None)
+
+
+def test_main_writes_progress_file_when_asked(tmp_path, monkeypatch):
+    import json
+    run = _dumps(tmp_path / "run")
+    (run / "sobol.setup").write_text("use_dem = T\nuse_dem_as_sinks = F\n")
+    pf = tmp_path / "progress.json"
+    monkeypatch.setenv("SOBOL_PROGRESS_FILE", str(pf))
+    seen = []
+
+    class Result:
+        ok = True
+
+    def fake_pre(cmd, targets, on_line=None):
+        seen.append(json.loads(pf.read_text()))
+        return dict(targets)
+
+    def fake_render(spec, ctx, on_line=None, on_stage=None, index=1, total=1):
+        on_stage("render", path=spec.name, index=index, total=total, n_expected=3, output_dir=tmp_path / "f")
+        seen.append(json.loads(pf.read_text()))
+        return Result
+
+    monkeypatch.setattr(rd.t, "check_blender_exe", lambda *a: None)
+    monkeypatch.setattr(rd.t, "run_dump_preprocess_stage", fake_pre)
+    monkeypatch.setattr(rd.t, "run_render_path_cameras", _one_camera(fake_render))
+    monkeypatch.setattr(rd.t, "format_path_result", lambda r: "ok")
+    assert rd.main([str(run), "--out-root", str(tmp_path / "out")]) == 0
+    assert seen[0] == {"phase": "preprocess"}
+    assert seen[1]["phase"] == "render" and seen[1]["path"] == "instance_grains" and seen[1]["total"] == 1
+    assert seen[1]["dir"] == str(tmp_path / "f") and "since" in seen[1]
+
+
+def test_several_cameras_and_fov_flags():
+    a = rd._parse(["run", "--camera-mode", "auto", "earth_chase", "--camera-fov", "25"])
+    assert (a.camera_mode, a.camera_fov) == (["auto", "earth_chase"], 25.0)
+    assert rd._parse(["run"]).camera_fov == 70.0
