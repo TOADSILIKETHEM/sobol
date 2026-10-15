@@ -316,3 +316,34 @@ def test_several_cameras_and_fov_flags():
     a = rd._parse(["run", "--camera-mode", "auto", "earth_chase", "--camera-fov", "25"])
     assert (a.camera_mode, a.camera_fov) == (["auto", "earth_chase"], 25.0)
     assert rd._parse(["run"]).camera_fov == 70.0
+
+
+def test_queue_writes_relative_jobs_and_skips_blender(tmp_path, monkeypatch):
+    import json
+    run = _dumps(tmp_path / "run")
+    (run / "sobol.setup").write_text("use_dem = T\nuse_dem_as_sinks = F\n")
+    out = tmp_path / "out"
+
+    def fake_pre(cmd, targets, on_line=None):
+        return {k: v / "manifest.json" for k, v in targets.items()}
+
+    def no_blender(*a, **k):
+        raise AssertionError("--queue must not render or need Blender")
+
+    monkeypatch.setattr(rd.t, "check_blender_exe", no_blender)
+    monkeypatch.setattr(rd.t, "run_dump_preprocess_stage", fake_pre)
+    monkeypatch.setattr(rd.t, "run_render_path_cameras", no_blender)
+    monkeypatch.setattr(rd.t, "CYCLES_DEVICE", "cpu")
+    rc = rd.main([str(run), "--name", "demo", "--out-root", str(out), "--queue", "--slowmo", "5",
+                  "--video", "--camera-mode", "auto", "earth_chase"])
+    assert rc == 0
+    jobs = sorted((out / "_render_queue").glob("*.json"))
+    assert [j.name for j in jobs] == ["demo__run_0001_render_instance_grains_earth_chase_slowmo5.json",
+                                      "demo__run_0001_render_instance_grains_slowmo5.json"]
+    job = json.loads(jobs[1].read_text())
+    args = job["args"]
+    assert args[args.index("--manifest") + 1] == "demo/run_0001_viz_instance/manifest.json"
+    assert args[args.index("--output-dir") + 1] == "demo/run_0001_render_instance_grains_slowmo5"
+    assert job["output_dir"] == "demo/run_0001_render_instance_grains_slowmo5"
+    assert "--resume" in args and "--encode-video" in args and "--device" not in args
+    assert args[args.index("--slowmo") + 1] == "5"

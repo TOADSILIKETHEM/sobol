@@ -717,6 +717,33 @@ def run_render_path_cameras(
     ]
 
 
+def render_params(
+    spec: RenderPath, ctx: PathContext, camera: str, manifest: Optional[Path],
+    on_line: Optional[Callable[[str], None]] = None,
+) -> RenderParams:
+    """RenderParams for one path and camera of ctx's form (render_dumps.py --queue writes these as jobs)."""
+    form = ctx.render_form
+    slowmo = _path_slowmo(spec, form)
+    return RenderParams(
+        grains_dir=ctx.grains_dir,
+        bodies_dir=ctx.bodies_dir,
+        output_dir=_render_output_dir(ctx.batch_dir, ctx.run_name, spec.name, slowmo, camera, form.camera_fov),
+        resolution=form.resolution,
+        samples=form.samples,
+        fps=form.fps,
+        max_frames=form.max_frames,
+        camera_mode=camera,
+        camera_fov=form.camera_fov,
+        encode_video=form.encode_video,
+        video_fps=form.video_fps,
+        viz_path=spec.headless_viz_path,
+        manifest=manifest,
+        slowmo=slowmo,
+        resume=form.resume,
+        on_line=on_line,
+    )
+
+
 def run_render_path(
     spec: RenderPath, ctx: PathContext, on_stage=None, index: int = 1, total: int = 1,
     on_line: Optional[Callable[[str], None]] = None, camera_mode: Optional[str] = None,
@@ -762,28 +789,10 @@ def run_render_path(
 
     t_render = time.monotonic()
     form = ctx.render_form
-    slowmo = _path_slowmo(spec, form)
-    output_dir = _render_output_dir(ctx.batch_dir, ctx.run_name, spec.name, slowmo, camera, form.camera_fov)
-    notify("render", n_expected=slowmo_frame_count(ctx.n_expected_frames, slowmo, form.max_frames),
+    params = render_params(spec, ctx, camera, manifest, on_line=on_line)
+    output_dir = params.output_dir
+    notify("render", n_expected=slowmo_frame_count(ctx.n_expected_frames, params.slowmo, form.max_frames),
            output_dir=output_dir)
-    params = RenderParams(
-        grains_dir=ctx.grains_dir,
-        bodies_dir=ctx.bodies_dir,
-        output_dir=output_dir,
-        resolution=form.resolution,
-        samples=form.samples,
-        fps=form.fps,
-        max_frames=form.max_frames,
-        camera_mode=camera,
-        camera_fov=form.camera_fov,
-        encode_video=form.encode_video,
-        video_fps=form.video_fps,
-        viz_path=spec.headless_viz_path,
-        manifest=manifest,
-        slowmo=slowmo,
-        resume=form.resume,
-        on_line=on_line,
-    )
     try:
         run_render_stage(params)
     except RenderError as exc:

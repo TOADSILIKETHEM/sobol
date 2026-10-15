@@ -23,6 +23,11 @@ the preprocess has read them.
 Mia's flybys): it is named Earth, placed and spun. Without it a lone sink comes
 out named Sun and the run stops before Blender (--encounter ephemeris keeps it).
 Paths and tools: Code/local_paths.json (python3 sobol/setup_paths.py).
+
+--queue: preprocess only, then write one job per path and camera to
+<out-root>/_render_queue/ instead of starting Blender. Another machine that
+syncs the same data folder (OneDrive) renders the jobs with
+Code/render_queue.py; see Code/docs/DESKTOP_RENDER.md.
 """
 import argparse
 import csv
@@ -31,7 +36,9 @@ import json
 import os
 import re
 import shutil
+import socket
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -135,6 +142,43 @@ def lone_sun_sink(bodies_dir: Path) -> bool:
     return names == ["Sun"]
 
 
+QUEUE_DIR_NAME = "_render_queue"  # Code/render_queue.py reads the same name
+
+
+def queue_job(params, out_root: Path, source: Path) -> Path:
+    """Write one render as a job file in <out_root>/_render_queue/ for Code/render_queue.py.
+
+    The DEMHeadlessRender.py arguments are stored with --manifest and --output-dir
+    relative to out_root (the other machine's DEMCSVs is the same folder under
+    another root) and without --device (the rendering machine picks its own).
+    --resume is always on, so a stopped job carries on where it left off."""
+    params.resume = True
+    cmd = t.build_render_command(params)
+    args = cmd[cmd.index("--") + 1:]
+    rel = {flag: Path(path).relative_to(out_root).as_posix()
+           for flag, path in (("--manifest", params.manifest), ("--output-dir", params.output_dir))}
+    for flag, value in rel.items():
+        args[args.index(flag) + 1] = value
+    if "--device" in args:
+        i = args.index("--device")
+        del args[i:i + 2]
+    qdir = out_root / QUEUE_DIR_NAME
+    qdir.mkdir(parents=True, exist_ok=True)
+    rel_out = Path(rel["--output-dir"])
+    job = qdir / f"{rel_out.parent.name}__{rel_out.name}.json"
+    tmp = job.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps({
+        "args": args,
+        "output_dir": rel["--output-dir"],
+        "manifest": rel["--manifest"],
+        "source": str(source),
+        "queued_by": socket.gethostname(),
+        "queued_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, job)  # written last and whole, so a half-synced job is never seen
+    return job
+
+
 def _parse(argv):
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     p.add_argument("run_dir", type=Path)
@@ -161,6 +205,9 @@ def _parse(argv):
     p.add_argument("--slowmo", type=int, default=1,
                    help="instance paths: N frames per dump, in-betweens interpolated (own _slowmoN folder)")
     p.add_argument("--resume", action="store_true", help="keep frames already rendered, render the rest")
+    p.add_argument("--queue", action="store_true",
+                   help="preprocess only; queue the renders in <out-root>/_render_queue/ for another "
+                        "machine (Code/render_queue.py)")
     p.add_argument("--out-root", type=Path, default=t.DATA_DIR / "DEMCSVs")
     p.add_argument("--stage-dir", type=Path,
                    help="where renamed dumps are staged, in _staged_<run dir name>/ (default: beside "
@@ -187,7 +234,8 @@ def main(argv=None) -> int:
         t.validate_render_form(form)
     except ValueError as exc:
         sys.exit(str(exc))
-    t.check_blender_exe(t.BLENDER_EXE)
+    if not a.queue:
+        t.check_blender_exe(t.BLENDER_EXE)
     src = a.run_dir.expanduser().resolve()
     # absolute: the preprocess runs with cwd=Code/ and Blender from its own dir
     out_root = a.out_root.expanduser().resolve()
@@ -235,6 +283,19 @@ def main(argv=None) -> int:
               file=sys.stderr)
         print("RENDER_FAILED", flush=True)
         return 1
+    if a.queue:
+        ok = True
+        for path in a.paths:
+            got = ctx.preprocessed[path]
+            if isinstance(got, Exception):
+                print(f"{path}: preprocess failed: {got}", file=sys.stderr)
+                ok = False
+                continue
+            for camera in form.camera_modes:
+                job = queue_job(t.render_params(t.RENDER_PATHS[path], ctx, camera, got), out_root, src)
+                print(f"queued {job}", flush=True)
+        print("QUEUE_DONE" if ok else "QUEUE_FAILED", flush=True)
+        return 0 if ok else 1
     ok = True
     extra = {"on_stage": progress} if progress_file else {}
     for i, path in enumerate(a.paths, start=1):

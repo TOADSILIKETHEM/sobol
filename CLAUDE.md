@@ -106,6 +106,7 @@ python3 sobol/render_dumps.py sobol_mass_runs/<batch>/run_0001 --name <out> [--s
 python3 sobol/render_dumps.py <fly dir> --prefix fly --dem-model particle --np-apophis N --apophis-only \
   --encounter hyperbola   # someone else's phantomflyby run (lone Earth sink, no Sun)
 python3 sobol/setup_paths.py --check   # paths, assets, Blender + pandas, preprocess deps
+python3 sobol/render_dumps.py ... --queue   # preprocess only; jobs -> <data>/DEMCSVs/_render_queue/ for the desktop (Code/render_queue.py, Code/docs/DESKTOP_RENDER.md)
 ```
 
 Dumps → Blender inputs (bodies CSV + grains `.npz`):
@@ -124,4 +125,4 @@ python3 sobol/Analysis/Analysis.py --method saltelli --sobol-problem-json <batch
   --saltelli-y-column closest_approach_au
 ```
 
-Tests: `cd sobol && python3 -m pytest tests` (~2.5 min; Blender tests launch `blender.exe`). Fixtures: `tests/fixtures/README.md`, `tests/fixtures/dem_run_dir.sh <particle|sink> <dir> <np> <tmax_in> <dtmax_in> <torque_deg> [run]`.
+Tests: `cd sobol && python3 -m pytest tests` (~5.5 min, 2026-10-14; Blender tests launch `blender.exe`). Fixtures: `tests/fixtures/README.md`, `tests/fixtures/dem_run_dir.sh <particle|sink> <dir> <np> <tmax_in> <dtmax_in> <torque_deg> [run]`.
