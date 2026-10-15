@@ -17,7 +17,7 @@ Parent: `../CLAUDE.md`. Shared facts: `../docs/SHARED_FACTS.md`. Merge/rename ca
 
 **Output layout.** Each launch creates `<output_root>/<prefix>_<YYYYmmdd_HHMMSS>_<batch_label>/run_0001/`; the label defaults to `sim_render` and is sanitised with `sanitize_batch_label()`. OneDrive `Code/DEMCSVs/<batch>/` (`tui_sim_render.DATA_DIR`): `run_0001_{grains,bodies}_output/`, `run_0001_viz/` (composite), `run_0001_viz_instance/` (instance_grains), `run_0001_viz_instance_static/` (instance_static) (dump route: no `run_0001_grains_output/`; `run_0001_viz/grains/` holds the x/y/z files the composite camera reads), and one `run_0001_render_<path>/` per ticked path with `frame_####.png` (+ `animation.mp4` if `encode_video`), and `run_0001_compare/` (`compare_####.png` + `animation.mp4`) when `compare` is ticked. Rename from v1 `run_0001_render/`: `../docs/CONTEXT_CHANGELOG.md`.
 
-**Logs and timing.** Every preprocess/render subprocess runs through `_run_logged()`: stdout+stderr merged, streamed line by line to `preprocess.log` (in that path's `run_0001_viz*/`; the shared dump-route call logs to the first ticked path's viz dir) or `render.log` (in `run_0001_render_<path>/`), with only a bounded tail kept for error messages. The latest line is appended to the status bar. Windows `.venv` preprocess runs `python.exe -u` and `DEMHeadlessRender.py` line-buffers stdout so lines arrive live; `instance_static` under `blender.exe` logs at exit. After any non-dry run whose `run_dir` exists, `run_pipeline()` writes `<run_dir>/pipeline_timing.json` (`build_timing_report()`): wall-clock `total`/`sim`/`convert`/`dump_preprocess`; per path `preprocess_s` (null for dump-route paths), `render_s` (includes video encode), `n_frames`, `render_s_per_frame`; `np_apophis` from the run's `sobol.setup`; dump/npz counts; sim sample + render form; hostname, `OMP_NUM_THREADS`; `sobol` and `Code` git SHA + `dirty`. A write failure is noted in the status and never fails the run. Per-sphere `max_frames` is patched into `MAX_FRAMES` so only those frames are keyframed.
+**Logs and timing.** Every preprocess/render subprocess runs through `_run_logged()`: stdout+stderr merged, streamed line by line to `preprocess.log` (in that path's `run_0001_viz*/`; the shared dump-route call logs to the first ticked path's viz dir) or `render.log` (in `run_0001_render_<path>/`), with only a bounded tail kept for error messages. The latest line is appended to the status bar. Windows `.venv` preprocess runs `python.exe -u` and `DEMHeadlessRender.py` line-buffers stdout so lines arrive live; `instance_static` under `blender.exe` logs at exit. After any non-dry run whose `run_dir` exists, `run_pipeline()` writes `<run_dir>/pipeline_timing.json` (`build_timing_report()`): wall-clock `total`/`sim`/`convert`/`dump_preprocess`; per path `preprocess_s` (null for dump-route paths), `render_s` (includes video encode), `n_frames`, `render_s_per_frame`; `np_apophis` from the run's `sobol.setup`; dump/npz counts; sim sample + render form; hostname, `OMP_NUM_THREADS`; `sobol` and `Code` git SHA + `dirty`. A write failure is noted in the status and never fails the run. `max_frames` goes to `DEMHeadlessRender.py --max-frames` (clamps `frame_end`).
 
 **Form.** Everything is on a single screen, with **Run Pipeline**, **Dry Run** and **Quit** buttons.
 - **Paths:**
@@ -41,7 +41,7 @@ Parent: `../CLAUDE.md`. Shared facts: `../docs/SHARED_FACTS.md`. Merge/rename ca
   hyperbola encounters"):
   - `body_source` (`lattice` | `settled`) and `encounter` (`ephemeris` | `hyperbola`). `hyperbola` needs `settled`.
     `settled` + `ephemeris` runs the cached body on the real 2029 orbit via `packing_file` (CLI detail
-    `../CLAUDE.md`); verified 2026-09-27 headless np300 → convert → `per_sphere`.
+    `../CLAUDE.md`); verified 2026-09-27 headless np300 → convert → `per_sphere` (path removed 2026-10-14).
   - `flyby_rp_km` (default `38000`), `flyby_vinf_kms` (default `5.9`), `flyby_start_sep_km` (`4e5`): read only for
     `hyperbola` (prefilled values never reach an ephemeris sample/CSV). `shape_file` is ignored for `settled` (the body
     carries its own shape).
@@ -52,7 +52,7 @@ Parent: `../CLAUDE.md`. Shared facts: `../docs/SHARED_FACTS.md`. Merge/rename ca
     resolves `phantomflyby` and swaps `sink_earth_id` 4 → 1. `settle_tdyn`/`relax_tdyn`/`body_cache_dir` are `SimParams`
     fields (defaults 5.0 / 0.5 / shared cache), not form rows.
   - Verified 2026-09-27: headless form → np300 settled hyperbola (rp 38000, v_inf 5.9) → convert → `per_sphere`
-    render, pericentre |r| 38050 km.
+    render (path removed 2026-10-14), pericentre |r| 38050 km.
 - **Sim — boulders (settled only)** (Oct 2026; CLI equivalent + semantics: `../CLAUDE.md` § `--boulders`):
   - `boulders` checkbox (default off). It can only be ticked on a settled body; if `body_source` changes afterwards it stays ticked and enabled (so it can be unticked) and Run refuses it.
   - Selects `boulder_shape` (`round` | `ellipsoid` | `grown`, random boulders) and `boulder_placed` (`none` | `binary` | `file`).
