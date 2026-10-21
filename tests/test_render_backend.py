@@ -206,6 +206,13 @@ def test_render_dumps_argv_passes_every_camera_and_fov():
 
 
 @needs_t
+def test_render_dumps_argv_passes_sun_glare_off_only():
+    on = rb.render_dumps_argv(Path("/r"), T.RenderFormValues(paths=("instance_grains",)))
+    off = rb.render_dumps_argv(Path("/r"), T.RenderFormValues(paths=("instance_grains",), sun_glare=False))
+    assert "--no-sun-glare" not in on and "--no-sun-glare" in off
+
+
+@needs_t
 def test_form_dict_round_trips_and_reads_old_single_camera_jobs():
     form = T.RenderFormValues(camera_modes=("auto", "earth_chase"), camera_fov=25.0)
     assert rb.form_from_dict(T, rb.form_to_dict(form)) == form

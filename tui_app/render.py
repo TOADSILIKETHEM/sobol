@@ -117,7 +117,8 @@ class RenderSettings(Vertical):
         yield Row("n_points", Input("1000000", id="r-n-points", compact=True), tip="instance_static only")
         yield Row("options", Checkbox("compare", id="r-compare", compact=True),
                   Checkbox("encode_video", id="r-video", compact=True),
-                  Checkbox("resume", id="r-resume", compact=True))
+                  Checkbox("resume", id="r-resume", compact=True),
+                  Checkbox("sun_glare", value=True, id="r-sun-glare", compact=True))
         yield Row("video_fps", Input("", placeholder="blank = fps", id="r-video-fps", compact=True))
         yield Row("slowmo", Input("1", id="r-slowmo", compact=True), tip="instance paths only; keep video_fps 24")
 
@@ -151,6 +152,7 @@ class RenderSettings(Vertical):
             compare=self._c("r-compare"),
             slowmo=_int("slowmo", self._v("r-slowmo")),
             resume=self._c("r-resume"),
+            sun_glare=self._c("r-sun-glare"),
         )
         if form.compare and len(paths) < 2:
             raise ValueError("compare needs at least two render paths")

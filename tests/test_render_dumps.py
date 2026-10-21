@@ -318,6 +318,11 @@ def test_several_cameras_and_fov_flags():
     assert rd._parse(["run"]).camera_fov == 70.0
 
 
+def test_parse_sun_glare_default_on():
+    assert rd._parse(["run"]).sun_glare is True
+    assert rd._parse(["run", "--no-sun-glare"]).sun_glare is False
+
+
 def test_queue_writes_relative_jobs_and_skips_blender(tmp_path, monkeypatch):
     import json
     run = _dumps(tmp_path / "run")

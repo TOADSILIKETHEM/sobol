@@ -225,6 +225,7 @@ class RenderFormValues:
     slowmo: int = 1  # instance paths only: timeline frames per dump (in-betweens interpolated)
     resume: bool = False  # keep frames already in the output dir, render the rest
     camera_fov: float = 70.0  # degrees across the long side (earth_chase: narrower = telephoto)
+    sun_glare: bool = True  # Sun bloom + starburst + ghosts (hyperbola renders with a visible Sun)
 
 
 @dataclass
@@ -246,6 +247,7 @@ class RenderParams:
     slowmo: int = 1  # instance only: timeline frames per dump (DEMHeadlessRender.py --slowmo)
     resume: bool = False  # keep frames already in output_dir, render the rest (--resume)
     camera_fov: float = 70.0  # DEMHeadlessRender.py --camera-fov
+    sun_glare: bool = True  # off = DEMHeadlessRender.py --no-sun-glare
     # Called with each line Blender prints (see _run_logged). A field rather
     # than a run_render_stage() argument so stage fakes taking only `params`
     # keep working.
@@ -501,6 +503,8 @@ def build_render_command(params: RenderParams) -> List[str]:
         cmd += ["--camera-fov", repr(float(params.camera_fov))]
     if params.resume:
         cmd.append("--resume")
+    if not params.sun_glare:
+        cmd.append("--no-sun-glare")
     if params.encode_video:
         cmd += ["--encode-video"]
         if params.video_fps is not None:
@@ -734,6 +738,7 @@ def render_params(
         max_frames=form.max_frames,
         camera_mode=camera,
         camera_fov=form.camera_fov,
+        sun_glare=form.sun_glare,
         encode_video=form.encode_video,
         video_fps=form.video_fps,
         viz_path=spec.headless_viz_path,
@@ -1442,6 +1447,11 @@ class SimRenderTUIApp(App[None]):
                 Checkbox("keep frames already rendered", value=False, id="resume"),
                 "carry on a stopped render",
             )
+            yield _Row(
+                "sun_glare",
+                Checkbox("Sun bloom, starburst + lens ghosts", value=True, id="sun-glare"),
+                "hyperbola runs with the Sun in view",
+            )
 
             yield Static("Render — cameras (one render per path per camera)", classes="sec")
             for mode in CAMERA_MODES:
@@ -1704,6 +1714,7 @@ class SimRenderTUIApp(App[None]):
             raise ValueError("compare needs at least two ticked render paths")
         slowmo = int(self._iv("slowmo") or "1")
         resume = bool(self.query_one("#resume", Checkbox).value)
+        sun_glare = bool(self.query_one("#sun-glare", Checkbox).value)
         validate_render_form(RenderFormValues(paths=paths, compare=compare, slowmo=slowmo,
                                               camera_modes=camera_modes, camera_fov=camera_fov))
         envelope_method = str(self.query_one("#envelope-method", Select).value)
@@ -1742,6 +1753,7 @@ class SimRenderTUIApp(App[None]):
             compare=compare,
             slowmo=slowmo,
             resume=resume,
+            sun_glare=sun_glare,
         )
 
     @on(Button.Pressed, "#btn-run")

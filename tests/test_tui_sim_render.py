@@ -2717,6 +2717,15 @@ def test_render_command_passes_camera_fov_only_off_default():
     assert cmd[cmd.index("--camera-fov") + 1] == "25.0"
 
 
+def test_render_command_sun_glare_default_on_flag_only_when_off():
+    assert tsr.RenderFormValues().sun_glare is True
+    rp = tsr.RenderParams(grains_dir=Path("/g"), bodies_dir=Path("/b"), output_dir=Path("/o"),
+                          viz_path="instance", manifest=Path("/m/manifest.json"))
+    assert "--no-sun-glare" not in tsr.build_render_command(rp)
+    rp.sun_glare = False
+    assert "--no-sun-glare" in tsr.build_render_command(rp)
+
+
 def test_validate_render_form_checks_cameras_and_fov():
     tsr.validate_render_form(tsr.RenderFormValues(camera_modes=("auto", "earth_chase"), camera_fov=25.0))
     for bad, match in (((), "camera"), (("nope",), "camera_modes"), (("auto", "auto"), "twice")):

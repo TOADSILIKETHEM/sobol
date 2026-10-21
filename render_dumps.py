@@ -11,7 +11,7 @@ sobol_NNNNN next to a minimal sobol.setup, so the readers see a normal run.
         [--encounter hyperbola|ephemeris]
         [--paths instance_grains composite] [--samples 124] [--fps 24]
         [--resolution 1920x1080] [--max-frames N] [--video [--video-fps N]]
-        [--camera-mode auto|grain_only|earth_fixed|earth_chase ...] [--camera-fov DEG] [--envelope-method hull|sdf] [--out-root DIR]
+        [--camera-mode auto|grain_only|earth_fixed|earth_chase ...] [--camera-fov DEG] [--no-sun-glare] [--envelope-method hull|sdf] [--out-root DIR]
 
 Outputs: <out-root>/<name>/<run>_viz_instance/, <run>_render_<path>/ (<run> =
 the run dir's name if it is run_NNNN, else run_0001). Staged dumps go in
@@ -205,6 +205,8 @@ def _parse(argv):
     p.add_argument("--slowmo", type=int, default=1,
                    help="instance paths: N frames per dump, in-betweens interpolated (own _slowmoN folder)")
     p.add_argument("--resume", action="store_true", help="keep frames already rendered, render the rest")
+    p.add_argument("--no-sun-glare", dest="sun_glare", action="store_false",
+                   help="skip the Sun bloom, starburst and ghosts (on by default)")
     p.add_argument("--queue", action="store_true",
                    help="preprocess only; queue the renders in <out-root>/_render_queue/ for another "
                         "machine (Code/render_queue.py)")
@@ -229,7 +231,7 @@ def main(argv=None) -> int:
                               max_frames=a.max_frames, encode_video=a.video, paths=tuple(a.paths),
                               slowmo=a.slowmo, resume=a.resume, camera_modes=tuple(a.camera_mode),
                               video_fps=a.video_fps, envelope_method=a.envelope_method,
-                              camera_fov=a.camera_fov)
+                              camera_fov=a.camera_fov, sun_glare=a.sun_glare)
     try:
         t.validate_render_form(form)
     except ValueError as exc:

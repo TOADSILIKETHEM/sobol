@@ -41,6 +41,11 @@ def test_parse_args_encode_video_with_explicit_fps(tmp_path):
     assert args.video_fps == 60
 
 
+def test_parse_args_sun_glare_on_unless_ticked_off(tmp_path):
+    assert _parse_with_argv(tmp_path, []).sun_glare is True
+    assert _parse_with_argv(tmp_path, ["--no-sun-glare"]).sun_glare is False
+
+
 def test_encode_video_requires_bpy():
     assert dhr.bpy is None
     with pytest.raises(RuntimeError, match="bpy"):
@@ -105,7 +110,7 @@ def test_render_prepared_scene_encodes_when_asked(tmp_path, monkeypatch):
     # the encode flag must not hide the module's encode_video() (it was a bool called as a function)
     from types import SimpleNamespace as NS
     for name in ("require_camera", "setup_cycles_gpu", "apply_gpu_denoise", "apply_render_speedups",
-                 "cap_image_textures", "apply_resume"):
+                 "cap_image_textures", "apply_resume", "apply_sun_glare"):
         monkeypatch.setattr(dhr, name, lambda *a, **k: None)
     monkeypatch.setattr(dhr, "render_banner", lambda *a, **k: "")
     monkeypatch.setattr(dhr, "bpy", NS(ops=NS(render=NS(render=lambda **k: None)), data=NS(images=[])),

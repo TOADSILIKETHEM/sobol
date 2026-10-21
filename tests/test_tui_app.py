@@ -232,6 +232,20 @@ def test_render_settings_several_cameras_and_fov():
     assert "camera" in errs[0] and "camera_fov" in errs[1]
 
 
+@needs_t
+def test_render_settings_sun_glare_ticked_by_default():
+    async def scenario():
+        app = _RenderHost()
+        async with app.run_test(size=(200, 60)) as pilot:
+            s = app.query_one(tr_render.RenderSettings)
+            default = s.read()
+            app.query_one("#r-sun-glare", Checkbox).value = False
+            await pilot.pause()
+            return default, s.read()
+    default, off = asyncio.run(scenario())
+    assert default.sun_glare is True and off.sun_glare is False
+
+
 import jobstore as js
 import tui
 from textual.widgets import Static  # noqa: F401  (used by later tests in this file)

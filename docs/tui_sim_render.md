@@ -67,6 +67,7 @@ Parent: `../CLAUDE.md`. Shared facts: `../docs/SHARED_FACTS.md`. Merge/rename ca
   - `encode_video` checkbox (off by default) + `video_fps` (blank = same as `fps`) — optional final MP4-encode stage, applied per ticked render path.
   - `slowmo` (default 1) — instance paths only: N frames per dump over the same sim time (in-betweens interpolated on the grains' Bezier curves, not simulated). Renders (n−1)·N+1 frames into its own `run_0001_render_<path>_slowmoN/`; composite in the same run stays 1:1. Refused with no instance path ticked, and with `compare` (frame counts differ). Keep `video_fps` at 24 (Max's standard): slowmo N gives an N× longer video, not a smoother clip of the same length. `validate_render_form()` holds these rules for the TUI, `run_pipeline` and `render_dumps.py`.
   - `resume` checkbox — keep `frame_*.png` already in the output folder and render only the missing ones (carry on a stopped render; `DEMHeadlessRender.py --resume`).
+  - `sun_glare` checkbox (ticked by default) — Sun bloom, starburst and lens ghosts when the Sun is in view; untick for `DEMHeadlessRender.py --no-sun-glare`. Same output folder either way.
   - Render fields are validated when you click, before the sim starts.
 - **Render paths:**
   - Three checkboxes, any combination: `composite`, `instance_grains` (ticked by default since 2026-09-29, so a default launch takes the dump route with no convert), `instance_static`. The GUI hero script `DEMGrainsBlenderEarthCam.py` is not a TUI path.

@@ -232,4 +232,6 @@ def render_dumps_argv(run_dir: Path, form, *, name: Optional[str] = None, prefix
         argv += ["--envelope-method", form.envelope_method]
     if form.resume:
         argv.append("--resume")
+    if not form.sun_glare:
+        argv.append("--no-sun-glare")
     return argv
